@@ -5,9 +5,7 @@ Built for single-owner (1/1) Safes with a focus on simplicity, safety, and devel
 
 ## Philosophy
 
-**Opinionated by design.** safe-rs optimizes for the common case: single-owner Safes where you want to execute transactions with confidence. Rather than supporting every Safe configuration, it provides a streamlined experience with compile-time guarantees and mandatory simulation.
-
-**Simulation-first.** Every transaction must be simulated before execution. This is enforced at compile time through Rust's type system—you literally cannot call `execute()` without first calling `simulate()`.
+**Opinionated by design.** safe-rs optimizes for an opinionated usecase: single-owner Safes where you want to execute transactions with confidence. Rather than supporting every Safe configuration, it provides a streamlined experience with compile-time guarantees and optional forking simulation.
 
 **Minimal surface area.** One way to do things, done well. No configuration sprawl, no optional safety features that can be accidentally disabled.
 
