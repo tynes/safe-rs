@@ -54,7 +54,7 @@ pub mod types;
 
 // Re-export main types at crate root
 pub use chain::{ChainAddresses, ChainConfig};
-pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe};
+pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
 pub use encoding::SafeTxParams;
 pub use error::{Error, Result};
 pub use safe::{ExecutionResult, MulticallBuilder, NotSimulated, Safe, Simulated};

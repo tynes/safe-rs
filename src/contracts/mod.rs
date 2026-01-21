@@ -107,6 +107,38 @@ sol! {
         event Transfer(address indexed from, address indexed to, uint256 value);
         event Approval(address indexed owner, address indexed spender, uint256 value);
     }
+
+    /// SafeProxyFactory interface for deploying new Safe proxies
+    #[sol(rpc)]
+    interface ISafeProxyFactory {
+        /// Deploys a new Safe proxy with a deterministic address
+        function createProxyWithNonce(
+            address _singleton,
+            bytes memory initializer,
+            uint256 saltNonce
+        ) external returns (address proxy);
+
+        /// Returns the creation bytecode for Safe proxies
+        function proxyCreationCode() external pure returns (bytes memory);
+
+        event ProxyCreation(address indexed proxy, address singleton);
+    }
+
+    /// Safe setup interface for initialization
+    #[sol(rpc)]
+    interface ISafeSetup {
+        /// Initializes a new Safe with owners and threshold
+        function setup(
+            address[] calldata _owners,
+            uint256 _threshold,
+            address to,
+            bytes calldata data,
+            address fallbackHandler,
+            address paymentToken,
+            uint256 payment,
+            address payable paymentReceiver
+        ) external;
+    }
 }
 
 /// EIP-712 type hash for SafeTx struct

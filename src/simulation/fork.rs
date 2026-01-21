@@ -141,6 +141,7 @@ where
             .with_db(db)
             .modify_cfg_chained(|cfg| {
                 cfg.spec = SpecId::CANCUN;
+                cfg.chain_id = self.chain_id;
             })
             .modify_block_chained(|block| {
                 block.basefee = 0;

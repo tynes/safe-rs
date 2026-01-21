@@ -287,18 +287,139 @@ where
         self
     }
 
+    /// Executes the multicall transaction without prior simulation.
+    ///
+    /// This bypasses the simulation step and sends the transaction directly.
+    /// Gas is estimated via `eth_estimateGas` RPC call unless manually set
+    /// via `with_safe_tx_gas()`.
+    ///
+    /// # Warning
+    /// Without simulation, there's no guarantee the transaction will succeed.
+    /// Use this only when you're confident the transaction is valid or when
+    /// simulation is not possible/desired.
+    pub async fn execute_without_simulation(self) -> Result<ExecutionResult> {
+        if self.calls.is_empty() {
+            return Err(Error::NoCalls);
+        }
+
+        let (to, value, data, operation) = self.build_call_params()?;
+
+        // Get nonce
+        let nonce = self.safe.nonce().await?;
+
+        // Use provided safe_tx_gas or estimate via RPC
+        let safe_tx_gas = match self.safe_tx_gas {
+            Some(gas) => gas,
+            None => {
+                // Estimate gas for the inner call from the Safe's perspective
+                use alloy::network::TransactionBuilder;
+                let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
+                    .with_from(self.safe.address)
+                    .with_to(to)
+                    .with_value(value)
+                    .with_input(data.clone());
+
+                let estimated = self
+                    .safe
+                    .provider
+                    .estimate_gas(tx_request)
+                    .await
+                    .map_err(|e| Error::Provider(format!("gas estimation failed: {}", e)))?;
+
+                // Add 10% buffer
+                U256::from(estimated + estimated / 10)
+            }
+        };
+
+        // Build SafeTxParams
+        let params = SafeTxParams {
+            to,
+            value,
+            data: data.clone(),
+            operation,
+            safe_tx_gas,
+            base_gas: U256::ZERO,
+            gas_price: U256::ZERO,
+            gas_token: Address::ZERO,
+            refund_receiver: Address::ZERO,
+            nonce,
+        };
+
+        // Compute transaction hash
+        let tx_hash = compute_safe_transaction_hash(
+            self.safe.config.chain_id,
+            self.safe.address,
+            &params,
+        );
+
+        // Sign the hash
+        let signature = sign_hash(&self.safe.signer, tx_hash).await?;
+
+        // Build the execTransaction call
+        let exec_call = ISafe::execTransactionCall {
+            to: params.to,
+            value: params.value,
+            data: params.data,
+            operation: params.operation.as_u8(),
+            safeTxGas: params.safe_tx_gas,
+            baseGas: params.base_gas,
+            gasPrice: params.gas_price,
+            gasToken: params.gas_token,
+            refundReceiver: params.refund_receiver,
+            signatures: signature,
+        };
+
+        // Execute the transaction through the provider
+        let safe_contract = ISafe::new(self.safe.address, &self.safe.provider);
+
+        let builder = safe_contract.execTransaction(
+            exec_call.to,
+            exec_call.value,
+            exec_call.data,
+            exec_call.operation,
+            exec_call.safeTxGas,
+            exec_call.baseGas,
+            exec_call.gasPrice,
+            exec_call.gasToken,
+            exec_call.refundReceiver,
+            exec_call.signatures,
+        );
+
+        let pending_tx = builder
+            .send()
+            .await
+            .map_err(|e| Error::ExecutionFailed {
+                reason: e.to_string(),
+            })?;
+
+        let receipt = pending_tx
+            .get_receipt()
+            .await
+            .map_err(|e| Error::ExecutionFailed {
+                reason: e.to_string(),
+            })?;
+
+        // Check if Safe execution succeeded
+        let success = receipt.status();
+
+        Ok(ExecutionResult {
+            tx_hash: receipt.transaction_hash,
+            success,
+        })
+    }
+
     /// Simulates the multicall and transitions to Simulated state
     pub async fn simulate(self) -> Result<MulticallBuilder<'a, P, Simulated>> {
         if self.calls.is_empty() {
             return Err(Error::NoCalls);
         }
 
-        let (to, data, operation) = self.build_call_params()?;
+        let (to, value, data, operation) = self.build_call_params()?;
 
         let simulator = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id);
 
         let result = simulator
-            .simulate_call(self.safe.address, to, U256::ZERO, data, operation)
+            .simulate_call(self.safe.address, to, value, data, operation)
             .await?;
 
         if !result.success {
@@ -320,11 +441,11 @@ where
         })
     }
 
-    fn build_call_params(&self) -> Result<(Address, Bytes, Operation)> {
+    fn build_call_params(&self) -> Result<(Address, U256, Bytes, Operation)> {
         if self.calls.len() == 1 {
             // Single call - execute directly
             let call = &self.calls[0];
-            Ok((call.to, call.data.clone(), Operation::Call))
+            Ok((call.to, call.value, call.data.clone(), Operation::Call))
         } else {
             // Multiple calls - use MultiSend
             let multisend_data = encode_multisend_data(&self.calls);
@@ -347,7 +468,8 @@ where
                 )
             };
 
-            Ok((multisend_address, calldata, Operation::DelegateCall))
+            // MultiSend is called with zero value; individual call values are encoded in the data
+            Ok((multisend_address, U256::ZERO, calldata, Operation::DelegateCall))
         }
     }
 }
@@ -376,7 +498,7 @@ where
     /// Note: This method requires the provider to support signing and sending transactions.
     /// For simulation-only use cases, use `simulate()` without calling `execute()`.
     pub async fn execute(self) -> Result<ExecutionResult> {
-        let (to, data, operation) = self.build_call_params()?;
+        let (to, value, data, operation) = self.build_call_params()?;
 
         // Get nonce
         let nonce = self.safe.nonce().await?;
@@ -394,7 +516,7 @@ where
         // Build SafeTxParams
         let params = SafeTxParams {
             to,
-            value: U256::ZERO,
+            value,
             data: data.clone(),
             operation,
             safe_tx_gas,
@@ -469,10 +591,10 @@ where
         })
     }
 
-    fn build_call_params(&self) -> Result<(Address, Bytes, Operation)> {
+    fn build_call_params(&self) -> Result<(Address, U256, Bytes, Operation)> {
         if self.calls.len() == 1 {
             let call = &self.calls[0];
-            Ok((call.to, call.data.clone(), Operation::Call))
+            Ok((call.to, call.value, call.data.clone(), Operation::Call))
         } else {
             let multisend_data = encode_multisend_data(&self.calls);
 
@@ -494,7 +616,8 @@ where
                 )
             };
 
-            Ok((multisend_address, calldata, Operation::DelegateCall))
+            // MultiSend is called with zero value; individual call values are encoded in the data
+            Ok((multisend_address, U256::ZERO, calldata, Operation::DelegateCall))
         }
     }
 }
