@@ -46,6 +46,7 @@
 pub mod chain;
 pub mod contracts;
 pub mod encoding;
+pub mod eoa;
 pub mod error;
 pub mod safe;
 pub mod signing;
@@ -56,6 +57,7 @@ pub mod types;
 pub use chain::{ChainAddresses, ChainConfig};
 pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
 pub use encoding::SafeTxParams;
+pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
 pub use safe::{ExecutionResult, MulticallBuilder, NotSimulated, Safe, Simulated};
 pub use simulation::{ForkSimulator, SimulationResult};

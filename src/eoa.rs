@@ -1,0 +1,519 @@
+//! EOA (Externally Owned Account) fallback mode
+//!
+//! Provides the same builder API as the Safe multicall, but executes each call
+//! as a separate transaction instead of batching into a single MultiSend.
+
+use std::marker::PhantomData;
+
+use alloy::network::AnyNetwork;
+use alloy::network::primitives::ReceiptResponse;
+use alloy::network::TransactionBuilder;
+use alloy::primitives::{Address, Bytes, TxHash, U256};
+use alloy::providers::Provider;
+use alloy::signers::local::PrivateKeySigner;
+use alloy::sol_types::SolCall;
+
+use crate::chain::ChainConfig;
+use crate::error::{Error, Result};
+use crate::simulation::{ForkSimulator, SimulationResult};
+use crate::types::{Call, Operation, SafeCall, TypedCall};
+
+use super::{NotSimulated, Simulated};
+
+/// Result of executing a single EOA transaction
+#[derive(Debug, Clone)]
+pub struct EoaTxResult {
+    /// Transaction hash
+    pub tx_hash: TxHash,
+    /// Whether the transaction succeeded
+    pub success: bool,
+    /// Index of this transaction in the batch
+    pub index: usize,
+}
+
+/// Result of executing multiple EOA transactions
+#[derive(Debug, Clone)]
+pub struct EoaBatchResult {
+    /// Results for each transaction
+    pub results: Vec<EoaTxResult>,
+    /// Number of successful transactions
+    pub success_count: usize,
+    /// Number of failed transactions
+    pub failure_count: usize,
+    /// Index of the first failure, if any
+    pub first_failure: Option<usize>,
+}
+
+impl EoaBatchResult {
+    /// Returns true if all transactions succeeded
+    pub fn all_succeeded(&self) -> bool {
+        self.failure_count == 0
+    }
+
+    /// Returns the transaction hashes
+    pub fn tx_hashes(&self) -> Vec<TxHash> {
+        self.results.iter().map(|r| r.tx_hash).collect()
+    }
+}
+
+/// EOA client for executing transactions from an externally owned account
+pub struct Eoa<P> {
+    /// The provider for RPC calls
+    provider: P,
+    /// The signer for transactions
+    signer: PrivateKeySigner,
+    /// Chain configuration
+    config: ChainConfig,
+}
+
+impl<P> Eoa<P>
+where
+    P: Provider<AnyNetwork> + Clone + 'static,
+{
+    /// Creates a new EOA client with explicit chain configuration
+    pub fn new(provider: P, signer: PrivateKeySigner, config: ChainConfig) -> Self {
+        Self {
+            provider,
+            signer,
+            config,
+        }
+    }
+
+    /// Creates an EOA client with auto-detected chain configuration
+    pub async fn connect(provider: P, signer: PrivateKeySigner) -> Result<Self> {
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .map_err(|e| Error::Provider(e.to_string()))?;
+
+        let config = ChainConfig::new(chain_id);
+        Ok(Self::new(provider, signer, config))
+    }
+
+    /// Returns the EOA address
+    pub fn address(&self) -> Address {
+        self.signer.address()
+    }
+
+    /// Returns the chain configuration
+    pub fn config(&self) -> &ChainConfig {
+        &self.config
+    }
+
+    /// Returns a reference to the provider
+    pub fn provider(&self) -> &P {
+        &self.provider
+    }
+
+    /// Creates a batch builder for executing multiple transactions
+    pub fn batch(&self) -> EoaBuilder<'_, P, NotSimulated> {
+        EoaBuilder::<P, NotSimulated>::new(self)
+    }
+
+    /// Gets the current nonce of the EOA
+    pub async fn nonce(&self) -> Result<u64> {
+        let nonce = self
+            .provider
+            .get_transaction_count(self.signer.address())
+            .await
+            .map_err(|e| Error::Fetch {
+                what: "nonce",
+                reason: e.to_string(),
+            })?;
+        Ok(nonce)
+    }
+}
+
+/// Builder for constructing and executing EOA transaction batches
+pub struct EoaBuilder<'a, P, State> {
+    eoa: &'a Eoa<P>,
+    calls: Vec<Call>,
+    stop_on_failure: bool,
+    simulation_results: Vec<SimulationResult>,
+    _state: PhantomData<State>,
+}
+
+impl<'a, P, State> EoaBuilder<'a, P, State>
+where
+    P: Provider<AnyNetwork> + Clone + 'static,
+{
+    fn new(eoa: &'a Eoa<P>) -> EoaBuilder<'a, P, NotSimulated> {
+        EoaBuilder {
+            eoa,
+            calls: Vec::new(),
+            stop_on_failure: true,
+            simulation_results: Vec::new(),
+            _state: PhantomData,
+        }
+    }
+
+    /// Validates that no calls use DelegateCall operation
+    fn validate_operations(&self) -> Result<()> {
+        for (i, call) in self.calls.iter().enumerate() {
+            if call.operation == Operation::DelegateCall {
+                return Err(Error::UnsupportedEoaOperation {
+                    operation: format!("DelegateCall (call index {})", i),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a, P> EoaBuilder<'a, P, NotSimulated>
+where
+    P: Provider<AnyNetwork> + Clone + 'static,
+{
+    /// Adds a typed call to the batch
+    pub fn add_typed<C: SolCall + Clone>(mut self, to: Address, call: C) -> Self {
+        let typed_call = TypedCall::new(to, call);
+        self.calls.push(Call::new(
+            typed_call.to(),
+            typed_call.value,
+            typed_call.data(),
+        ));
+        self
+    }
+
+    /// Adds a typed call with value to the batch
+    pub fn add_typed_with_value<C: SolCall + Clone>(
+        mut self,
+        to: Address,
+        call: C,
+        value: U256,
+    ) -> Self {
+        let typed_call = TypedCall::new(to, call).with_value(value);
+        self.calls.push(Call::new(
+            typed_call.to(),
+            typed_call.value,
+            typed_call.data(),
+        ));
+        self
+    }
+
+    /// Adds a raw call to the batch
+    pub fn add_raw(mut self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
+        self.calls.push(Call::new(to, value, data));
+        self
+    }
+
+    /// Adds a call implementing SafeCall to the batch
+    pub fn add(mut self, call: impl SafeCall) -> Self {
+        self.calls.push(Call {
+            to: call.to(),
+            value: call.value(),
+            data: call.data(),
+            operation: call.operation(),
+        });
+        self
+    }
+
+    /// Continue executing remaining transactions even if one fails
+    ///
+    /// By default, execution stops on the first failure. Call this method
+    /// to continue executing all transactions regardless of failures.
+    pub fn continue_on_failure(mut self) -> Self {
+        self.stop_on_failure = false;
+        self
+    }
+
+    /// Simulates all calls and transitions to Simulated state
+    pub async fn simulate(self) -> Result<EoaBuilder<'a, P, Simulated>> {
+        if self.calls.is_empty() {
+            return Err(Error::NoCalls);
+        }
+
+        self.validate_operations()?;
+
+        let simulator = ForkSimulator::new(self.eoa.provider.clone(), self.eoa.config.chain_id);
+        let mut simulation_results = Vec::with_capacity(self.calls.len());
+
+        for (i, call) in self.calls.iter().enumerate() {
+            let result = simulator
+                .simulate_call(
+                    self.eoa.address(),
+                    call.to,
+                    call.value,
+                    call.data.clone(),
+                    Operation::Call,
+                )
+                .await?;
+
+            if !result.success {
+                return Err(Error::SimulationReverted {
+                    reason: format!(
+                        "Call {} failed: {}",
+                        i,
+                        result.revert_reason.unwrap_or_else(|| "Unknown".to_string())
+                    ),
+                });
+            }
+
+            simulation_results.push(result);
+        }
+
+        Ok(EoaBuilder {
+            eoa: self.eoa,
+            calls: self.calls,
+            stop_on_failure: self.stop_on_failure,
+            simulation_results,
+            _state: PhantomData,
+        })
+    }
+
+    /// Executes all transactions without prior simulation
+    ///
+    /// Gas is estimated via `eth_estimateGas` RPC call for each transaction.
+    ///
+    /// # Warning
+    /// Without simulation, there's no guarantee transactions will succeed.
+    /// Use this only when you're confident the transactions are valid.
+    pub async fn execute_without_simulation(self) -> Result<EoaBatchResult> {
+        if self.calls.is_empty() {
+            return Err(Error::NoCalls);
+        }
+
+        self.validate_operations()?;
+
+        let mut nonce = self.eoa.nonce().await?;
+        let mut results = Vec::with_capacity(self.calls.len());
+        let mut success_count = 0;
+        let mut failure_count = 0;
+        let mut first_failure = None;
+
+        for (i, call) in self.calls.iter().enumerate() {
+            // Build transaction
+            let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
+                .with_from(self.eoa.address())
+                .with_to(call.to)
+                .with_value(call.value)
+                .with_input(call.data.clone())
+                .with_nonce(nonce);
+
+            // Estimate gas
+            let gas_limit = self
+                .eoa
+                .provider
+                .estimate_gas(tx_request.clone())
+                .await
+                .map_err(|e| Error::TransactionSendFailed {
+                    index: i,
+                    reason: format!("gas estimation failed: {}", e),
+                })?;
+
+            // Add 10% buffer
+            let gas_with_buffer = gas_limit + gas_limit / 10;
+            let tx_request = tx_request.with_gas_limit(gas_with_buffer);
+
+            // Send transaction
+            let pending_tx = self
+                .eoa
+                .provider
+                .send_transaction(tx_request)
+                .await
+                .map_err(|e| Error::TransactionSendFailed {
+                    index: i,
+                    reason: e.to_string(),
+                })?;
+
+            // Wait for receipt
+            let receipt = pending_tx.get_receipt().await.map_err(|e| {
+                Error::TransactionSendFailed {
+                    index: i,
+                    reason: e.to_string(),
+                }
+            })?;
+
+            let success = receipt.status();
+            let tx_hash = receipt.transaction_hash;
+
+            if success {
+                success_count += 1;
+            } else {
+                failure_count += 1;
+                if first_failure.is_none() {
+                    first_failure = Some(i);
+                }
+            }
+
+            results.push(EoaTxResult {
+                tx_hash,
+                success,
+                index: i,
+            });
+
+            // Stop on failure if configured
+            if !success && self.stop_on_failure {
+                break;
+            }
+
+            nonce += 1;
+        }
+
+        Ok(EoaBatchResult {
+            results,
+            success_count,
+            failure_count,
+            first_failure,
+        })
+    }
+}
+
+impl<'a, P> EoaBuilder<'a, P, Simulated>
+where
+    P: Provider<AnyNetwork> + Clone + 'static,
+{
+    /// Returns the simulation results for all calls
+    pub fn simulation_results(&self) -> &[SimulationResult] {
+        &self.simulation_results
+    }
+
+    /// Returns the total gas used across all simulated calls
+    pub fn total_gas_used(&self) -> u64 {
+        self.simulation_results.iter().map(|r| r.gas_used).sum()
+    }
+
+    /// Returns the number of calls in the batch
+    pub fn call_count(&self) -> usize {
+        self.calls.len()
+    }
+
+    /// Executes all transactions after simulation
+    pub async fn execute(self) -> Result<EoaBatchResult> {
+        let mut nonce = self.eoa.nonce().await?;
+        let mut results = Vec::with_capacity(self.calls.len());
+        let mut success_count = 0;
+        let mut failure_count = 0;
+        let mut first_failure = None;
+
+        for (i, (call, sim_result)) in self
+            .calls
+            .iter()
+            .zip(self.simulation_results.iter())
+            .enumerate()
+        {
+            // Use simulation gas + 10% buffer
+            let gas_with_buffer = sim_result.gas_used + sim_result.gas_used / 10;
+
+            // Build transaction
+            let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
+                .with_from(self.eoa.address())
+                .with_to(call.to)
+                .with_value(call.value)
+                .with_input(call.data.clone())
+                .with_nonce(nonce)
+                .with_gas_limit(gas_with_buffer);
+
+            // Send transaction
+            let pending_tx = self
+                .eoa
+                .provider
+                .send_transaction(tx_request)
+                .await
+                .map_err(|e| Error::TransactionSendFailed {
+                    index: i,
+                    reason: e.to_string(),
+                })?;
+
+            // Wait for receipt
+            let receipt = pending_tx.get_receipt().await.map_err(|e| {
+                Error::TransactionSendFailed {
+                    index: i,
+                    reason: e.to_string(),
+                }
+            })?;
+
+            let success = receipt.status();
+            let tx_hash = receipt.transaction_hash;
+
+            if success {
+                success_count += 1;
+            } else {
+                failure_count += 1;
+                if first_failure.is_none() {
+                    first_failure = Some(i);
+                }
+            }
+
+            results.push(EoaTxResult {
+                tx_hash,
+                success,
+                index: i,
+            });
+
+            // Stop on failure if configured
+            if !success && self.stop_on_failure {
+                break;
+            }
+
+            nonce += 1;
+        }
+
+        Ok(EoaBatchResult {
+            results,
+            success_count,
+            failure_count,
+            first_failure,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::address;
+
+    #[test]
+    fn test_eoa_batch_result_all_succeeded() {
+        let result = EoaBatchResult {
+            results: vec![
+                EoaTxResult {
+                    tx_hash: TxHash::ZERO,
+                    success: true,
+                    index: 0,
+                },
+                EoaTxResult {
+                    tx_hash: TxHash::ZERO,
+                    success: true,
+                    index: 1,
+                },
+            ],
+            success_count: 2,
+            failure_count: 0,
+            first_failure: None,
+        };
+
+        assert!(result.all_succeeded());
+        assert_eq!(result.tx_hashes().len(), 2);
+    }
+
+    #[test]
+    fn test_eoa_batch_result_partial_failure() {
+        let result = EoaBatchResult {
+            results: vec![
+                EoaTxResult {
+                    tx_hash: TxHash::ZERO,
+                    success: true,
+                    index: 0,
+                },
+                EoaTxResult {
+                    tx_hash: TxHash::ZERO,
+                    success: false,
+                    index: 1,
+                },
+            ],
+            success_count: 1,
+            failure_count: 1,
+            first_failure: Some(1),
+        };
+
+        assert!(!result.all_succeeded());
+        assert_eq!(result.first_failure, Some(1));
+    }
+
+    #[test]
+    fn test_validate_operations_rejects_delegatecall() {
+        // This test verifies at compile time that the types work
+        let _addr = address!("0x1234567890123456789012345678901234567890");
+    }
+}

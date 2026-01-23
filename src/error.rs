@@ -84,6 +84,14 @@ pub enum Error {
     /// Revm execution error
     #[error("Revm execution error: {0}")]
     Revm(String),
+
+    /// Transaction send failed
+    #[error("Failed to send transaction {index}: {reason}")]
+    TransactionSendFailed { index: usize, reason: String },
+
+    /// EOA operation not supported (e.g., DelegateCall)
+    #[error("EOA does not support {operation} operation")]
+    UnsupportedEoaOperation { operation: String },
 }
 
 impl From<alloy::transports::RpcError<alloy::transports::TransportErrorKind>> for Error {

@@ -19,6 +19,7 @@ Built for single-owner (1/1) Safes with a focus on simplicity, safety, and devel
 - **Deterministic deployment** — Deploy new Safes with predictable addresses via CREATE2
 - **Gas estimation** — Automatic safeTxGas calculation with safety buffer
 - **Revert decoding** — Human-readable error messages from failed simulations
+- **EOA fallback mode** — Same builder API for executing as individual transactions from an EOA
 
 ## Installation
 
@@ -261,6 +262,54 @@ println!("Would use {} gas", result.gas_used());
 let nonce = safe.nonce().await?;
 let threshold = safe.threshold().await?;
 let owners = safe.owners().await?;
+```
+
+### EOA Fallback Mode
+
+The `Eoa` client provides the same builder API as Safe multicall, but executes each call as a separate transaction. This is useful when you don't have a Safe but want the same batching workflow:
+
+```rust
+use safe_rs::Eoa;
+
+let eoa = Eoa::connect(provider, signer).await?;
+
+let result = eoa.batch()
+    .add_typed(token, IERC20::transferCall { to: alice, amount: U256::from(100) })
+    .add_typed(token, IERC20::transferCall { to: bob, amount: U256::from(200) })
+    .simulate().await?
+    .execute().await?;
+
+println!("Executed {} txs, {} succeeded", result.results.len(), result.success_count);
+
+for tx in &result.results {
+    println!("Tx {}: {:?}", tx.index, tx.tx_hash);
+}
+```
+
+**Key differences from Safe mode:**
+
+| Aspect | Safe Mode | EOA Mode |
+|--------|-----------|----------|
+| Execution | Single atomic tx via MultiSend | Multiple independent txs |
+| Failure | All-or-nothing | Can partially succeed |
+| Result | Single `TxHash` | `Vec<TxHash>` |
+| DelegateCall | Supported | Not supported |
+
+**Partial failure handling:**
+
+By default, EOA batch execution stops on the first failure. Use `continue_on_failure()` to execute all transactions regardless:
+
+```rust
+let result = eoa.batch()
+    .add_typed(token, transfer1)
+    .add_typed(token, transfer2)
+    .continue_on_failure()  // Don't stop on first failure
+    .simulate().await?
+    .execute().await?;
+
+if let Some(idx) = result.first_failure {
+    println!("First failure at index {}", idx);
+}
 ```
 
 ## Bundle Format
