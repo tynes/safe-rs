@@ -11,7 +11,7 @@ Built for single-owner (1/1) Safes with a focus on simplicity, safety, and devel
 
 ## Features
 
-- **Type-state builder pattern** — Compile-time enforcement that simulation precedes execution
+- **Fluent builder pattern** — Simple API with optional simulation before execution
 - **Fork simulation** — Test transactions against live blockchain state using revm
 - **Automatic multicall batching** — Single calls execute directly; multiple calls batch via MultiSend
 - **Type-safe contract calls** — First-class support for alloy's `sol!` macro
@@ -186,9 +186,7 @@ safe.verify_single_owner().await?;
 
 ### Building Transactions
 
-The `MulticallBuilder` uses a type-state pattern with two states:
-- `NotSimulated` — Can add calls, cannot execute
-- `Simulated` — Can execute, cannot add more calls
+The `MulticallBuilder` provides a fluent API for constructing transactions:
 
 ```rust
 // Raw call
@@ -216,15 +214,18 @@ let builder = safe.multicall()
 Simulation runs the transaction against a fork of the current blockchain state:
 
 ```rust
-let simulated = builder.simulate().await?;
+let builder = builder.simulate().await?;
 
-println!("Success: {}", simulated.success());
-println!("Gas used: {}", simulated.gas_used());
-println!("Logs: {:?}", simulated.logs());
+// Access simulation result
+if let Some(result) = builder.simulation_result() {
+    println!("Success: {}", result.success);
+    println!("Gas used: {}", result.gas_used);
+    println!("Logs: {:?}", result.logs);
 
-// If simulation failed
-if !simulated.success() {
-    println!("Revert reason: {:?}", simulated.revert_reason());
+    // If simulation failed
+    if let Some(reason) = &result.revert_reason {
+        println!("Revert reason: {}", reason);
+    }
 }
 ```
 
@@ -248,12 +249,14 @@ use alloy::signers::local::PrivateKeySigner;
 let dummy = PrivateKeySigner::random();
 let safe = Safe::new(provider, dummy, safe_address, config);
 
-let result = safe.multicall()
+let builder = safe.multicall()
     .add_typed(token, call)
     .simulate().await?;
 
 // Inspect results without executing
-println!("Would use {} gas", result.gas_used());
+if let Some(result) = builder.simulation_result() {
+    println!("Would use {} gas", result.gas_used);
+}
 ```
 
 ### Querying Safe State

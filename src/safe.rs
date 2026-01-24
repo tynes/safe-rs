@@ -1,7 +1,5 @@
 //! Safe client and MulticallBuilder implementation
 
-use std::marker::PhantomData;
-
 use alloy::network::AnyNetwork;
 use alloy::network::primitives::ReceiptResponse;
 use alloy::primitives::{Address, Bytes, TxHash, U256};
@@ -16,14 +14,6 @@ use crate::error::{Error, Result};
 use crate::signing::sign_hash;
 use crate::simulation::{ForkSimulator, SimulationResult};
 use crate::types::{Call, Operation, SafeCall, TypedCall};
-
-/// Type state marker: calls have not been simulated yet
-#[derive(Debug, Clone, Copy)]
-pub struct NotSimulated;
-
-/// Type state marker: calls have been simulated successfully
-#[derive(Debug, Clone, Copy)]
-pub struct Simulated;
 
 /// Result of executing a Safe transaction
 #[derive(Debug, Clone)]
@@ -171,8 +161,8 @@ where
     }
 
     /// Creates a multicall builder
-    pub fn multicall(&self) -> MulticallBuilder<'_, P, NotSimulated> {
-        MulticallBuilder::<P, NotSimulated>::new(self)
+    pub fn multicall(&self) -> MulticallBuilder<'_, P> {
+        MulticallBuilder::new(self)
     }
 
     /// Executes a single call through the Safe
@@ -194,21 +184,20 @@ where
 }
 
 /// Builder for constructing multicall transactions
-pub struct MulticallBuilder<'a, P, State> {
+pub struct MulticallBuilder<'a, P> {
     safe: &'a Safe<P>,
     calls: Vec<Call>,
     use_call_only: bool,
     safe_tx_gas: Option<U256>,
     operation: Operation,
     simulation_result: Option<SimulationResult>,
-    _state: PhantomData<State>,
 }
 
-impl<'a, P, State> MulticallBuilder<'a, P, State>
+impl<'a, P> MulticallBuilder<'a, P>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
 {
-    fn new(safe: &'a Safe<P>) -> MulticallBuilder<'a, P, NotSimulated> {
+    fn new(safe: &'a Safe<P>) -> Self {
         MulticallBuilder {
             safe,
             calls: Vec::new(),
@@ -216,15 +205,8 @@ where
             safe_tx_gas: None,
             operation: Operation::DelegateCall, // MultiSend is called via delegatecall
             simulation_result: None,
-            _state: PhantomData,
         }
     }
-}
-
-impl<'a, P> MulticallBuilder<'a, P, NotSimulated>
-where
-    P: Provider<AnyNetwork> + Clone + 'static,
-{
     /// Adds a typed call to the batch
     pub fn add_typed<C: SolCall + Clone>(mut self, to: Address, call: C) -> Self {
         let typed_call = TypedCall::new(to, call);
@@ -287,17 +269,46 @@ where
         self
     }
 
-    /// Executes the multicall transaction without prior simulation.
+    /// Simulates the multicall and stores the result
     ///
-    /// This bypasses the simulation step and sends the transaction directly.
-    /// Gas is estimated via `eth_estimateGas` RPC call unless manually set
-    /// via `with_safe_tx_gas()`.
+    /// After simulation, you can inspect the results via `simulation_result()`
+    /// and then call `execute()` which will use the simulation gas.
+    pub async fn simulate(mut self) -> Result<Self> {
+        if self.calls.is_empty() {
+            return Err(Error::NoCalls);
+        }
+
+        let (to, value, data, operation) = self.build_call_params()?;
+
+        let simulator = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id);
+
+        let result = simulator
+            .simulate_call(self.safe.address, to, value, data, operation)
+            .await?;
+
+        if !result.success {
+            return Err(Error::SimulationReverted {
+                reason: result
+                    .revert_reason
+                    .unwrap_or_else(|| "Unknown".to_string()),
+            });
+        }
+
+        self.simulation_result = Some(result);
+        Ok(self)
+    }
+
+    /// Returns the simulation result if simulation was performed
+    pub fn simulation_result(&self) -> Option<&SimulationResult> {
+        self.simulation_result.as_ref()
+    }
+
+    /// Executes the multicall transaction
     ///
-    /// # Warning
-    /// Without simulation, there's no guarantee the transaction will succeed.
-    /// Use this only when you're confident the transaction is valid or when
-    /// simulation is not possible/desired.
-    pub async fn execute_without_simulation(self) -> Result<ExecutionResult> {
+    /// If simulation was performed, uses the simulated gas + 10% buffer.
+    /// If no simulation, estimates gas via `eth_estimateGas` RPC call.
+    /// If `with_safe_tx_gas()` was called, uses that value instead.
+    pub async fn execute(self) -> Result<ExecutionResult> {
         if self.calls.is_empty() {
             return Err(Error::NoCalls);
         }
@@ -307,11 +318,16 @@ where
         // Get nonce
         let nonce = self.safe.nonce().await?;
 
-        // Use provided safe_tx_gas or estimate via RPC
-        let safe_tx_gas = match self.safe_tx_gas {
-            Some(gas) => gas,
-            None => {
-                // Estimate gas for the inner call from the Safe's perspective
+        // Determine safe_tx_gas: explicit > simulation > estimate
+        let safe_tx_gas = match (&self.simulation_result, self.safe_tx_gas) {
+            (_, Some(gas)) => gas, // User provided explicit gas
+            (Some(sim), None) => {
+                // Use simulation result + 10% buffer
+                let gas_used = sim.gas_used;
+                U256::from(gas_used + gas_used / 10)
+            }
+            (None, None) => {
+                // Estimate gas via RPC
                 use alloy::network::TransactionBuilder;
                 let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
                     .with_from(self.safe.address)
@@ -408,39 +424,6 @@ where
         })
     }
 
-    /// Simulates the multicall and transitions to Simulated state
-    pub async fn simulate(self) -> Result<MulticallBuilder<'a, P, Simulated>> {
-        if self.calls.is_empty() {
-            return Err(Error::NoCalls);
-        }
-
-        let (to, value, data, operation) = self.build_call_params()?;
-
-        let simulator = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id);
-
-        let result = simulator
-            .simulate_call(self.safe.address, to, value, data, operation)
-            .await?;
-
-        if !result.success {
-            return Err(Error::SimulationReverted {
-                reason: result
-                    .revert_reason
-                    .unwrap_or_else(|| "Unknown".to_string()),
-            });
-        }
-
-        Ok(MulticallBuilder {
-            safe: self.safe,
-            calls: self.calls,
-            use_call_only: self.use_call_only,
-            safe_tx_gas: self.safe_tx_gas,
-            operation: self.operation,
-            simulation_result: Some(result),
-            _state: PhantomData,
-        })
-    }
-
     fn build_call_params(&self) -> Result<(Address, U256, Bytes, Operation)> {
         if self.calls.len() == 1 {
             // Single call - execute directly
@@ -448,154 +431,6 @@ where
             Ok((call.to, call.value, call.data.clone(), Operation::Call))
         } else {
             // Multiple calls - use MultiSend
-            let multisend_data = encode_multisend_data(&self.calls);
-
-            let (multisend_address, calldata) = if self.use_call_only {
-                let call = IMultiSendCallOnly::multiSendCall {
-                    transactions: multisend_data,
-                };
-                (
-                    self.safe.addresses().multi_send_call_only,
-                    Bytes::from(call.abi_encode()),
-                )
-            } else {
-                let call = IMultiSend::multiSendCall {
-                    transactions: multisend_data,
-                };
-                (
-                    self.safe.addresses().multi_send,
-                    Bytes::from(call.abi_encode()),
-                )
-            };
-
-            // MultiSend is called with zero value; individual call values are encoded in the data
-            Ok((multisend_address, U256::ZERO, calldata, Operation::DelegateCall))
-        }
-    }
-}
-
-impl<'a, P> MulticallBuilder<'a, P, Simulated>
-where
-    P: Provider<AnyNetwork> + Clone + 'static,
-{
-    /// Returns the simulation result
-    pub fn simulation_result(&self) -> &SimulationResult {
-        self.simulation_result.as_ref().unwrap()
-    }
-
-    /// Returns the gas used in simulation
-    pub fn gas_used(&self) -> u64 {
-        self.simulation_result().gas_used
-    }
-
-    /// Returns the logs from simulation
-    pub fn logs(&self) -> &[alloy::primitives::Log] {
-        &self.simulation_result().logs
-    }
-
-    /// Executes the multicall transaction
-    ///
-    /// Note: This method requires the provider to support signing and sending transactions.
-    /// For simulation-only use cases, use `simulate()` without calling `execute()`.
-    pub async fn execute(self) -> Result<ExecutionResult> {
-        let (to, value, data, operation) = self.build_call_params()?;
-
-        // Get nonce
-        let nonce = self.safe.nonce().await?;
-
-        // Calculate safe_tx_gas
-        let safe_tx_gas = match self.safe_tx_gas {
-            Some(gas) => gas,
-            None => {
-                // Use simulation gas + 10% buffer
-                let gas_used = self.simulation_result().gas_used;
-                U256::from(gas_used + gas_used / 10)
-            }
-        };
-
-        // Build SafeTxParams
-        let params = SafeTxParams {
-            to,
-            value,
-            data: data.clone(),
-            operation,
-            safe_tx_gas,
-            base_gas: U256::ZERO,
-            gas_price: U256::ZERO,
-            gas_token: Address::ZERO,
-            refund_receiver: Address::ZERO,
-            nonce,
-        };
-
-        // Compute transaction hash
-        let tx_hash = compute_safe_transaction_hash(
-            self.safe.config.chain_id,
-            self.safe.address,
-            &params,
-        );
-
-        // Sign the hash
-        let signature = sign_hash(&self.safe.signer, tx_hash).await?;
-
-        // Build the execTransaction call
-        let exec_call = ISafe::execTransactionCall {
-            to: params.to,
-            value: params.value,
-            data: params.data,
-            operation: params.operation.as_u8(),
-            safeTxGas: params.safe_tx_gas,
-            baseGas: params.base_gas,
-            gasPrice: params.gas_price,
-            gasToken: params.gas_token,
-            refundReceiver: params.refund_receiver,
-            signatures: signature,
-        };
-
-        // Execute the transaction through the provider
-        let safe_contract = ISafe::new(self.safe.address, &self.safe.provider);
-
-        // Use the contract's send method to execute
-        let builder = safe_contract.execTransaction(
-            exec_call.to,
-            exec_call.value,
-            exec_call.data,
-            exec_call.operation,
-            exec_call.safeTxGas,
-            exec_call.baseGas,
-            exec_call.gasPrice,
-            exec_call.gasToken,
-            exec_call.refundReceiver,
-            exec_call.signatures,
-        );
-
-        let pending_tx = builder
-            .send()
-            .await
-            .map_err(|e| Error::ExecutionFailed {
-                reason: e.to_string(),
-            })?;
-
-        let receipt = pending_tx
-            .get_receipt()
-            .await
-            .map_err(|e| Error::ExecutionFailed {
-                reason: e.to_string(),
-            })?;
-
-        // Check if Safe execution succeeded
-        let success = receipt.status();
-
-        Ok(ExecutionResult {
-            tx_hash: receipt.transaction_hash,
-            success,
-        })
-    }
-
-    fn build_call_params(&self) -> Result<(Address, U256, Bytes, Operation)> {
-        if self.calls.len() == 1 {
-            let call = &self.calls[0];
-            Ok((call.to, call.value, call.data.clone(), Operation::Call))
-        } else {
             let multisend_data = encode_multisend_data(&self.calls);
 
             let (multisend_address, calldata) = if self.use_call_only {

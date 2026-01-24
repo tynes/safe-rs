@@ -77,7 +77,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
             }
         }
 
-        let result = builder.execute_without_simulation().await?;
+        let result = builder.execute().await?;
 
         let exec_output = ExecutionOutput {
             tx_hash: result.tx_hash,
@@ -94,7 +94,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
 
     let sim_output = SimulationOutput {
         success: true,
-        gas_used: simulated.gas_used(),
+        gas_used: simulated.simulation_result().unwrap().gas_used,
         revert_reason: None,
     };
 

@@ -3,8 +3,6 @@
 //! Provides the same builder API as the Safe multicall, but executes each call
 //! as a separate transaction instead of batching into a single MultiSend.
 
-use std::marker::PhantomData;
-
 use alloy::network::AnyNetwork;
 use alloy::network::primitives::ReceiptResponse;
 use alloy::network::TransactionBuilder;
@@ -17,8 +15,6 @@ use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
 use crate::simulation::{ForkSimulator, SimulationResult};
 use crate::types::{Call, Operation, SafeCall, TypedCall};
-
-use super::{NotSimulated, Simulated};
 
 /// Result of executing a single EOA transaction
 #[derive(Debug, Clone)]
@@ -106,8 +102,8 @@ where
     }
 
     /// Creates a batch builder for executing multiple transactions
-    pub fn batch(&self) -> EoaBuilder<'_, P, NotSimulated> {
-        EoaBuilder::<P, NotSimulated>::new(self)
+    pub fn batch(&self) -> EoaBuilder<'_, P> {
+        EoaBuilder::new(self)
     }
 
     /// Gets the current nonce of the EOA
@@ -125,25 +121,23 @@ where
 }
 
 /// Builder for constructing and executing EOA transaction batches
-pub struct EoaBuilder<'a, P, State> {
+pub struct EoaBuilder<'a, P> {
     eoa: &'a Eoa<P>,
     calls: Vec<Call>,
     stop_on_failure: bool,
-    simulation_results: Vec<SimulationResult>,
-    _state: PhantomData<State>,
+    simulation_results: Option<Vec<SimulationResult>>,
 }
 
-impl<'a, P, State> EoaBuilder<'a, P, State>
+impl<'a, P> EoaBuilder<'a, P>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
 {
-    fn new(eoa: &'a Eoa<P>) -> EoaBuilder<'a, P, NotSimulated> {
+    fn new(eoa: &'a Eoa<P>) -> Self {
         EoaBuilder {
             eoa,
             calls: Vec::new(),
             stop_on_failure: true,
-            simulation_results: Vec::new(),
-            _state: PhantomData,
+            simulation_results: None,
         }
     }
 
@@ -158,12 +152,6 @@ where
         }
         Ok(())
     }
-}
-
-impl<'a, P> EoaBuilder<'a, P, NotSimulated>
-where
-    P: Provider<AnyNetwork> + Clone + 'static,
-{
     /// Adds a typed call to the batch
     pub fn add_typed<C: SolCall + Clone>(mut self, to: Address, call: C) -> Self {
         let typed_call = TypedCall::new(to, call);
@@ -217,8 +205,11 @@ where
         self
     }
 
-    /// Simulates all calls and transitions to Simulated state
-    pub async fn simulate(self) -> Result<EoaBuilder<'a, P, Simulated>> {
+    /// Simulates all calls and stores the results
+    ///
+    /// After simulation, you can inspect the results via `simulation_results()`
+    /// and then call `execute()` which will use the simulation gas values.
+    pub async fn simulate(mut self) -> Result<Self> {
         if self.calls.is_empty() {
             return Err(Error::NoCalls);
         }
@@ -252,23 +243,34 @@ where
             simulation_results.push(result);
         }
 
-        Ok(EoaBuilder {
-            eoa: self.eoa,
-            calls: self.calls,
-            stop_on_failure: self.stop_on_failure,
-            simulation_results,
-            _state: PhantomData,
-        })
+        self.simulation_results = Some(simulation_results);
+        Ok(self)
     }
 
-    /// Executes all transactions without prior simulation
+    /// Returns the simulation results if simulation was performed
+    pub fn simulation_results(&self) -> Option<&[SimulationResult]> {
+        self.simulation_results.as_deref()
+    }
+
+    /// Returns the total gas used across all simulated calls
     ///
-    /// Gas is estimated via `eth_estimateGas` RPC call for each transaction.
+    /// Returns `None` if simulation was not performed.
+    pub fn total_gas_used(&self) -> Option<u64> {
+        self.simulation_results
+            .as_ref()
+            .map(|results| results.iter().map(|r| r.gas_used).sum())
+    }
+
+    /// Returns the number of calls in the batch
+    pub fn call_count(&self) -> usize {
+        self.calls.len()
+    }
+
+    /// Executes all transactions
     ///
-    /// # Warning
-    /// Without simulation, there's no guarantee transactions will succeed.
-    /// Use this only when you're confident the transactions are valid.
-    pub async fn execute_without_simulation(self) -> Result<EoaBatchResult> {
+    /// If simulation was performed, uses the simulated gas + 10% buffer.
+    /// If no simulation, estimates gas via `eth_estimateGas` RPC call.
+    pub async fn execute(self) -> Result<EoaBatchResult> {
         if self.calls.is_empty() {
             return Err(Error::NoCalls);
         }
@@ -282,118 +284,31 @@ where
         let mut first_failure = None;
 
         for (i, call) in self.calls.iter().enumerate() {
-            // Build transaction
-            let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
-                .with_from(self.eoa.address())
-                .with_to(call.to)
-                .with_value(call.value)
-                .with_input(call.data.clone())
-                .with_nonce(nonce);
-
-            // Estimate gas
-            let gas_limit = self
-                .eoa
-                .provider
-                .estimate_gas(tx_request.clone())
-                .await
-                .map_err(|e| Error::TransactionSendFailed {
-                    index: i,
-                    reason: format!("gas estimation failed: {}", e),
-                })?;
-
-            // Add 10% buffer
-            let gas_with_buffer = gas_limit + gas_limit / 10;
-            let tx_request = tx_request.with_gas_limit(gas_with_buffer);
-
-            // Send transaction
-            let pending_tx = self
-                .eoa
-                .provider
-                .send_transaction(tx_request)
-                .await
-                .map_err(|e| Error::TransactionSendFailed {
-                    index: i,
-                    reason: e.to_string(),
-                })?;
-
-            // Wait for receipt
-            let receipt = pending_tx.get_receipt().await.map_err(|e| {
-                Error::TransactionSendFailed {
-                    index: i,
-                    reason: e.to_string(),
-                }
-            })?;
-
-            let success = receipt.status();
-            let tx_hash = receipt.transaction_hash;
-
-            if success {
-                success_count += 1;
+            // Determine gas: use simulation result if available, otherwise estimate
+            let gas_with_buffer = if let Some(ref sim_results) = self.simulation_results {
+                let sim_result = &sim_results[i];
+                sim_result.gas_used + sim_result.gas_used / 10
             } else {
-                failure_count += 1;
-                if first_failure.is_none() {
-                    first_failure = Some(i);
-                }
-            }
+                // Build transaction for gas estimation
+                let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
+                    .with_from(self.eoa.address())
+                    .with_to(call.to)
+                    .with_value(call.value)
+                    .with_input(call.data.clone())
+                    .with_nonce(nonce);
 
-            results.push(EoaTxResult {
-                tx_hash,
-                success,
-                index: i,
-            });
+                let gas_limit = self
+                    .eoa
+                    .provider
+                    .estimate_gas(tx_request)
+                    .await
+                    .map_err(|e| Error::TransactionSendFailed {
+                        index: i,
+                        reason: format!("gas estimation failed: {}", e),
+                    })?;
 
-            // Stop on failure if configured
-            if !success && self.stop_on_failure {
-                break;
-            }
-
-            nonce += 1;
-        }
-
-        Ok(EoaBatchResult {
-            results,
-            success_count,
-            failure_count,
-            first_failure,
-        })
-    }
-}
-
-impl<'a, P> EoaBuilder<'a, P, Simulated>
-where
-    P: Provider<AnyNetwork> + Clone + 'static,
-{
-    /// Returns the simulation results for all calls
-    pub fn simulation_results(&self) -> &[SimulationResult] {
-        &self.simulation_results
-    }
-
-    /// Returns the total gas used across all simulated calls
-    pub fn total_gas_used(&self) -> u64 {
-        self.simulation_results.iter().map(|r| r.gas_used).sum()
-    }
-
-    /// Returns the number of calls in the batch
-    pub fn call_count(&self) -> usize {
-        self.calls.len()
-    }
-
-    /// Executes all transactions after simulation
-    pub async fn execute(self) -> Result<EoaBatchResult> {
-        let mut nonce = self.eoa.nonce().await?;
-        let mut results = Vec::with_capacity(self.calls.len());
-        let mut success_count = 0;
-        let mut failure_count = 0;
-        let mut first_failure = None;
-
-        for (i, (call, sim_result)) in self
-            .calls
-            .iter()
-            .zip(self.simulation_results.iter())
-            .enumerate()
-        {
-            // Use simulation gas + 10% buffer
-            let gas_with_buffer = sim_result.gas_used + sim_result.gas_used / 10;
+                gas_limit + gas_limit / 10
+            };
 
             // Build transaction
             let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()

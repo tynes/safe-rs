@@ -84,11 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(simulated) => {
             println!("  ✓ Simulation successful!");
-            println!("    Gas used: {}", simulated.gas_used());
-            println!("    Logs: {}", simulated.logs().len());
+            let sim_result = simulated.simulation_result().unwrap();
+            println!("    Gas used: {}", sim_result.gas_used);
+            println!("    Logs: {}", sim_result.logs.len());
 
             // We can inspect logs
-            for (i, log) in simulated.logs().iter().enumerate() {
+            for (i, log) in sim_result.logs.iter().enumerate() {
                 println!("    Log {}: {} topics", i, log.topics().len());
             }
         }
@@ -124,8 +125,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(simulated) => {
             println!("  ✓ Batch simulation successful!");
-            println!("    Total gas used: {}", simulated.gas_used());
-            println!("    Logs: {}", simulated.logs().len());
+            let sim_result = simulated.simulation_result().unwrap();
+            println!("    Total gas used: {}", sim_result.gas_used);
+            println!("    Logs: {}", sim_result.logs.len());
         }
         Err(e) => {
             println!("  ✗ Batch simulation failed: {}", e);
@@ -154,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(simulated) => {
             println!("  ✓ Raw calldata simulation successful!");
-            println!("    Gas used: {}", simulated.gas_used());
+            println!("    Gas used: {}", simulated.simulation_result().unwrap().gas_used);
         }
         Err(e) => {
             println!("  ✗ Raw calldata simulation failed: {}", e);
@@ -175,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(simulated) => {
             println!("  ✓ ETH transfer simulation successful!");
-            println!("    Gas used: {}", simulated.gas_used());
+            println!("    Gas used: {}", simulated.simulation_result().unwrap().gas_used);
         }
         Err(e) => {
             println!("  ✗ ETH transfer simulation failed: {}", e);

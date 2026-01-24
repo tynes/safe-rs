@@ -90,8 +90,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     println!("\nSimulation successful!");
-    println!("  Gas used: {}", simulated.gas_used());
-    println!("  Logs emitted: {}", simulated.logs().len());
+    let sim_result = simulated.simulation_result().unwrap();
+    println!("  Gas used: {}", sim_result.gas_used);
+    println!("  Logs emitted: {}", sim_result.logs.len());
 
     // Execute the batch
     let result = simulated.execute().await?;
