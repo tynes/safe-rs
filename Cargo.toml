@@ -13,7 +13,7 @@ keywords = ["ethereum", "safe", "multisig", "smart-account"]
 categories = ["cryptography", "web-programming"]
 
 [dependencies]
-alloy = { version = "1.4", features = ["full", "signer-local"] }
+alloy = { version = "1.4", features = ["full", "signer-local", "rpc-types-trace"] }
 alloy-primitives = "1.4"
 alloy-sol-types = "1.4"
 foundry-fork-db = "0.22"

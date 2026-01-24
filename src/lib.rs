@@ -18,29 +18,36 @@
 //! // Connect to a Safe
 //! let safe = Safe::connect(provider, signer, safe_address).await?;
 //!
-//! // Execute a multicall with typed calls
+//! // Execute a multicall with typed calls (with simulation)
 //! safe.multicall()
 //!     .add_typed(usdc, IERC20::transferCall { to: recipient, amount: U256::from(1000) })
 //!     .add_typed(usdc, IERC20::approveCall { spender, amount: U256::MAX })
 //!     .simulate().await?
 //!     .execute().await?;
+//!
+//! // Or execute without simulation (gas estimated via RPC)
+//! safe.multicall()
+//!     .add_typed(usdc, IERC20::transferCall { to: recipient, amount: U256::from(1000) })
+//!     .execute().await?;
 //! ```
 //!
-//! ## Type-State Builder
+//! ## Builder API
 //!
-//! The library uses a type-state pattern to enforce simulation before execution:
+//! The `MulticallBuilder` provides a fluent API for constructing transactions:
 //!
 //! ```rust,ignore
-//! // NotSimulated state - can add calls, cannot execute
+//! // Build and simulate
 //! let builder = safe.multicall()
-//!     .add_typed(token, call);
+//!     .add_typed(token, call)
+//!     .simulate().await?;
 //!
-//! // Simulated state - can inspect results, can execute
-//! let simulated = builder.simulate().await?;
-//! println!("Gas used: {}", simulated.gas_used());
+//! // Inspect simulation results
+//! if let Some(result) = builder.simulation_result() {
+//!     println!("Gas used: {}", result.gas_used);
+//! }
 //!
 //! // Execute the transaction
-//! let result = simulated.execute().await?;
+//! let result = builder.execute().await?;
 //! ```
 
 pub mod chain;
@@ -59,8 +66,8 @@ pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFac
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
-pub use safe::{ExecutionResult, MulticallBuilder, NotSimulated, Safe, Simulated};
-pub use simulation::{ForkSimulator, SimulationResult};
+pub use safe::{ExecutionResult, MulticallBuilder, Safe};
+pub use simulation::{AccountState, DiffMode, ForkSimulator, SimulationResult};
 pub use types::{Call, Operation, SafeCall, TypedCall};
 
 // Re-export alloy types that are commonly used

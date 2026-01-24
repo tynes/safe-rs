@@ -1,15 +1,17 @@
 //! Fork database and revm simulation
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy::network::AnyNetwork;
-use alloy::primitives::{Address, Bytes, Log, TxKind, U256};
+use alloy::primitives::{Address, Bytes, Log, TxKind, B256, U256};
 use alloy::providers::Provider;
+use alloy::rpc::types::trace::geth::pre_state::{AccountState, DiffMode};
 use foundry_fork_db::{cache::BlockchainDbMeta, BlockchainDb, SharedBackend};
 use revm::context::TxEnv;
 use revm::database::CacheDB;
 use revm::primitives::hardfork::SpecId;
-use revm::state::AccountInfo;
+use revm::state::{AccountInfo, EvmState};
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 
 use crate::error::{Error, Result};
@@ -28,6 +30,8 @@ pub struct SimulationResult {
     pub logs: Vec<Log>,
     /// Revert reason if the call reverted
     pub revert_reason: Option<String>,
+    /// State changes from simulation (pre/post state for touched accounts)
+    pub state_diff: DiffMode,
 }
 
 impl SimulationResult {
@@ -40,6 +44,62 @@ impl SimulationResult {
     pub fn error_message(&self) -> Option<&str> {
         self.revert_reason.as_deref()
     }
+}
+
+/// Builds a state diff from REVM's execution state
+///
+/// REVM tracks original values in `Account.original_info` and `EvmStorageSlot.original_value`,
+/// so we can reconstruct both pre and post state from the final state.
+fn build_state_diff(state: &EvmState) -> DiffMode {
+    let mut pre = BTreeMap::new();
+    let mut post = BTreeMap::new();
+
+    for (address, account) in state.iter() {
+        // Skip if account wasn't touched
+        if !account.is_touched() {
+            continue;
+        }
+
+        // Build storage diffs - only include changed slots
+        let mut pre_storage = BTreeMap::new();
+        let mut post_storage = BTreeMap::new();
+
+        for (key, slot) in account.storage.iter() {
+            if slot.is_changed() {
+                pre_storage.insert(B256::from(*key), B256::from(slot.original_value));
+                post_storage.insert(B256::from(*key), B256::from(slot.present_value));
+            }
+        }
+
+        // Build pre-state from original_info
+        let pre_state = AccountState {
+            balance: Some(account.original_info.balance),
+            nonce: Some(account.original_info.nonce),
+            code: account
+                .original_info
+                .code
+                .as_ref()
+                .map(|c| Bytes::from(c.original_bytes().to_vec())),
+            storage: pre_storage,
+        };
+
+        // Build post-state from current info
+        let post_state = AccountState {
+            balance: Some(account.info.balance),
+            nonce: Some(account.info.nonce),
+            code: account
+                .info
+                .code
+                .as_ref()
+                .map(|c| Bytes::from(c.original_bytes().to_vec())),
+            storage: post_storage,
+        };
+
+        pre.insert(*address, pre_state);
+        post.insert(*address, post_state);
+    }
+
+    DiffMode { pre, post }
 }
 
 /// Fork simulator for executing transactions against a forked state
@@ -189,6 +249,9 @@ where
     {
         use revm::context::result::{ExecutionResult, Output};
 
+        // Build state diff from the execution state
+        let state_diff = build_state_diff(&result.state);
+
         match result.result {
             ExecutionResult::Success {
                 gas_used,
@@ -214,6 +277,7 @@ where
                     return_data,
                     logs,
                     revert_reason: None,
+                    state_diff,
                 }
             }
             ExecutionResult::Revert { gas_used, output } => {
@@ -224,6 +288,7 @@ where
                     return_data: Bytes::from(output.to_vec()),
                     logs: vec![],
                     revert_reason: Some(revert_reason),
+                    state_diff,
                 }
             }
             ExecutionResult::Halt { gas_used, reason } => SimulationResult {
@@ -232,6 +297,7 @@ where
                 return_data: Bytes::new(),
                 logs: vec![],
                 revert_reason: Some(format!("Halted: {:?}", reason)),
+                state_diff,
             },
         }
     }
@@ -298,6 +364,7 @@ mod tests {
             return_data: Bytes::new(),
             logs: vec![],
             revert_reason: None,
+            state_diff: DiffMode::default(),
         };
 
         assert!(result.is_success());
@@ -312,9 +379,117 @@ mod tests {
             return_data: Bytes::new(),
             logs: vec![],
             revert_reason: Some("ERC20: insufficient balance".to_string()),
+            state_diff: DiffMode::default(),
         };
 
         assert!(!result.is_success());
         assert_eq!(result.error_message(), Some("ERC20: insufficient balance"));
+    }
+
+    #[test]
+    fn test_state_diff_with_balance_change() {
+        let mut pre = BTreeMap::new();
+        let mut post = BTreeMap::new();
+
+        let addr = Address::ZERO;
+
+        pre.insert(
+            addr,
+            AccountState {
+                balance: Some(U256::from(1000)),
+                nonce: Some(0),
+                code: None,
+                storage: BTreeMap::new(),
+            },
+        );
+
+        post.insert(
+            addr,
+            AccountState {
+                balance: Some(U256::from(500)),
+                nonce: Some(1),
+                code: None,
+                storage: BTreeMap::new(),
+            },
+        );
+
+        let state_diff = DiffMode { pre, post };
+
+        let result = SimulationResult {
+            success: true,
+            gas_used: 21000,
+            return_data: Bytes::new(),
+            logs: vec![],
+            revert_reason: None,
+            state_diff,
+        };
+
+        assert!(result.is_success());
+        assert_eq!(result.state_diff.pre.len(), 1);
+        assert_eq!(result.state_diff.post.len(), 1);
+
+        let pre_account = result.state_diff.pre.get(&addr).unwrap();
+        let post_account = result.state_diff.post.get(&addr).unwrap();
+
+        assert_eq!(pre_account.balance, Some(U256::from(1000)));
+        assert_eq!(post_account.balance, Some(U256::from(500)));
+        assert_eq!(pre_account.nonce, Some(0));
+        assert_eq!(post_account.nonce, Some(1));
+    }
+
+    #[test]
+    fn test_state_diff_with_storage_change() {
+        let mut pre = BTreeMap::new();
+        let mut post = BTreeMap::new();
+
+        let addr = Address::ZERO;
+        let storage_key = B256::ZERO;
+
+        // Storage values in AccountState are B256, not U256
+        let pre_value = B256::from(U256::from(100));
+        let post_value = B256::from(U256::from(200));
+
+        let mut pre_storage = BTreeMap::new();
+        pre_storage.insert(storage_key, pre_value);
+
+        let mut post_storage = BTreeMap::new();
+        post_storage.insert(storage_key, post_value);
+
+        pre.insert(
+            addr,
+            AccountState {
+                balance: Some(U256::ZERO),
+                nonce: Some(0),
+                code: None,
+                storage: pre_storage,
+            },
+        );
+
+        post.insert(
+            addr,
+            AccountState {
+                balance: Some(U256::ZERO),
+                nonce: Some(0),
+                code: None,
+                storage: post_storage,
+            },
+        );
+
+        let state_diff = DiffMode { pre, post };
+
+        let result = SimulationResult {
+            success: true,
+            gas_used: 50000,
+            return_data: Bytes::new(),
+            logs: vec![],
+            revert_reason: None,
+            state_diff,
+        };
+
+        let pre_account = result.state_diff.pre.get(&addr).unwrap();
+        let post_account = result.state_diff.post.get(&addr).unwrap();
+
+        assert_eq!(pre_account.storage.get(&storage_key), Some(&pre_value));
+        assert_eq!(post_account.storage.get(&storage_key), Some(&post_value));
     }
 }
