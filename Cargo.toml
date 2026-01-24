@@ -25,6 +25,9 @@ serde = { version = "1", features = ["derive"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros"] }
 url = "2"
+alloy = { version = "1.4", features = ["full", "signer-local", "rpc-types-trace", "node-bindings"] }
+serde_json = "1"
+reqwest = "0.12"
 
 [[example]]
 name = "simple_transfer"

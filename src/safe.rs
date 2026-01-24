@@ -282,9 +282,21 @@ where
 
         let simulator = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id);
 
-        let result = simulator
-            .simulate_call(self.safe.address, to, value, data, operation)
-            .await?;
+        // For DelegateCall operations (like MultiSend), we need to simulate through
+        // Safe's execTransaction because the target contract expects delegatecall context.
+        // For regular Call operations, we can simulate the inner call directly.
+        let result = match operation {
+            Operation::DelegateCall => {
+                // Simulate through Safe.execTransaction
+                self.simulate_via_exec_transaction(&simulator, to, value, data, operation)
+                    .await?
+            }
+            Operation::Call => {
+                simulator
+                    .simulate_call(self.safe.address, to, value, data, operation)
+                    .await?
+            }
+        };
 
         if !result.success {
             return Err(Error::SimulationReverted {
@@ -296,6 +308,76 @@ where
 
         self.simulation_result = Some(result);
         Ok(self)
+    }
+
+    /// Simulates by calling Safe.execTransaction
+    ///
+    /// This is needed for DelegateCall operations because the target contract
+    /// (like MultiSend) expects to be called via delegatecall.
+    async fn simulate_via_exec_transaction(
+        &self,
+        simulator: &ForkSimulator<P>,
+        to: Address,
+        value: U256,
+        data: Bytes,
+        operation: Operation,
+    ) -> Result<SimulationResult> {
+        // Get nonce
+        let nonce = self.safe.nonce().await?;
+
+        // Use a high gas estimate for simulation - we'll refine it after
+        let safe_tx_gas = U256::from(10_000_000);
+
+        // Build SafeTxParams
+        let params = SafeTxParams {
+            to,
+            value,
+            data: data.clone(),
+            operation,
+            safe_tx_gas,
+            base_gas: U256::ZERO,
+            gas_price: U256::ZERO,
+            gas_token: Address::ZERO,
+            refund_receiver: Address::ZERO,
+            nonce,
+        };
+
+        // Compute transaction hash
+        let tx_hash = compute_safe_transaction_hash(
+            self.safe.config.chain_id,
+            self.safe.address,
+            &params,
+        );
+
+        // Sign the hash
+        let signature = sign_hash(&self.safe.signer, tx_hash).await?;
+
+        // Build the execTransaction call
+        let exec_call = ISafe::execTransactionCall {
+            to: params.to,
+            value: params.value,
+            data: params.data,
+            operation: params.operation.as_u8(),
+            safeTxGas: params.safe_tx_gas,
+            baseGas: params.base_gas,
+            gasPrice: params.gas_price,
+            gasToken: params.gas_token,
+            refundReceiver: params.refund_receiver,
+            signatures: signature,
+        };
+
+        let exec_data = Bytes::from(exec_call.abi_encode());
+
+        // Simulate the execTransaction call
+        simulator
+            .simulate_call(
+                self.safe.signer.address(), // EOA calls Safe
+                self.safe.address,           // Safe address
+                U256::ZERO,                  // No ETH value for outer call
+                exec_data,
+                Operation::Call,             // Regular call to Safe
+            )
+            .await
     }
 
     /// Returns the simulation result if simulation was performed
