@@ -376,7 +376,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::address;
+    use alloy::primitives::{address, b256};
 
     #[test]
     fn test_eoa_batch_result_all_succeeded() {
@@ -430,5 +430,127 @@ mod tests {
     fn test_validate_operations_rejects_delegatecall() {
         // This test verifies at compile time that the types work
         let _addr = address!("0x1234567890123456789012345678901234567890");
+    }
+
+    #[test]
+    fn test_eoa_tx_result_fields() {
+        let tx_hash = b256!("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        let result = EoaTxResult {
+            tx_hash,
+            success: true,
+            index: 42,
+        };
+
+        assert_eq!(result.tx_hash, tx_hash);
+        assert!(result.success);
+        assert_eq!(result.index, 42);
+    }
+
+    #[test]
+    fn test_eoa_batch_result_empty() {
+        let result = EoaBatchResult {
+            results: vec![],
+            success_count: 0,
+            failure_count: 0,
+            first_failure: None,
+        };
+
+        // Empty batch has no failures, so all_succeeded() should be true
+        assert!(result.all_succeeded());
+        assert!(result.tx_hashes().is_empty());
+    }
+
+    #[test]
+    fn test_eoa_batch_result_all_failed() {
+        let result = EoaBatchResult {
+            results: vec![
+                EoaTxResult {
+                    tx_hash: TxHash::ZERO,
+                    success: false,
+                    index: 0,
+                },
+                EoaTxResult {
+                    tx_hash: TxHash::ZERO,
+                    success: false,
+                    index: 1,
+                },
+                EoaTxResult {
+                    tx_hash: TxHash::ZERO,
+                    success: false,
+                    index: 2,
+                },
+            ],
+            success_count: 0,
+            failure_count: 3,
+            first_failure: Some(0),
+        };
+
+        assert!(!result.all_succeeded());
+        assert_eq!(result.failure_count, 3);
+        assert_eq!(result.success_count, 0);
+        assert_eq!(result.first_failure, Some(0));
+    }
+
+    #[test]
+    fn test_eoa_batch_result_tx_hashes_order() {
+        let hash1 = b256!("0x1111111111111111111111111111111111111111111111111111111111111111");
+        let hash2 = b256!("0x2222222222222222222222222222222222222222222222222222222222222222");
+        let hash3 = b256!("0x3333333333333333333333333333333333333333333333333333333333333333");
+
+        let result = EoaBatchResult {
+            results: vec![
+                EoaTxResult {
+                    tx_hash: hash1,
+                    success: true,
+                    index: 0,
+                },
+                EoaTxResult {
+                    tx_hash: hash2,
+                    success: true,
+                    index: 1,
+                },
+                EoaTxResult {
+                    tx_hash: hash3,
+                    success: true,
+                    index: 2,
+                },
+            ],
+            success_count: 3,
+            failure_count: 0,
+            first_failure: None,
+        };
+
+        let hashes = result.tx_hashes();
+        assert_eq!(hashes.len(), 3);
+        assert_eq!(hashes[0], hash1);
+        assert_eq!(hashes[1], hash2);
+        assert_eq!(hashes[2], hash3);
+    }
+
+    #[test]
+    fn test_call_with_regular_operation() {
+        let to = address!("0x1234567890123456789012345678901234567890");
+        let value = U256::from(1000);
+        let data = Bytes::from(vec![0x01, 0x02, 0x03]);
+
+        let call = Call::new(to, value, data.clone());
+
+        assert_eq!(call.to, to);
+        assert_eq!(call.value, value);
+        assert_eq!(call.data, data);
+        assert_eq!(call.operation, Operation::Call);
+    }
+
+    #[test]
+    fn test_delegate_call_creates_correct_operation() {
+        let to = address!("0x1234567890123456789012345678901234567890");
+        let data = Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]);
+
+        let call = Call::delegate_call(to, data.clone());
+
+        assert_eq!(call.to, to);
+        assert_eq!(call.value, U256::ZERO);
+        assert_eq!(call.data, data);
+        assert_eq!(call.operation, Operation::DelegateCall);
     }
 }

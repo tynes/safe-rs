@@ -1,6 +1,9 @@
 #[path = "e2e/common.rs"]
 mod common;
 
+#[path = "e2e/eoa_operations.rs"]
+mod eoa_operations;
+
 #[path = "e2e/erc20_operations.rs"]
 mod erc20_operations;
 
