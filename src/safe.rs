@@ -1,7 +1,7 @@
 //! Safe client and MulticallBuilder implementation
 
-use alloy::network::AnyNetwork;
 use alloy::network::primitives::ReceiptResponse;
+use alloy::network::{AnyNetwork, Network};
 use alloy::primitives::{Address, Bytes, TxHash, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
@@ -14,6 +14,46 @@ use crate::error::{Error, Result};
 use crate::signing::sign_hash;
 use crate::simulation::{ForkSimulator, SimulationResult};
 use crate::types::{Call, Operation, SafeCall, TypedCall};
+
+/// Safe proxy singleton storage slot (slot 0)
+/// Safe proxies store the implementation/singleton address at storage slot 0,
+/// as the first declared variable in the proxy contract.
+pub const SAFE_SINGLETON_SLOT: U256 = U256::ZERO;
+
+/// Checks if an address is a Safe contract by reading the singleton storage slot
+/// and matching against known Safe singleton addresses.
+///
+/// Safe proxies store the implementation address at storage slot 0 (not ERC1967).
+///
+/// # Arguments
+/// * `provider` - The provider for RPC calls
+/// * `address` - The address to check
+///
+/// # Returns
+/// `true` if the address is a Safe proxy pointing to a known Safe singleton,
+/// `false` otherwise (including if the address has no code or no implementation slot).
+pub async fn is_safe<P: Provider<N>, N: Network>(
+    provider: &P,
+    address: Address,
+) -> Result<bool> {
+    // Read the Safe singleton slot (slot 0)
+    let storage_value = provider
+        .get_storage_at(address, SAFE_SINGLETON_SLOT)
+        .await
+        .map_err(|e| Error::Fetch {
+            what: "singleton slot",
+            reason: e.to_string(),
+        })?;
+
+    // Parse storage value as an address (last 20 bytes of the 32-byte slot)
+    let impl_address = Address::from_slice(&storage_value.to_be_bytes::<32>()[12..]);
+
+    // Check against known Safe singletons
+    let v1_4_1 = ChainAddresses::v1_4_1();
+    let v1_3_0 = ChainAddresses::v1_3_0();
+
+    Ok(impl_address == v1_4_1.safe_singleton || impl_address == v1_3_0.safe_singleton)
+}
 
 /// Result of executing a Safe transaction
 #[derive(Debug, Clone)]
@@ -550,5 +590,10 @@ mod tests {
         // This would need a mock provider to test fully
         // For now, just test that types compile correctly
         let _addr = address!("0x1234567890123456789012345678901234567890");
+    }
+
+    #[test]
+    fn test_safe_singleton_slot_is_zero() {
+        assert_eq!(SAFE_SINGLETON_SLOT, U256::ZERO);
     }
 }

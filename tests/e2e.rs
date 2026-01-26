@@ -7,6 +7,9 @@ mod eoa_operations;
 #[path = "e2e/erc20_operations.rs"]
 mod erc20_operations;
 
+#[path = "e2e/is_safe.rs"]
+mod is_safe;
+
 #[path = "e2e/safe_deployment.rs"]
 mod safe_deployment;
 

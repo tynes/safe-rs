@@ -66,7 +66,7 @@ pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFac
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
-pub use safe::{ExecutionResult, MulticallBuilder, Safe};
+pub use safe::{is_safe, ExecutionResult, MulticallBuilder, Safe, SAFE_SINGLETON_SLOT};
 pub use simulation::{AccountState, DiffMode, ForkSimulator, SimulationResult};
 pub use types::{Call, Operation, SafeCall, TypedCall};
 
