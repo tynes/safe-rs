@@ -20,6 +20,12 @@
 //! // Auto-deploy: deploys Safe if not exists
 //! let wallet = Wallet::connect_and_deploy(provider, signer).await?;
 //!
+//! // Unified batch API (works for both Safe and EOA)
+//! wallet.batch()
+//!     .add_typed(token, IERC20::transferCall { to: recipient, amount })
+//!     .simulate().await?
+//!     .execute().await?;
+//!
 //! // Pattern matching for variant-specific operations
 //! match &wallet {
 //!     Wallet::Safe(safe) => { safe.multicall()... }
@@ -28,16 +34,18 @@
 //! ```
 
 use alloy::network::{AnyNetwork, EthereumWallet};
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
+use alloy::sol_types::SolCall;
 use url::Url;
 
 use crate::chain::ChainAddresses;
 use crate::create2::{compute_create2_address, encode_setup_call};
-use crate::eoa::Eoa;
+use crate::eoa::{Eoa, EoaBuilder};
 use crate::error::{Error, Result};
-use crate::safe::{is_safe, Safe};
+use crate::safe::{is_safe, MulticallBuilder, Safe};
+use crate::types::{BatchResult, BatchSimulationResult, SafeCall};
 use crate::ISafeProxyFactory;
 
 /// Configuration for Safe address computation and deployment
@@ -313,6 +321,27 @@ where
         }
     }
 
+    /// Creates a unified batch builder for executing transactions
+    ///
+    /// This provides the same API for both Safe and EOA wallets, abstracting
+    /// away the differences between atomic multicall (Safe) and sequential
+    /// transactions (EOA).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// wallet.batch()
+    ///     .add_typed(token, IERC20::transferCall { to: recipient, amount })
+    ///     .simulate().await?
+    ///     .execute().await?;
+    /// ```
+    pub fn batch(&self) -> BatchBuilder<'_, P> {
+        match self {
+            Wallet::Safe(safe) => BatchBuilder::Safe(safe.multicall()),
+            Wallet::Eoa(eoa) => BatchBuilder::Eoa(eoa.batch()),
+        }
+    }
+
     /// Computes the Safe address that would be used for the given signer and config
     ///
     /// This is useful for checking what Safe address would be computed without
@@ -490,6 +519,162 @@ where
 
         let safe = Safe::connect(provider, signer, safe_address).await?;
         Ok(Wallet::Safe(safe))
+    }
+}
+
+/// Unified batch builder for Safe and EOA transactions
+///
+/// This enum wraps either a `MulticallBuilder` (for Safe) or `EoaBuilder` (for EOA),
+/// providing a common API for batching transactions regardless of wallet type.
+pub enum BatchBuilder<'a, P> {
+    /// Safe multicall builder (atomic execution)
+    Safe(MulticallBuilder<'a, P>),
+    /// EOA batch builder (sequential execution)
+    Eoa(EoaBuilder<'a, P>),
+}
+
+impl<'a, P> BatchBuilder<'a, P>
+where
+    P: Provider<AnyNetwork> + Clone + 'static,
+{
+    /// Adds a typed call to the batch
+    pub fn add_typed<C: SolCall + Clone>(self, to: Address, call: C) -> Self {
+        match self {
+            BatchBuilder::Safe(builder) => BatchBuilder::Safe(builder.add_typed(to, call)),
+            BatchBuilder::Eoa(builder) => BatchBuilder::Eoa(builder.add_typed(to, call)),
+        }
+    }
+
+    /// Adds a typed call with value to the batch
+    pub fn add_typed_with_value<C: SolCall + Clone>(
+        self,
+        to: Address,
+        call: C,
+        value: U256,
+    ) -> Self {
+        match self {
+            BatchBuilder::Safe(builder) => {
+                BatchBuilder::Safe(builder.add_typed_with_value(to, call, value))
+            }
+            BatchBuilder::Eoa(builder) => {
+                BatchBuilder::Eoa(builder.add_typed_with_value(to, call, value))
+            }
+        }
+    }
+
+    /// Adds a raw call to the batch
+    pub fn add_raw(self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
+        match self {
+            BatchBuilder::Safe(builder) => BatchBuilder::Safe(builder.add_raw(to, value, data)),
+            BatchBuilder::Eoa(builder) => BatchBuilder::Eoa(builder.add_raw(to, value, data)),
+        }
+    }
+
+    /// Adds a call implementing SafeCall to the batch
+    pub fn add(self, call: impl SafeCall) -> Self {
+        match self {
+            BatchBuilder::Safe(builder) => BatchBuilder::Safe(builder.add(call)),
+            BatchBuilder::Eoa(builder) => BatchBuilder::Eoa(builder.add(call)),
+        }
+    }
+
+    /// Returns the number of calls in the batch
+    pub fn call_count(&self) -> usize {
+        match self {
+            BatchBuilder::Safe(builder) => builder.call_count(),
+            BatchBuilder::Eoa(builder) => builder.call_count(),
+        }
+    }
+
+    /// Returns true if the batch will execute atomically
+    ///
+    /// Safe batches are atomic (all-or-nothing), EOA batches are not.
+    pub fn is_atomic(&self) -> bool {
+        matches!(self, BatchBuilder::Safe(_))
+    }
+
+    /// Simulates the batch and returns a SimulatedBatchBuilder
+    ///
+    /// After simulation, you can inspect the results and then call `execute()`.
+    pub async fn simulate(self) -> Result<SimulatedBatchBuilder<'a, P>> {
+        match self {
+            BatchBuilder::Safe(builder) => {
+                let simulated = builder.simulate().await?;
+                let sim_result = simulated
+                    .simulation_result()
+                    .cloned()
+                    .map(BatchSimulationResult::from_safe);
+                Ok(SimulatedBatchBuilder {
+                    inner: BatchBuilder::Safe(simulated),
+                    simulation_result: sim_result,
+                })
+            }
+            BatchBuilder::Eoa(builder) => {
+                let simulated = builder.simulate().await?;
+                let sim_result = simulated
+                    .simulation_results()
+                    .map(|r| BatchSimulationResult::from_eoa(r.to_vec()));
+                Ok(SimulatedBatchBuilder {
+                    inner: BatchBuilder::Eoa(simulated),
+                    simulation_result: sim_result,
+                })
+            }
+        }
+    }
+
+    /// Executes the batch without prior simulation
+    ///
+    /// Gas will be estimated via RPC for each call.
+    pub async fn execute(self) -> Result<BatchResult> {
+        match self {
+            BatchBuilder::Safe(builder) => {
+                let result = builder.execute().await?;
+                Ok(BatchResult::from_safe(result))
+            }
+            BatchBuilder::Eoa(builder) => {
+                let result = builder.execute().await?;
+                Ok(BatchResult::from_eoa(result))
+            }
+        }
+    }
+}
+
+/// A batch builder that has been simulated
+///
+/// This struct holds both the simulated builder and the simulation results,
+/// allowing inspection of gas usage before execution.
+pub struct SimulatedBatchBuilder<'a, P> {
+    inner: BatchBuilder<'a, P>,
+    simulation_result: Option<BatchSimulationResult>,
+}
+
+impl<P> SimulatedBatchBuilder<'_, P>
+where
+    P: Provider<AnyNetwork> + Clone + 'static,
+{
+    /// Returns a reference to the simulation result
+    pub fn simulation_result(&self) -> Option<&BatchSimulationResult> {
+        self.simulation_result.as_ref()
+    }
+
+    /// Returns the total gas used in simulation
+    pub fn total_gas_used(&self) -> Option<u64> {
+        self.simulation_result.as_ref().map(|r| r.total_gas_used)
+    }
+
+    /// Returns the number of calls in the batch
+    pub fn call_count(&self) -> usize {
+        self.inner.call_count()
+    }
+
+    /// Returns true if the batch will execute atomically
+    pub fn is_atomic(&self) -> bool {
+        self.inner.is_atomic()
+    }
+
+    /// Executes the batch using the simulated gas values
+    pub async fn execute(self) -> Result<BatchResult> {
+        self.inner.execute().await
     }
 }
 

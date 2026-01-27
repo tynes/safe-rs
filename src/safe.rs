@@ -297,6 +297,11 @@ where
         self
     }
 
+    /// Returns the number of calls in the batch
+    pub fn call_count(&self) -> usize {
+        self.calls.len()
+    }
+
     /// Sets the operation type for the outer call (usually DelegateCall for MultiSend)
     pub fn with_operation(mut self, operation: Operation) -> Self {
         self.operation = operation;
