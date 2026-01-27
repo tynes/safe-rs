@@ -52,6 +52,7 @@
 
 pub mod chain;
 pub mod contracts;
+pub mod create2;
 pub mod encoding;
 pub mod eoa;
 pub mod error;
@@ -59,16 +60,19 @@ pub mod safe;
 pub mod signing;
 pub mod simulation;
 pub mod types;
+pub mod wallet;
 
 // Re-export main types at crate root
 pub use chain::{ChainAddresses, ChainConfig};
 pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
+pub use create2::{compute_create2_address, encode_setup_call};
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
 pub use safe::{is_safe, ExecutionResult, MulticallBuilder, Safe, SAFE_SINGLETON_SLOT};
 pub use simulation::{AccountState, DiffMode, ForkSimulator, SimulationResult};
 pub use types::{Call, Operation, SafeCall, TypedCall};
+pub use wallet::{Wallet, WalletConfig};
 
 // Re-export alloy types that are commonly used
 pub use alloy::network::AnyNetwork;

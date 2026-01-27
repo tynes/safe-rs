@@ -92,6 +92,10 @@ pub enum Error {
     /// EOA operation not supported (e.g., DelegateCall)
     #[error("EOA does not support {operation} operation")]
     UnsupportedEoaOperation { operation: String },
+
+    /// Invalid configuration
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
 }
 
 impl From<alloy::transports::RpcError<alloy::transports::TransportErrorKind>> for Error {

@@ -2,12 +2,11 @@
 
 use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::node_bindings::{Anvil, AnvilInstance};
-use alloy::primitives::{keccak256, Address, Bytes, U256};
+use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
-use alloy::sol_types::SolCall;
-use safe_rs::{ChainAddresses, ISafeProxyFactory, ISafeSetup, Safe};
+use safe_rs::{compute_create2_address, encode_setup_call, ChainAddresses, ISafeProxyFactory, Safe};
 
 /// Macro to skip tests when ETH_RPC_URL is not set
 #[macro_export]
@@ -69,7 +68,7 @@ pub struct TestHarness {
     pub provider: TestProvider,
     pub signer: PrivateKeySigner,
     pub addresses: ChainAddresses,
-    _anvil: AnvilInstance,
+    pub _anvil: AnvilInstance,
 }
 
 impl TestHarness {
@@ -251,61 +250,3 @@ impl TestHarness {
 
 }
 
-/// Encodes the Safe.setup() call
-pub fn encode_setup_call(owners: &[Address], threshold: u64, fallback_handler: Address) -> Bytes {
-    let setup_call = ISafeSetup::setupCall {
-        _owners: owners.to_vec(),
-        _threshold: U256::from(threshold),
-        to: Address::ZERO,
-        data: Bytes::new(),
-        fallbackHandler: fallback_handler,
-        paymentToken: Address::ZERO,
-        payment: U256::ZERO,
-        paymentReceiver: Address::ZERO,
-    };
-
-    Bytes::from(setup_call.abi_encode())
-}
-
-/// Computes the CREATE2 address for a Safe proxy
-///
-/// Formula:
-/// salt = keccak256(keccak256(initializer) ++ saltNonce)
-/// init_code = proxyCreationCode ++ singleton_address_padded
-/// address = keccak256(0xff ++ factory ++ salt ++ keccak256(init_code))[12:]
-pub fn compute_create2_address(
-    factory: Address,
-    singleton: Address,
-    initializer: &Bytes,
-    salt_nonce: U256,
-    creation_code: &Bytes,
-) -> Address {
-    // Compute salt: keccak256(keccak256(initializer) ++ saltNonce)
-    let initializer_hash = keccak256(initializer);
-
-    let mut salt_input = [0u8; 64];
-    salt_input[..32].copy_from_slice(initializer_hash.as_slice());
-    salt_input[32..64].copy_from_slice(&salt_nonce.to_be_bytes::<32>());
-
-    let salt = keccak256(salt_input);
-
-    // Compute init_code_hash: keccak256(creation_code ++ singleton_padded)
-    let mut init_code = creation_code.to_vec();
-    // Append singleton address as 32-byte padded value
-    let mut singleton_padded = [0u8; 32];
-    singleton_padded[12..].copy_from_slice(singleton.as_slice());
-    init_code.extend_from_slice(&singleton_padded);
-
-    let init_code_hash = keccak256(&init_code);
-
-    // Compute CREATE2 address
-    let mut create2_input = Vec::with_capacity(1 + 20 + 32 + 32);
-    create2_input.push(0xff);
-    create2_input.extend_from_slice(factory.as_slice());
-    create2_input.extend_from_slice(salt.as_slice());
-    create2_input.extend_from_slice(init_code_hash.as_slice());
-
-    let hash = keccak256(&create2_input);
-
-    Address::from_slice(&hash[12..])
-}

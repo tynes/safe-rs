@@ -21,3 +21,6 @@ mod simulation_verification;
 
 #[path = "e2e/state_diff_verification.rs"]
 mod state_diff_verification;
+
+#[path = "e2e/wallet.rs"]
+mod wallet;
