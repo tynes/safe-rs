@@ -309,7 +309,7 @@ where
     pub fn signer_address(&self) -> Address {
         match self {
             Wallet::Safe(safe) => safe.signer_address(),
-            Wallet::Eoa(eoa) => eoa.address(),
+            Wallet::Eoa(eoa) => eoa.signer_address(),
         }
     }
 
@@ -339,6 +339,27 @@ where
         match self {
             Wallet::Safe(safe) => BatchBuilder::Safe(safe.multicall()),
             Wallet::Eoa(eoa) => BatchBuilder::Eoa(eoa.batch()),
+        }
+    }
+
+    /// Executes a single transaction
+    ///
+    /// This is a convenience method for executing a single call without
+    /// the batch builder. For multiple calls, use `batch()` instead.
+    ///
+    /// # Errors
+    /// Returns `Error::UnsupportedEoaOperation` if `operation` is `DelegateCall`
+    /// and the wallet is an EOA.
+    pub async fn execute_single(
+        &self,
+        to: Address,
+        value: U256,
+        data: Bytes,
+        operation: crate::types::Operation,
+    ) -> Result<crate::safe::ExecutionResult> {
+        match self {
+            Wallet::Safe(safe) => safe.execute_single(to, value, data, operation).await,
+            Wallet::Eoa(eoa) => eoa.execute_single(to, value, data, operation).await,
         }
     }
 

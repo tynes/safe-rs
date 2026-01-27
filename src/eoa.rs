@@ -13,6 +13,7 @@ use alloy::sol_types::SolCall;
 
 use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
+use crate::safe::ExecutionResult;
 use crate::simulation::{ForkSimulator, SimulationResult};
 use crate::types::{Call, Operation, SafeCall, TypedCall};
 
@@ -91,6 +92,13 @@ where
         self.signer.address()
     }
 
+    /// Returns the signer address
+    ///
+    /// For EOA, this is the same as `address()` since the signer IS the wallet.
+    pub fn signer_address(&self) -> Address {
+        self.signer.address()
+    }
+
     /// Returns the chain configuration
     pub fn config(&self) -> &ChainConfig {
         &self.config
@@ -104,6 +112,39 @@ where
     /// Creates a batch builder for executing multiple transactions
     pub fn batch(&self) -> EoaBuilder<'_, P> {
         EoaBuilder::new(self)
+    }
+
+    /// Executes a single transaction
+    ///
+    /// # Errors
+    /// Returns `Error::UnsupportedEoaOperation` if `operation` is `DelegateCall`.
+    pub async fn execute_single(
+        &self,
+        to: Address,
+        value: U256,
+        data: Bytes,
+        operation: Operation,
+    ) -> Result<ExecutionResult> {
+        if operation == Operation::DelegateCall {
+            return Err(Error::UnsupportedEoaOperation {
+                operation: "DelegateCall in execute_single".to_string(),
+            });
+        }
+
+        let result = self
+            .batch()
+            .add_raw(to, value, data)
+            .simulate()
+            .await?
+            .execute()
+            .await?;
+
+        let tx_result = result.results.into_iter().next().ok_or(Error::NoCalls)?;
+
+        Ok(ExecutionResult {
+            tx_hash: tx_result.tx_hash,
+            success: tx_result.success,
+        })
     }
 
     /// Gets the current nonce of the EOA
@@ -126,6 +167,7 @@ pub struct EoaBuilder<'a, P> {
     calls: Vec<Call>,
     stop_on_failure: bool,
     simulation_results: Option<Vec<SimulationResult>>,
+    aggregated_result: Option<SimulationResult>,
 }
 
 impl<'a, P> EoaBuilder<'a, P>
@@ -138,6 +180,7 @@ where
             calls: Vec::new(),
             stop_on_failure: true,
             simulation_results: None,
+            aggregated_result: None,
         }
     }
 
@@ -243,6 +286,7 @@ where
             simulation_results.push(result);
         }
 
+        self.aggregated_result = Some(Self::aggregate_results(&simulation_results));
         self.simulation_results = Some(simulation_results);
         Ok(self)
     }
@@ -250,6 +294,18 @@ where
     /// Returns the simulation results if simulation was performed
     pub fn simulation_results(&self) -> Option<&[SimulationResult]> {
         self.simulation_results.as_deref()
+    }
+
+    /// Returns a unified simulation result combining all individual results
+    ///
+    /// Aggregates individual results:
+    /// - `success`: true only if all calls succeeded
+    /// - `gas_used`: sum of all gas used
+    /// - `return_data`: from the last call
+    /// - `logs`: concatenated from all calls
+    /// - `revert_reason`: first revert reason encountered
+    pub fn simulation_result(&self) -> Option<&SimulationResult> {
+        self.aggregated_result.as_ref()
     }
 
     /// Returns the total gas used across all simulated calls
@@ -370,6 +426,51 @@ where
             failure_count,
             first_failure,
         })
+    }
+
+    /// Aggregates multiple simulation results into a single unified result
+    fn aggregate_results(results: &[SimulationResult]) -> SimulationResult {
+        use alloy::rpc::types::trace::geth::pre_state::DiffMode;
+        use std::collections::BTreeMap;
+
+        let success = results.iter().all(|r| r.success);
+        let gas_used = results.iter().map(|r| r.gas_used).sum();
+        let return_data = results
+            .last()
+            .map(|r| r.return_data.clone())
+            .unwrap_or_default();
+        let logs = results.iter().flat_map(|r| r.logs.clone()).collect();
+        let revert_reason = results.iter().find_map(|r| r.revert_reason.clone());
+
+        // Merge state diffs: pre-state from first encounter, post-state from last
+        let mut merged_pre = BTreeMap::new();
+        let mut merged_post = BTreeMap::new();
+
+        for result in results {
+            // For pre-state: only insert if we haven't seen this address before
+            for (addr, state) in &result.state_diff.pre {
+                merged_pre.entry(*addr).or_insert_with(|| state.clone());
+            }
+
+            // For post-state: always overwrite with the latest
+            for (addr, state) in &result.state_diff.post {
+                merged_post.insert(*addr, state.clone());
+            }
+        }
+
+        let state_diff = DiffMode {
+            pre: merged_pre,
+            post: merged_post,
+        };
+
+        SimulationResult {
+            success,
+            gas_used,
+            return_data,
+            logs,
+            revert_reason,
+            state_diff,
+        }
     }
 }
 
