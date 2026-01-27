@@ -1,3 +1,9 @@
+// CLI-specific lint overrides
+#![allow(clippy::print_stdout, reason = "CLI tools print to stdout")]
+#![allow(clippy::print_stderr, reason = "CLI tools print to stderr")]
+#![allow(clippy::unwrap_used, reason = "CLI can unwrap for user-facing errors")]
+#![allow(clippy::expect_used, reason = "CLI can expect for user-facing errors")]
+
 mod bundle;
 mod cli;
 mod commands;

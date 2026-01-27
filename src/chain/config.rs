@@ -93,7 +93,7 @@ impl ChainConfig {
 
     /// Returns configuration for Sepolia testnet
     pub fn sepolia() -> Self {
-        Self::new(11155111)
+        Self::new(11_155_111)
     }
 
     /// Returns configuration for Arbitrum
@@ -120,7 +120,7 @@ impl ChainConfig {
 /// Well-known chain IDs
 pub mod chain_ids {
     pub const MAINNET: u64 = 1;
-    pub const SEPOLIA: u64 = 11155111;
+    pub const SEPOLIA: u64 = 11_155_111;
     pub const ARBITRUM: u64 = 42161;
     pub const OPTIMISM: u64 = 10;
     pub const BASE: u64 = 8453;

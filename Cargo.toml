@@ -29,6 +29,9 @@ alloy = { version = "1.4", features = ["full", "signer-local", "rpc-types-trace"
 serde_json = "1"
 reqwest = "0.12"
 
+[lints]
+workspace = true
+
 [[example]]
 name = "simple_transfer"
 path = "examples/simple_transfer.rs"
@@ -40,3 +43,121 @@ path = "examples/multicall_erc20.rs"
 [[example]]
 name = "simulation_only"
 path = "examples/simulation_only.rs"
+
+[workspace.lints.clippy]
+# Enable pedantic lints for stricter code quality
+# Priority -1 so individual lint settings override
+pedantic = { level = "warn", priority = -1 }
+
+# Pedantic overrides - these are too noisy or don't fit this codebase
+missing_errors_doc = "allow"        # Requires extensive documentation work
+missing_panics_doc = "allow"        # Requires extensive documentation work
+must_use_candidate = "allow"        # Very noisy, not subjective
+doc_markdown = "allow"              # Backticks in docs - low value for effort
+similar_names = "allow"             # Often false positives
+too_many_lines = "allow"            # Subjective function length
+module_name_repetitions = "allow"   # FooModule::Foo patterns are common and fine
+struct_excessive_bools = "allow"    # Sometimes structs legitimately need multiple bools
+fn_params_excessive_bools = "allow" # Sometimes functions legitimately need multiple bools
+items_after_statements = "allow"    # Style preference, no harmful
+uninlined_format_args = "allow"     # format!("{x}", x) vs format!("{x}") is minor
+return_self_not_must_use = "allow"  # Builder pattern returns
+
+# Cast lints - many false positives in contexts where values are known to be in range
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+# Note: cast_lossless is NOT allowed - prefer From::from() for clarity
+
+# Default::default() vs TypeName::default() is a style preference
+default_trait_access = "allow"
+
+# Sometimes separate match arms are clearer even if bodies are identical
+match_same_arms = "allow"
+
+# Some async functions don't await but are async for API consistency or future use
+unused_async = "allow"
+
+# let...else is newer syntax, current style is fine
+manual_let_else = "allow"
+
+# Used underscore bindings are sometimes intentional for documentation
+used_underscore_binding = "allow"
+
+# &Option<T> vs Option<&T> - sometimes &Option is intentional
+ref_option_ref = "allow"
+ref_option = "allow"
+
+# Appending format! to String - push_str with format is equivalent
+format_push_string = "allow"
+
+# Case-sensitive extension comparison is often intentional
+case_sensitive_file_extension_comparisons = "allow"
+
+# Unnecessary wrapping in Result - sometimes for API consistency
+unnecessary_wraps = "allow"
+
+# Passing by value when not consumed - often cleaner API design
+needless_pass_by_value = "allow"
+
+# Small Copy types by reference - often for API consistency
+trivially_copy_pass_by_ref = "allow"
+
+# Underscore-prefixed bindings - used for documentation or future use
+no_effect_underscore_binding = "allow"
+
+# Closure vs method reference - closure syntax is clearer: .map(|s| s.to_string())
+redundant_closure_for_method_calls = "allow"
+
+# Panic safety - deny any operations that could panic
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+# Note: indexing_slicing lint is too strict and flags many safe uses
+# Instead, rely on careful code review and bounds checking
+
+# Require reason for allow attributes
+allow_attributes_without_reason = "deny"
+
+# Allow large error types - error types need rich context for good UX
+result_large_err = "allow"
+
+# No debug macros in production code
+dbg_macro = "deny"
+
+# No incomplete code markers
+todo = "deny"
+unimplemented = "deny"
+
+# Use tracing instead of println/eprintln in library code
+# CLI crates override this via #[allow(...)] in lib.rs/main.rs
+print_stdout = "deny"
+print_stderr = "deny"
+
+# sol! macro generates functions with many params - can't control this
+too_many_arguments = "allow"
+
+# Methods without self are sometimes for API design reasons
+unused_self = "allow"
+
+# Iter methods are often clearer than reference loops
+explicit_iter_loop = "allow"
+
+# add() method name is intentional for fluent builder API, not std::ops::Add
+should_implement_trait = "allow"
+
+# Constructor naming matches the type for clarity (Call::call)
+self_named_constructors = "allow"
+
+# if !x {} else {} is sometimes clearer than if x {} (negative) {} else {} (positive)
+if_not_else = "allow"
+
+# Doc comments with quoted text are often intentional examples
+doc_link_with_quotes = "allow"
+
+# Wildcard matches are intentional for future extensibility
+match_wildcard_for_single_variants = "allow"
+
+# Nested ifs can be more readable than combined conditions
+collapsible_if = "allow"
