@@ -163,6 +163,7 @@ mod tests {
             revert_reason: None,
             logs: vec![],
             state_diff: Default::default(),
+            traces: None,
         };
 
         let result = BatchSimulationResult::from_safe(sim_result);
@@ -182,6 +183,7 @@ mod tests {
                 revert_reason: None,
                 logs: vec![],
                 state_diff: Default::default(),
+                traces: None,
             },
             SimulationResult {
                 success: true,
@@ -190,6 +192,7 @@ mod tests {
                 revert_reason: None,
                 logs: vec![],
                 state_diff: Default::default(),
+                traces: None,
             },
         ];
 

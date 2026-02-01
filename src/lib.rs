@@ -70,7 +70,7 @@ pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
 pub use safe::{is_safe, ExecutionResult, MulticallBuilder, Safe, SAFE_SINGLETON_SLOT};
-pub use simulation::{AccountState, DiffMode, ForkSimulator, SimulationResult};
+pub use simulation::{AccountState, CallTraceArena, DiffMode, ForkSimulator, SimulationResult};
 pub use types::{BatchResult, BatchSimulationResult, Call, Operation, SafeCall, TypedCall};
 pub use wallet::{BatchBuilder, SimulatedBatchBuilder, Wallet, WalletConfig};
 

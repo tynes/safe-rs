@@ -18,6 +18,7 @@ alloy-primitives = "1.4"
 alloy-sol-types = "1.4"
 foundry-fork-db = "0.22"
 revm = { version = "34", default-features = false, features = ["std"] }
+revm-inspectors = { version = "0.34", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

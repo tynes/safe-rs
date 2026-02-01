@@ -496,6 +496,7 @@ async fn test_eoa_stops_on_first_failure_by_default() {
         .batch()
         .add_raw(recipient, good_transfer, vec![]) // Should succeed
         .add_typed(token_address, failing_transfer_call) // Should fail
+        .with_gas_limit(100_000) // Skip gas estimation for reverting call
         .add_raw(recipient, good_transfer, vec![]) // Would succeed, but shouldn't execute
         .execute()
         .await
@@ -542,6 +543,7 @@ async fn test_eoa_continue_on_failure_executes_all() {
         .batch()
         .add_raw(recipient, good_transfer, vec![]) // Should succeed
         .add_typed(token_address, failing_transfer_call) // Should fail
+        .with_gas_limit(100_000) // Skip gas estimation for reverting call
         .add_raw(recipient, good_transfer, vec![]) // Should succeed
         .continue_on_failure()
         .execute()

@@ -73,13 +73,37 @@ pub struct TestHarness {
 
 impl TestHarness {
     /// Creates a new test harness with Anvil forking from ETH_RPC_URL
+    ///
+    /// Supports optional environment variables for rate limiting:
+    /// - `ANVIL_COMPUTE_UNITS_PER_SECOND`: Compute units per second (default: 330)
+    /// - `ANVIL_RETRIES`: Number of retries for RPC requests (default: 5)
+    /// - `ANVIL_TIMEOUT`: Timeout in milliseconds for RPC requests (default: 20000)
     pub async fn new() -> Self {
         let rpc_url = std::env::var("ETH_RPC_URL").expect("ETH_RPC_URL must be set");
 
+        // Build Anvil args based on environment variables
+        let mut args = vec!["--hardfork".to_string(), "cancun".to_string()];
+
+        if let Ok(cus) = std::env::var("ANVIL_COMPUTE_UNITS_PER_SECOND") {
+            args.push("--compute-units-per-second".to_string());
+            args.push(cus);
+        }
+
+        if let Ok(retries) = std::env::var("ANVIL_RETRIES") {
+            args.push("--retries".to_string());
+            args.push(retries);
+        }
+
+        if let Ok(timeout) = std::env::var("ANVIL_TIMEOUT") {
+            args.push("--timeout".to_string());
+            args.push(timeout);
+        }
+
         // Spawn Anvil with forking (use cancun hardfork for PUSH0 opcode support)
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let anvil = Anvil::new()
             .fork(rpc_url)
-            .args(["--hardfork", "cancun"])
+            .args(args_ref)
             .spawn();
 
         // Get the first default account's private key
@@ -202,7 +226,7 @@ impl TestHarness {
 
         self.provider
             .client()
-            .request::<_, ()>("anvil_setBalance", params)
+            .request::<_, bool>("anvil_setBalance", params)
             .await?;
 
         Ok(())

@@ -235,6 +235,7 @@ where
             value: call.value(),
             data: call.data(),
             operation: call.operation(),
+            gas_limit: None,
         });
         self
     }
@@ -245,6 +246,21 @@ where
     /// to continue executing all transactions regardless of failures.
     pub fn continue_on_failure(mut self) -> Self {
         self.stop_on_failure = false;
+        self
+    }
+
+    /// Sets a fixed gas limit for the most recently added call
+    ///
+    /// This bypasses gas estimation for that call, which is useful when
+    /// you want to execute a transaction that would revert (and thus fail
+    /// gas estimation).
+    ///
+    /// # Panics
+    /// Panics if called before adding any calls to the batch.
+    pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
+        let last_call = self.calls.last_mut()
+            .expect("with_gas_limit called before adding any calls");
+        last_call.gas_limit = Some(gas_limit);
         self
     }
 
@@ -340,8 +356,10 @@ where
         let mut first_failure = None;
 
         for (i, call) in self.calls.iter().enumerate() {
-            // Determine gas: use simulation result if available, otherwise estimate
-            let gas_with_buffer = if let Some(ref sim_results) = self.simulation_results {
+            // Determine gas: use fixed gas limit if set, then simulation result, otherwise estimate
+            let gas_with_buffer = if let Some(fixed_gas) = call.gas_limit {
+                fixed_gas
+            } else if let Some(ref sim_results) = self.simulation_results {
                 let sim_result = &sim_results[i];
                 sim_result.gas_used + sim_result.gas_used / 10
             } else {
@@ -470,6 +488,7 @@ where
             logs,
             revert_reason,
             state_diff,
+            traces: None,
         }
     }
 }

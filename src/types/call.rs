@@ -31,6 +31,8 @@ pub struct Call {
     pub data: Bytes,
     /// Operation type
     pub operation: Operation,
+    /// Optional fixed gas limit (bypasses estimation if set)
+    pub gas_limit: Option<u64>,
 }
 
 impl Call {
@@ -41,6 +43,7 @@ impl Call {
             value,
             data: data.into(),
             operation: Operation::Call,
+            gas_limit: None,
         }
     }
 
@@ -56,6 +59,7 @@ impl Call {
             value: U256::ZERO,
             data: data.into(),
             operation: Operation::DelegateCall,
+            gas_limit: None,
         }
     }
 
@@ -68,6 +72,12 @@ impl Call {
     /// Sets the value
     pub fn with_value(mut self, value: U256) -> Self {
         self.value = value;
+        self
+    }
+
+    /// Sets a fixed gas limit, bypassing gas estimation
+    pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
+        self.gas_limit = Some(gas_limit);
         self
     }
 }

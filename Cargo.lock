@@ -3800,6 +3800,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "revm-inspectors"
+version = "0.34.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e435414e9de50a1b930da602067c76365fea2fea11e80ceb50783c94ddd127f"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-rpc-types-trace",
+ "alloy-sol-types",
+ "anstyle",
+ "colorchoice",
+ "revm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "revm-interpreter"
 version = "32.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4097,6 +4115,7 @@ dependencies = [
  "foundry-fork-db",
  "reqwest",
  "revm",
+ "revm-inspectors",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
