@@ -13,6 +13,9 @@ use revm::database::CacheDB;
 use revm::primitives::hardfork::SpecId;
 use revm::state::{AccountInfo, EvmState};
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
+use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
+
+pub use revm_inspectors::tracing::CallTraceArena;
 
 use crate::error::{Error, Result};
 use crate::types::Operation;
@@ -32,6 +35,8 @@ pub struct SimulationResult {
     pub revert_reason: Option<String>,
     /// State changes from simulation (pre/post state for touched accounts)
     pub state_diff: DiffMode,
+    /// Call trace arena (if tracing was enabled)
+    pub traces: Option<CallTraceArena>,
 }
 
 impl SimulationResult {
@@ -43,6 +48,18 @@ impl SimulationResult {
     /// Returns the revert reason if available
     pub fn error_message(&self) -> Option<&str> {
         self.revert_reason.as_deref()
+    }
+
+    /// Format traces as human-readable text (cast run style)
+    ///
+    /// Returns `None` if tracing was not enabled for this simulation.
+    pub fn format_traces(&self) -> Option<String> {
+        use revm_inspectors::tracing::TraceWriter;
+
+        let traces = self.traces.as_ref()?;
+        let mut writer = TraceWriter::new(Vec::<u8>::new());
+        writer.write_arena(traces).ok()?;
+        String::from_utf8(writer.into_writer()).ok()
     }
 }
 
@@ -107,6 +124,7 @@ pub struct ForkSimulator<P> {
     provider: P,
     chain_id: u64,
     block_number: Option<u64>,
+    tracing: bool,
 }
 
 impl<P> ForkSimulator<P>
@@ -119,12 +137,23 @@ where
             provider,
             chain_id,
             block_number: None,
+            tracing: false,
         }
     }
 
     /// Sets the block number to fork from
     pub fn at_block(mut self, block: u64) -> Self {
         self.block_number = Some(block);
+        self
+    }
+
+    /// Enables transaction tracing (cast run style)
+    ///
+    /// When enabled, `simulate_call()` will capture detailed call traces
+    /// showing the nested call hierarchy, gas per call, and call/return data.
+    /// Access traces via `SimulationResult::format_traces()`.
+    pub fn with_tracing(mut self, enable: bool) -> Self {
+        self.tracing = enable;
         self
     }
 
@@ -208,11 +237,28 @@ where
             })
             .with_tx(tx.clone());
 
-        // Create and run the EVM
-        let mut evm = ctx.build_mainnet();
-        let result = evm.transact(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
+        if self.tracing {
+            // Create inspector for tracing
+            let config = TracingInspectorConfig::default_parity();
+            let mut inspector = TracingInspector::new(config);
 
-        Ok(self.process_result(result))
+            // Build EVM with inspector attached and execute
+            let mut evm = ctx.build_mainnet_with_inspector(&mut inspector);
+            let result = evm.transact(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
+
+            // Extract traces from the inspector
+            let traces = Some(inspector.into_traces());
+
+            let mut sim_result = self.process_result(result);
+            sim_result.traces = traces;
+            Ok(sim_result)
+        } else {
+            // Create and run the EVM without tracing
+            let mut evm = ctx.build_mainnet();
+            let result = evm.transact(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
+
+            Ok(self.process_result(result))
+        }
     }
 
     /// Estimates gas for a Safe internal call
@@ -278,6 +324,7 @@ where
                     logs,
                     revert_reason: None,
                     state_diff,
+                    traces: None,
                 }
             }
             ExecutionResult::Revert { gas_used, output } => {
@@ -289,6 +336,7 @@ where
                     logs: vec![],
                     revert_reason: Some(revert_reason),
                     state_diff,
+                    traces: None,
                 }
             }
             ExecutionResult::Halt { gas_used, reason } => SimulationResult {
@@ -298,6 +346,7 @@ where
                 logs: vec![],
                 revert_reason: Some(format!("Halted: {:?}", reason)),
                 state_diff,
+                traces: None,
             },
         }
     }
@@ -365,10 +414,12 @@ mod tests {
             logs: vec![],
             revert_reason: None,
             state_diff: DiffMode::default(),
+            traces: None,
         };
 
         assert!(result.is_success());
         assert!(result.error_message().is_none());
+        assert!(result.format_traces().is_none());
     }
 
     #[test]
@@ -380,6 +431,7 @@ mod tests {
             logs: vec![],
             revert_reason: Some("ERC20: insufficient balance".to_string()),
             state_diff: DiffMode::default(),
+            traces: None,
         };
 
         assert!(!result.is_success());
@@ -422,6 +474,7 @@ mod tests {
             logs: vec![],
             revert_reason: None,
             state_diff,
+            traces: None,
         };
 
         assert!(result.is_success());
@@ -484,6 +537,7 @@ mod tests {
             logs: vec![],
             revert_reason: None,
             state_diff,
+            traces: None,
         };
 
         let pre_account = result.state_diff.pre.get(&addr).unwrap();
