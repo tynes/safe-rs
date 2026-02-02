@@ -80,12 +80,28 @@ pub trait CallBuilder: Sized {
 
     /// Simulates all calls and stores the results.
     ///
+    /// This method does not return an error if the simulation reverts. Instead,
+    /// the result (success or failure) is stored internally. Use `simulation_success()`
+    /// to check if the simulation succeeded before calling `execute()`.
+    ///
     /// After simulation, you can inspect the results via `simulation_result()`
     /// and then call `execute()` which will use the simulation gas values.
     fn simulate(self) -> impl Future<Output = Result<Self>> + Send;
 
     /// Returns the simulation result if simulation was performed.
     fn simulation_result(&self) -> Option<&SimulationResult>;
+
+    /// Checks that simulation was performed and succeeded.
+    ///
+    /// Returns `Ok(self)` if simulation was performed and all calls succeeded.
+    /// Returns `Err(Error::SimulationNotPerformed)` if `simulate()` was not called.
+    /// Returns `Err(Error::SimulationReverted { reason })` if simulation failed.
+    ///
+    /// This is useful for chaining to ensure reverting transactions are not submitted:
+    /// ```ignore
+    /// builder.simulate().await?.simulation_success()?.execute().await?
+    /// ```
+    fn simulation_success(self) -> Result<Self>;
 }
 
 /// Trait for types that can be converted to a Safe call

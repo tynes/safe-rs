@@ -149,6 +149,10 @@ where
 
     /// Simulates all calls and stores the results
     ///
+    /// This method does not return an error if the simulation reverts. Instead,
+    /// the result (success or failure) is stored internally. Use `simulation_success()`
+    /// to check if the simulation succeeded before calling `execute()`.
+    ///
     /// After simulation, you can inspect the results via `simulation_results()`
     /// and then call `execute()` which will use the simulation gas values.
     pub async fn simulate(mut self) -> Result<Self> {
@@ -161,7 +165,7 @@ where
         let simulator = ForkSimulator::new(self.eoa.provider.clone(), self.eoa.config.chain_id);
         let mut simulation_results = Vec::with_capacity(self.calls.len());
 
-        for (i, call) in self.calls.iter().enumerate() {
+        for call in self.calls.iter() {
             let result = simulator
                 .simulate_call(
                     self.eoa.address(),
@@ -172,22 +176,47 @@ where
                 )
                 .await?;
 
-            if !result.success {
-                return Err(Error::SimulationReverted {
-                    reason: format!(
-                        "Call {} failed: {}",
-                        i,
-                        result.revert_reason.unwrap_or_else(|| "Unknown".to_string())
-                    ),
-                });
-            }
-
             simulation_results.push(result);
         }
 
         self.aggregated_result = Some(Self::aggregate_results(&simulation_results));
         self.simulation_results = Some(simulation_results);
         Ok(self)
+    }
+
+    /// Checks that simulation was performed and all calls succeeded.
+    ///
+    /// Returns `Ok(self)` if simulation was performed and all calls succeeded.
+    /// Returns `Err(Error::SimulationNotPerformed)` if `simulate()` was not called.
+    /// Returns `Err(Error::SimulationReverted { reason })` if any call failed.
+    ///
+    /// This is useful for chaining to ensure reverting transactions are not submitted:
+    /// ```ignore
+    /// eoa.batch()
+    ///     .add_typed(target, call)
+    ///     .simulate().await?
+    ///     .simulation_success()?
+    ///     .execute().await?
+    /// ```
+    pub fn simulation_success(self) -> Result<Self> {
+        match &self.simulation_results {
+            None => Err(Error::SimulationNotPerformed),
+            Some(results) => {
+                // Find the first failed call
+                for (i, result) in results.iter().enumerate() {
+                    if !result.success {
+                        return Err(Error::SimulationReverted {
+                            reason: format!(
+                                "Call {} failed: {}",
+                                i,
+                                result.revert_reason.clone().unwrap_or_else(|| "Unknown".to_string())
+                            ),
+                        });
+                    }
+                }
+                Ok(self)
+            }
+        }
     }
 
     /// Returns the simulation results if simulation was performed
@@ -402,6 +431,10 @@ where
     fn simulation_result(&self) -> Option<&SimulationResult> {
         self.aggregated_result.as_ref()
     }
+
+    fn simulation_success(self) -> Result<Self> {
+        EoaBuilder::simulation_success(self)
+    }
 }
 
 impl<P> crate::account::Account for Eoa<P>
@@ -461,6 +494,7 @@ where
             .add_raw(to, value, data)
             .simulate()
             .await?
+            .simulation_success()?
             .execute()
             .await?;
 

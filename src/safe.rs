@@ -221,6 +221,10 @@ where
 
     /// Simulates the multicall and stores the result
     ///
+    /// This method does not return an error if the simulation reverts. Instead,
+    /// the result (success or failure) is stored internally. Use `simulation_success()`
+    /// to check if the simulation succeeded before calling `execute()`.
+    ///
     /// After simulation, you can inspect the results via `simulation_result()`
     /// and then call `execute()` which will use the simulation gas.
     pub async fn simulate(mut self) -> Result<Self> {
@@ -248,16 +252,36 @@ where
             }
         };
 
-        if !result.success {
-            return Err(Error::SimulationReverted {
-                reason: result
-                    .revert_reason
-                    .unwrap_or_else(|| "Unknown".to_string()),
-            });
-        }
-
+        // Store the result regardless of success/failure
         self.simulation_result = Some(result);
         Ok(self)
+    }
+
+    /// Checks that simulation was performed and succeeded.
+    ///
+    /// Returns `Ok(self)` if simulation was performed and all calls succeeded.
+    /// Returns `Err(Error::SimulationNotPerformed)` if `simulate()` was not called.
+    /// Returns `Err(Error::SimulationReverted { reason })` if simulation failed.
+    ///
+    /// This is useful for chaining to ensure reverting transactions are not submitted:
+    /// ```ignore
+    /// safe.batch()
+    ///     .add_typed(target, call)
+    ///     .simulate().await?
+    ///     .simulation_success()?
+    ///     .execute().await?
+    /// ```
+    pub fn simulation_success(self) -> Result<Self> {
+        match &self.simulation_result {
+            None => Err(Error::SimulationNotPerformed),
+            Some(result) if !result.success => Err(Error::SimulationReverted {
+                reason: result
+                    .revert_reason
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string()),
+            }),
+            Some(_) => Ok(self),
+        }
     }
 
     /// Simulates by calling Safe.execTransaction
@@ -512,6 +536,10 @@ where
     fn simulation_result(&self) -> Option<&SimulationResult> {
         self.simulation_result.as_ref()
     }
+
+    fn simulation_success(self) -> Result<Self> {
+        SafeBuilder::simulation_success(self)
+    }
 }
 
 impl<P> crate::account::Account for Safe<P>
@@ -566,6 +594,7 @@ where
             .with_operation(operation)
             .simulate()
             .await?
+            .simulation_success()?
             .execute()
             .await
     }

@@ -96,6 +96,10 @@ pub enum Error {
     /// Invalid configuration
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
+
+    /// Simulation was not performed
+    #[error("Simulation has not been performed - call simulate() first")]
+    SimulationNotPerformed,
 }
 
 impl From<alloy::transports::RpcError<alloy::transports::TransportErrorKind>> for Error {
