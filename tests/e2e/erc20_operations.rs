@@ -4,7 +4,7 @@ use alloy::primitives::U256;
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::IERC20;
+use safe_rs::{Account, IERC20};
 
 /// Test deploying a MockERC20 token and minting to Safe
 #[tokio::test(flavor = "multi_thread")]
@@ -88,7 +88,7 @@ async fn test_erc20_transfer_via_safe() {
     };
 
     let result = safe
-        .multicall()
+        .batch()
         .add_typed(token_address, transfer_call)
         .simulate()
         .await
@@ -157,7 +157,7 @@ async fn test_erc20_approve() {
     };
 
     let result = safe
-        .multicall()
+        .batch()
         .add_typed(token_address, approve_call)
         .simulate()
         .await
@@ -223,7 +223,7 @@ async fn test_batch_erc20_operations() {
 
     // Execute batch: transfer to recipient1, transfer to recipient2, approve spender
     let result = safe
-        .multicall()
+        .batch()
         .add_typed(
             token_address,
             IERC20::transferCall {

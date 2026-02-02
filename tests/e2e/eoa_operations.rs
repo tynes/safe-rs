@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::common::{MockERC20, TestHarness};
 use crate::skip_if_no_rpc;
-use safe_rs::{Call, ChainConfig, Eoa, Error, IERC20};
+use safe_rs::{Account, Call, ChainConfig, Eoa, Error, IERC20};
 
 // ============================================================================
 // Eoa Client Construction Tests
@@ -348,7 +348,7 @@ async fn test_eoa_nonce_increments_per_transaction() {
 
     // Verify nonce incremented by 3
     let final_nonce = eoa.nonce().await.expect("Failed to get final nonce");
-    assert_eq!(final_nonce, initial_nonce + 3);
+    assert_eq!(final_nonce, initial_nonce + U256::from(3));
 }
 
 /// Test that all tx hashes are unique (proves no nonce collision)
@@ -429,7 +429,7 @@ async fn test_eoa_consecutive_batches_nonce_continuity() {
     assert!(result1.all_succeeded());
 
     let nonce_after_first = eoa.nonce().await.expect("Failed to get nonce");
-    assert_eq!(nonce_after_first, initial_nonce + 2);
+    assert_eq!(nonce_after_first, initial_nonce + U256::from(2));
 
     // Second batch: 3 transactions
     let result2 = eoa
@@ -443,7 +443,7 @@ async fn test_eoa_consecutive_batches_nonce_continuity() {
     assert!(result2.all_succeeded());
 
     let nonce_after_second = eoa.nonce().await.expect("Failed to get nonce");
-    assert_eq!(nonce_after_second, initial_nonce + 5);
+    assert_eq!(nonce_after_second, initial_nonce + U256::from(5));
 
     // All hashes from both batches should be unique
     let mut all_hashes: HashSet<_> = result1.tx_hashes().into_iter().collect();

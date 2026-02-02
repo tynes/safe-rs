@@ -19,14 +19,14 @@
 //! let safe = Safe::connect(provider, signer, safe_address).await?;
 //!
 //! // Execute a multicall with typed calls (with simulation)
-//! safe.multicall()
+//! safe.batch()
 //!     .add_typed(usdc, IERC20::transferCall { to: recipient, amount: U256::from(1000) })
 //!     .add_typed(usdc, IERC20::approveCall { spender, amount: U256::MAX })
 //!     .simulate().await?
 //!     .execute().await?;
 //!
 //! // Or execute without simulation (gas estimated via RPC)
-//! safe.multicall()
+//! safe.batch()
 //!     .add_typed(usdc, IERC20::transferCall { to: recipient, amount: U256::from(1000) })
 //!     .execute().await?;
 //! ```
@@ -37,7 +37,7 @@
 //!
 //! ```rust,ignore
 //! // Build and simulate
-//! let builder = safe.multicall()
+//! let builder = safe.batch()
 //!     .add_typed(token, call)
 //!     .simulate().await?;
 //!

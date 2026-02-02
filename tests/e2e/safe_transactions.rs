@@ -4,7 +4,7 @@ use alloy::primitives::{Bytes, U256};
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::Operation;
+use safe_rs::{Account, Operation};
 
 /// Test executing a single ETH transfer from the Safe
 #[tokio::test(flavor = "multi_thread")]
@@ -99,7 +99,7 @@ async fn test_multicall_multiple_transfers() {
 
     // Execute multicall with two ETH transfers
     let result = safe
-        .multicall()
+        .batch()
         .add_raw(recipient1, transfer_amount, Bytes::new())
         .add_raw(recipient2, transfer_amount, Bytes::new())
         .simulate()
@@ -162,7 +162,7 @@ async fn test_simulate_then_execute() {
 
     // Build multicall and simulate first
     let builder = safe
-        .multicall()
+        .batch()
         .add_raw(recipient, transfer_amount, Bytes::new())
         .simulate()
         .await

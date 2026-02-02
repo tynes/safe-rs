@@ -14,7 +14,7 @@ use alloy::network::AnyNetwork;
 use alloy::primitives::{address, Address, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
-use safe_rs::{ChainConfig, Safe, IERC20};
+use safe_rs::{Account, ChainConfig, Safe, IERC20};
 use url::Url;
 
 #[tokio::main]
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Amount: {}", amount);
 
     match safe
-        .multicall()
+        .batch()
         .add_typed(
             token_address,
             IERC20::transferCall {
@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recipient2 = address!("0xbeef000000000000000000000000000000000000");
 
     match safe
-        .multicall()
+        .batch()
         .add_typed(
             token_address,
             IERC20::transferCall {
@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     calldata.extend_from_slice(&amount.to_be_bytes::<32>());
 
     match safe
-        .multicall()
+        .batch()
         .add_raw(token_address, U256::ZERO, Bytes::from(calldata))
         .simulate()
         .await
@@ -170,7 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let eth_amount = U256::from(1_000_000_000_000_000_000u64); // 1 ETH
 
     match safe
-        .multicall()
+        .batch()
         .add_raw(eth_recipient, eth_amount, Bytes::new())
         .simulate()
         .await

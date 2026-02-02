@@ -7,6 +7,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 
+use crate::account::Account;
 use crate::chain::{ChainAddresses, ChainConfig};
 use crate::contracts::{IMultiSend, IMultiSendCallOnly, ISafe};
 use crate::encoding::{compute_safe_transaction_hash, encode_multisend_data, SafeTxParams};
@@ -101,43 +102,9 @@ where
         Ok(Self::new(provider, signer, address, config))
     }
 
-    /// Returns the Safe address
-    pub fn address(&self) -> Address {
-        self.address
-    }
-
-    /// Returns the chain configuration
-    pub fn config(&self) -> &ChainConfig {
-        &self.config
-    }
-
     /// Returns the chain addresses
     pub fn addresses(&self) -> &ChainAddresses {
         &self.config.addresses
-    }
-
-    /// Returns a reference to the provider
-    pub fn provider(&self) -> &P {
-        &self.provider
-    }
-
-    /// Returns the signer address
-    pub fn signer_address(&self) -> Address {
-        self.signer.address()
-    }
-
-    /// Gets the current nonce of the Safe
-    pub async fn nonce(&self) -> Result<U256> {
-        let safe = ISafe::new(self.address, &self.provider);
-        let nonce = safe
-            .nonce()
-            .call()
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "nonce",
-                reason: e.to_string(),
-            })?;
-        Ok(nonce)
     }
 
     /// Gets the threshold of the Safe
@@ -198,28 +165,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Creates a multicall builder
-    pub fn multicall(&self) -> SafeBuilder<'_, P> {
-        SafeBuilder::new(self)
-    }
-
-    /// Executes a single call through the Safe
-    pub async fn execute_single(
-        &self,
-        to: Address,
-        value: U256,
-        data: Bytes,
-        operation: Operation,
-    ) -> Result<ExecutionResult> {
-        self.multicall()
-            .add_raw(to, value, data)
-            .with_operation(operation)
-            .simulate()
-            .await?
-            .execute()
-            .await
     }
 }
 
@@ -663,11 +608,20 @@ where
     }
 
     async fn nonce(&self) -> Result<U256> {
-        Safe::nonce(self).await
+        let safe = ISafe::new(self.address, &self.provider);
+        let nonce = safe
+            .nonce()
+            .call()
+            .await
+            .map_err(|e| Error::Fetch {
+                what: "nonce",
+                reason: e.to_string(),
+            })?;
+        Ok(nonce)
     }
 
     fn batch(&self) -> SafeBuilder<'_, P> {
-        self.multicall()
+        SafeBuilder::new(self)
     }
 
     async fn execute_single(
@@ -677,7 +631,13 @@ where
         data: Bytes,
         operation: Operation,
     ) -> Result<ExecutionResult> {
-        Safe::execute_single(self, to, value, data, operation).await
+        self.batch()
+            .add_raw(to, value, data)
+            .with_operation(operation)
+            .simulate()
+            .await?
+            .execute()
+            .await
     }
 }
 

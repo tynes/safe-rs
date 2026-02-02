@@ -4,7 +4,7 @@ use alloy::primitives::{keccak256, Bytes, U256};
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::IERC20;
+use safe_rs::{Account, IERC20};
 
 /// Test state diff balance changes for ETH transfer
 #[tokio::test(flavor = "multi_thread")]
@@ -41,7 +41,7 @@ async fn test_state_diff_balance_changes() {
 
     // Simulate to get state diff
     let builder = safe
-        .multicall()
+        .batch()
         .add_raw(recipient, transfer_amount, Bytes::new())
         .simulate()
         .await
@@ -155,7 +155,7 @@ async fn test_state_diff_storage_changes() {
 
     // Simulate
     let builder = safe
-        .multicall()
+        .batch()
         .add_typed(
             token_address,
             IERC20::transferCall {
@@ -250,7 +250,7 @@ async fn test_state_diff_nonce_increment() {
 
     // Execute transaction
     let exec_result = safe
-        .multicall()
+        .batch()
         .add_raw(recipient, transfer_amount, Bytes::new())
         .simulate()
         .await
@@ -311,7 +311,7 @@ async fn test_state_diff_multiple_accounts() {
 
     // Simulate multicall to two recipients
     let builder = safe
-        .multicall()
+        .batch()
         .add_raw(recipient1, transfer_amount, Bytes::new())
         .add_raw(recipient2, transfer_amount, Bytes::new())
         .simulate()
@@ -387,7 +387,7 @@ async fn test_state_diff_pre_values_match_rpc() {
 
     // Simulate
     let builder = safe
-        .multicall()
+        .batch()
         .add_raw(recipient, transfer_amount, Bytes::new())
         .simulate()
         .await

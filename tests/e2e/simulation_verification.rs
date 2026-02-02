@@ -6,7 +6,7 @@ use alloy::providers::Provider;
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::IERC20;
+use safe_rs::{Account, IERC20};
 
 /// Test that simulation gas is within 20% of actual execution gas
 #[tokio::test(flavor = "multi_thread")]
@@ -38,7 +38,7 @@ async fn test_simulation_gas_matches_execution() {
 
     // Simulate
     let builder = safe
-        .multicall()
+        .batch()
         .add_raw(recipient, transfer_amount, Bytes::new())
         .simulate()
         .await
@@ -122,7 +122,7 @@ async fn test_simulation_logs_match_execution() {
 
     // Simulate
     let builder = safe
-        .multicall()
+        .batch()
         .add_typed(
             token_address,
             IERC20::transferCall {
@@ -230,7 +230,7 @@ async fn test_simulation_success_matches_execution() {
 
     // Simulate - should succeed
     let builder = safe
-        .multicall()
+        .batch()
         .add_raw(recipient, transfer_amount, Bytes::new())
         .simulate()
         .await
@@ -282,7 +282,7 @@ async fn test_failed_simulation_reports_revert() {
 
     // Simulate - should fail due to insufficient balance
     let result = safe
-        .multicall()
+        .batch()
         .add_typed(
             token_address,
             IERC20::transferCall {
@@ -353,7 +353,7 @@ async fn test_simulation_multiple_transfers() {
 
     // Simulate multicall
     let builder = safe
-        .multicall()
+        .batch()
         .add_typed(
             token_address,
             IERC20::transferCall {

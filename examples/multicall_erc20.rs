@@ -15,7 +15,7 @@ use alloy::network::AnyNetwork;
 use alloy::primitives::{address, Address, U256};
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
-use safe_rs::{Safe, IERC20};
+use safe_rs::{Account, Safe, IERC20};
 use url::Url;
 
 #[tokio::main]
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  3. Approve {} to spend unlimited tokens", spender);
 
     let simulated = safe
-        .multicall()
+        .batch()
         // Transfer to recipient 1
         .add_typed(
             token_address,

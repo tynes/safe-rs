@@ -11,6 +11,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 
+use crate::account::Account;
 use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
 use crate::safe::ExecutionResult;
@@ -85,79 +86,6 @@ where
 
         let config = ChainConfig::new(chain_id);
         Ok(Self::new(provider, signer, config))
-    }
-
-    /// Returns the EOA address
-    pub fn address(&self) -> Address {
-        self.signer.address()
-    }
-
-    /// Returns the signer address
-    ///
-    /// For EOA, this is the same as `address()` since the signer IS the wallet.
-    pub fn signer_address(&self) -> Address {
-        self.signer.address()
-    }
-
-    /// Returns the chain configuration
-    pub fn config(&self) -> &ChainConfig {
-        &self.config
-    }
-
-    /// Returns a reference to the provider
-    pub fn provider(&self) -> &P {
-        &self.provider
-    }
-
-    /// Creates a batch builder for executing multiple transactions
-    pub fn batch(&self) -> EoaBuilder<'_, P> {
-        EoaBuilder::new(self)
-    }
-
-    /// Executes a single transaction
-    ///
-    /// # Errors
-    /// Returns `Error::UnsupportedEoaOperation` if `operation` is `DelegateCall`.
-    pub async fn execute_single(
-        &self,
-        to: Address,
-        value: U256,
-        data: Bytes,
-        operation: Operation,
-    ) -> Result<ExecutionResult> {
-        if operation == Operation::DelegateCall {
-            return Err(Error::UnsupportedEoaOperation {
-                operation: "DelegateCall in execute_single".to_string(),
-            });
-        }
-
-        let result = self
-            .batch()
-            .add_raw(to, value, data)
-            .simulate()
-            .await?
-            .execute()
-            .await?;
-
-        let tx_result = result.results.into_iter().next().ok_or(Error::NoCalls)?;
-
-        Ok(ExecutionResult {
-            tx_hash: tx_result.tx_hash,
-            success: tx_result.success,
-        })
-    }
-
-    /// Gets the current nonce of the EOA
-    pub async fn nonce(&self) -> Result<u64> {
-        let nonce = self
-            .provider
-            .get_transaction_count(self.signer.address())
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "nonce",
-                reason: e.to_string(),
-            })?;
-        Ok(nonce)
     }
 }
 
@@ -349,7 +277,15 @@ where
 
         self.validate_operations()?;
 
-        let mut nonce = self.eoa.nonce().await?;
+        let mut nonce = self
+            .eoa
+            .provider
+            .get_transaction_count(self.eoa.address())
+            .await
+            .map_err(|e| Error::Fetch {
+                what: "nonce",
+                reason: e.to_string(),
+            })?;
         let mut results = Vec::with_capacity(self.calls.len());
         let mut success_count = 0;
         let mut failure_count = 0;
@@ -554,12 +490,19 @@ where
     }
 
     async fn nonce(&self) -> crate::error::Result<U256> {
-        let nonce = Eoa::nonce(self).await?;
+        let nonce = self
+            .provider
+            .get_transaction_count(self.signer.address())
+            .await
+            .map_err(|e| Error::Fetch {
+                what: "nonce",
+                reason: e.to_string(),
+            })?;
         Ok(U256::from(nonce))
     }
 
     fn batch(&self) -> EoaBuilder<'_, P> {
-        Eoa::batch(self)
+        EoaBuilder::new(self)
     }
 
     async fn execute_single(
@@ -569,7 +512,26 @@ where
         data: Bytes,
         operation: Operation,
     ) -> crate::error::Result<crate::safe::ExecutionResult> {
-        Eoa::execute_single(self, to, value, data, operation).await
+        if operation == Operation::DelegateCall {
+            return Err(Error::UnsupportedEoaOperation {
+                operation: "DelegateCall in execute_single".to_string(),
+            });
+        }
+
+        let result = self
+            .batch()
+            .add_raw(to, value, data)
+            .simulate()
+            .await?
+            .execute()
+            .await?;
+
+        let tx_result = result.results.into_iter().next().ok_or(Error::NoCalls)?;
+
+        Ok(ExecutionResult {
+            tx_hash: tx_result.tx_hash,
+            success: tx_result.success,
+        })
     }
 }
 

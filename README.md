@@ -69,7 +69,7 @@ let safe = Safe::connect(provider, signer, safe_address).await?;
 safe.verify_single_owner().await?;
 
 let result = safe
-    .multicall()
+    .batch()
     .add_typed(token, IERC20::transferCall {
         to: recipient,
         amount: U256::from(1_000_000),
@@ -190,7 +190,7 @@ The `MulticallBuilder` provides a fluent API for constructing transactions:
 
 ```rust
 // Raw call
-let builder = safe.multicall()
+let builder = safe.batch()
     .add(Call {
         to: address,
         value: U256::ZERO,
@@ -199,11 +199,11 @@ let builder = safe.multicall()
     });
 
 // Typed call (recommended)
-let builder = safe.multicall()
+let builder = safe.batch()
     .add_typed(token, IERC20::transferCall { to, amount });
 
 // Multiple calls batch automatically
-let builder = safe.multicall()
+let builder = safe.batch()
     .add_typed(token1, transfer1)
     .add_typed(token2, transfer2)
     .call_only();  // Use MultiSendCallOnly for safety
@@ -249,7 +249,7 @@ use alloy::signers::local::PrivateKeySigner;
 let dummy = PrivateKeySigner::random();
 let safe = Safe::new(provider, dummy, safe_address, config);
 
-let builder = safe.multicall()
+let builder = safe.batch()
     .add_typed(token, call)
     .simulate().await?;
 

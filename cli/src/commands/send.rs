@@ -2,7 +2,7 @@ use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::ProviderBuilder;
 use color_eyre::eyre::{eyre, Result};
-use safe_rs::{Call, Safe};
+use safe_rs::{Account, Call, Safe};
 
 use crate::bundle::load_bundle;
 use crate::cli::SendArgs;
@@ -45,8 +45,8 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         println!();
     }
 
-    // Build the multicall
-    let mut builder = safe.multicall();
+    // Build the batch
+    let mut builder = safe.batch();
 
     for call in &calls {
         builder = builder.add_raw(call.to, call.value, call.data.clone());
