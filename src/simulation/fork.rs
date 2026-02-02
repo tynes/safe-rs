@@ -14,7 +14,8 @@ use foundry_fork_db::{cache::BlockchainDbMeta, BlockchainDb, SharedBackend};
 use revm::context::TxEnv;
 use revm::database::CacheDB;
 use revm::primitives::hardfork::SpecId;
-use revm::state::{AccountInfo, EvmState};
+use revm::state::EvmState;
+use revm::Database;
 use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
@@ -425,14 +426,20 @@ where
         let mut db = self.create_fork_db().await?;
 
         // Only override caller balance if configured
+        // Use load_account to preserve existing account info (code, nonce, code_hash)
         if let Some(balance) = self.caller_balance {
-            let caller_info = AccountInfo::default();
-            db.insert_account_info(from, caller_info);
-
-            if let Some(account) = db.cache.accounts.get_mut(&from) {
-                account.info.balance = balance;
-            }
+            let existing_account = db
+                .load_account(from)
+                .map_err(|e| Error::ForkDb(format!("Failed to load caller account: {:?}", e)))?;
+            existing_account.info.balance = balance;
         }
+
+        // Fetch the caller's actual nonce from the forked database
+        let caller_nonce = db
+            .basic(from)
+            .map_err(|e| Error::ForkDb(format!("Failed to fetch caller info: {:?}", e)))?
+            .map(|info| info.nonce)
+            .unwrap_or(0);
 
         // Determine the actual call target and calldata
         let (call_to, call_data) = match operation {
@@ -451,7 +458,7 @@ where
             kind: TxKind::Call(call_to),
             value,
             data: call_data.into(),
-            nonce: 0,
+            nonce: caller_nonce,
             chain_id: Some(self.chain_id),
             ..Default::default()
         };
@@ -462,6 +469,8 @@ where
             .modify_cfg_chained(|cfg| {
                 cfg.spec = SpecId::CANCUN;
                 cfg.chain_id = self.chain_id;
+                // Allow simulation from contract addresses (e.g., Safe contracts)
+                cfg.disable_eip3607 = true;
             })
             .modify_block_chained(|block| {
                 block.basefee = 0;

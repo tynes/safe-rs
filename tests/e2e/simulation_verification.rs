@@ -280,8 +280,8 @@ async fn test_failed_simulation_reports_revert() {
     let recipient = alloy::primitives::address!("0xABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD");
     let transfer_amount = U256::from(100_000_000_000_000_000_000u128); // 100 tokens (we have 0)
 
-    // Simulate - should fail due to insufficient balance
-    let result = safe
+    // Simulate - should detect revert due to insufficient balance
+    let builder = safe
         .batch()
         .add_typed(
             token_address,
@@ -291,22 +291,30 @@ async fn test_failed_simulation_reports_revert() {
             },
         )
         .simulate()
-        .await;
+        .await
+        .expect("simulate() should succeed even when transaction would revert");
 
-    // Simulation should fail
-    assert!(result.is_err(), "Simulation should fail");
+    // Get the simulation result
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
 
-    let error_string = match result {
-        Err(e) => e.to_string(),
-        Ok(_) => panic!("Expected error but got Ok"),
-    };
+    // Simulation should detect the revert
+    assert!(!sim_result.success, "Simulation should detect the revert");
 
-    // The error should indicate the simulation reverted
-    println!("Simulation error: {}", error_string);
+    // The revert reason should indicate insufficient balance
+    let revert_reason = sim_result
+        .revert_reason
+        .as_ref()
+        .expect("Should have revert reason");
+    println!("Revert reason: {}", revert_reason);
     assert!(
-        error_string.contains("revert") || error_string.contains("Revert") || error_string.contains("Simulation"),
-        "Error should indicate revert: {}",
-        error_string
+        revert_reason.contains("balance")
+            || revert_reason.contains("ERC20")
+            || revert_reason.contains("Revert")
+            || revert_reason.starts_with("0x"), // Raw revert data is also acceptable
+        "Revert reason should indicate balance issue: {}",
+        revert_reason
     );
 }
 
