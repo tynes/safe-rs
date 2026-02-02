@@ -33,7 +33,7 @@
 //!
 //! ## Builder API
 //!
-//! The `MulticallBuilder` provides a fluent API for constructing transactions:
+//! The `SafeBuilder` provides a fluent API for constructing transactions:
 //!
 //! ```rust,ignore
 //! // Build and simulate
@@ -69,7 +69,7 @@ pub use create2::{compute_create2_address, encode_setup_call};
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
-pub use safe::{is_safe, ExecutionResult, MulticallBuilder, Safe, SAFE_SINGLETON_SLOT};
+pub use safe::{is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
 pub use simulation::{AccountState, CallTraceArena, DiffMode, ForkSimulator, SimulationResult};
 pub use types::{BatchResult, BatchSimulationResult, Call, CallBuilder, Operation, SafeCall, TypedCall};
 pub use wallet::{BatchBuilder, SimulatedBatchBuilder, Wallet, WalletConfig};

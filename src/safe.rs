@@ -1,4 +1,4 @@
-//! Safe client and MulticallBuilder implementation
+//! Safe client and SafeBuilder implementation
 
 use alloy::network::primitives::ReceiptResponse;
 use alloy::network::{AnyNetwork, Network};
@@ -201,8 +201,8 @@ where
     }
 
     /// Creates a multicall builder
-    pub fn multicall(&self) -> MulticallBuilder<'_, P> {
-        MulticallBuilder::new(self)
+    pub fn multicall(&self) -> SafeBuilder<'_, P> {
+        SafeBuilder::new(self)
     }
 
     /// Executes a single call through the Safe
@@ -224,7 +224,7 @@ where
 }
 
 /// Builder for constructing multicall transactions
-pub struct MulticallBuilder<'a, P> {
+pub struct SafeBuilder<'a, P> {
     safe: &'a Safe<P>,
     calls: Vec<Call>,
     use_call_only: bool,
@@ -233,12 +233,12 @@ pub struct MulticallBuilder<'a, P> {
     simulation_result: Option<SimulationResult>,
 }
 
-impl<'a, P> MulticallBuilder<'a, P>
+impl<'a, P> SafeBuilder<'a, P>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
 {
     fn new(safe: &'a Safe<P>) -> Self {
-        MulticallBuilder {
+        SafeBuilder {
             safe,
             calls: Vec::new(),
             use_call_only: false,
@@ -602,40 +602,40 @@ where
     }
 }
 
-impl<'a, P> CallBuilder for MulticallBuilder<'a, P>
+impl<'a, P> CallBuilder for SafeBuilder<'a, P>
 where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
 {
     fn add_typed<C: SolCall + Clone>(self, to: Address, call: C) -> Self {
-        MulticallBuilder::add_typed(self, to, call)
+        SafeBuilder::add_typed(self, to, call)
     }
 
     fn add_typed_with_value<C: SolCall + Clone>(self, to: Address, call: C, value: U256) -> Self {
-        MulticallBuilder::add_typed_with_value(self, to, call, value)
+        SafeBuilder::add_typed_with_value(self, to, call, value)
     }
 
     fn add_raw(self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
-        MulticallBuilder::add_raw(self, to, value, data)
+        SafeBuilder::add_raw(self, to, value, data)
     }
 
     fn add(self, call: impl SafeCall) -> Self {
-        MulticallBuilder::add(self, call)
+        SafeBuilder::add(self, call)
     }
 
     fn with_gas_limit(self, gas_limit: u64) -> Self {
-        MulticallBuilder::with_gas_limit(self, gas_limit)
+        SafeBuilder::with_gas_limit(self, gas_limit)
     }
 
     fn call_count(&self) -> usize {
-        MulticallBuilder::call_count(self)
+        SafeBuilder::call_count(self)
     }
 
     async fn simulate(self) -> Result<Self> {
-        MulticallBuilder::simulate(self).await
+        SafeBuilder::simulate(self).await
     }
 
     fn simulation_result(&self) -> Option<&SimulationResult> {
-        MulticallBuilder::simulation_result(self)
+        SafeBuilder::simulation_result(self)
     }
 }
 

@@ -44,7 +44,7 @@ use crate::chain::ChainAddresses;
 use crate::create2::{compute_create2_address, encode_setup_call};
 use crate::eoa::{Eoa, EoaBuilder};
 use crate::error::{Error, Result};
-use crate::safe::{is_safe, MulticallBuilder, Safe};
+use crate::safe::{is_safe, SafeBuilder, Safe};
 use crate::types::{BatchResult, BatchSimulationResult, SafeCall};
 use crate::ISafeProxyFactory;
 
@@ -545,11 +545,11 @@ where
 
 /// Unified batch builder for Safe and EOA transactions
 ///
-/// This enum wraps either a `MulticallBuilder` (for Safe) or `EoaBuilder` (for EOA),
+/// This enum wraps either a `SafeBuilder` (for Safe) or `EoaBuilder` (for EOA),
 /// providing a common API for batching transactions regardless of wallet type.
 pub enum BatchBuilder<'a, P> {
     /// Safe multicall builder (atomic execution)
-    Safe(MulticallBuilder<'a, P>),
+    Safe(SafeBuilder<'a, P>),
     /// EOA batch builder (sequential execution)
     Eoa(EoaBuilder<'a, P>),
 }

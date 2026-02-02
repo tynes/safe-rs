@@ -10,7 +10,7 @@ use crate::simulation::SimulationResult;
 
 /// Trait for builders that construct and execute batches of calls.
 ///
-/// This trait provides a common interface for both `EoaBuilder` and `MulticallBuilder`,
+/// This trait provides a common interface for both `EoaBuilder` and `SafeBuilder`,
 /// enabling generic code to work with either builder type.
 pub trait CallBuilder: Sized {
     /// Adds a typed call to the batch.
