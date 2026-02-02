@@ -1,3 +1,9 @@
+# Anvil rate-limiting configuration
+anvil_compute_units := "100"
+anvil_retries := "10"
+anvil_timeout := "4000"
+anvil_env := "ANVIL_COMPUTE_UNITS_PER_SECOND=" + anvil_compute_units + " ANVIL_RETRIES=" + anvil_retries + " ANVIL_TIMEOUT=" + anvil_timeout
+
 # Default recipe
 default:
     @just --list
@@ -11,19 +17,12 @@ test-e2e:
     cargo test --test e2e -- --test-threads=1
 
 # Run E2E tests with rate-limited Anvil config (requires ETH_RPC_URL)
-# Uses 100 compute units/sec, 10 retries, 2 second timeout
 test-e2e-rpc:
-    ANVIL_COMPUTE_UNITS_PER_SECOND=100 \
-    ANVIL_RETRIES=10 \
-    ANVIL_TIMEOUT=2000 \
-    cargo test --test e2e -- --test-threads=1 --nocapture
+    {{anvil_env}} cargo test --test e2e -- --test-threads=1 --nocapture
 
 # Run specific E2E test module with rate limiting
 test-e2e-rpc-filter filter:
-    ANVIL_COMPUTE_UNITS_PER_SECOND=100 \
-    ANVIL_RETRIES=10 \
-    ANVIL_TIMEOUT=2000 \
-    cargo test {{filter}} --test e2e -- --test-threads=1 --nocapture
+    {{anvil_env}} cargo test {{filter}} --test e2e -- --test-threads=1 --nocapture
 
 # Run clippy
 lint:
@@ -48,3 +47,23 @@ build-release:
 # Clean build artifacts
 clean:
     cargo clean
+
+# Run tests with coverage and generate HTML report
+coverage:
+    {{anvil_env}} cargo llvm-cov --workspace --html
+
+# Run coverage and open HTML report in browser
+coverage-open:
+    {{anvil_env}} cargo llvm-cov --workspace --html --open
+
+# Run coverage including E2E tests (requires ETH_RPC_URL)
+coverage-e2e:
+    {{anvil_env}} cargo llvm-cov --workspace --html -- --test-threads=1
+
+# Generate LCOV format for CI integration
+coverage-lcov:
+    {{anvil_env}} cargo llvm-cov --workspace --lcov --output-path coverage.lcov
+
+# Clean coverage artifacts
+coverage-clean:
+    cargo llvm-cov clean --workspace
