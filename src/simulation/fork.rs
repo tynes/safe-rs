@@ -1,12 +1,15 @@
 //! Fork database and revm simulation
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, Log, TxKind, B256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::trace::geth::pre_state::{AccountState, DiffMode};
+use serde::Serialize;
 use foundry_fork_db::{cache::BlockchainDbMeta, BlockchainDb, SharedBackend};
 use revm::context::TxEnv;
 use revm::database::CacheDB;
@@ -60,6 +63,205 @@ impl SimulationResult {
         let mut writer = TraceWriter::new(Vec::<u8>::new());
         writer.write_arena(traces).ok()?;
         String::from_utf8(writer.into_writer()).ok()
+    }
+}
+
+/// Debug output for a failed simulation, written to disk as JSON
+#[derive(Debug, Serialize)]
+pub struct SimulationDebugOutput {
+    /// ISO 8601 timestamp
+    pub timestamp: String,
+    /// Chain ID
+    pub chain_id: u64,
+    /// The account address (Safe or EOA)
+    pub account_address: Address,
+    /// The call that was attempted
+    pub call: CallDebugInfo,
+    /// The simulation result
+    pub result: SimulationResultDebug,
+}
+
+/// Debug information about a call
+#[derive(Debug, Serialize)]
+pub struct CallDebugInfo {
+    /// Target address
+    pub to: Address,
+    /// ETH value sent
+    pub value: String,
+    /// Calldata (hex encoded)
+    pub data: String,
+    /// Operation type (Call or DelegateCall)
+    pub operation: String,
+}
+
+/// Debug information about a simulation result (serializable version)
+#[derive(Debug, Serialize)]
+pub struct SimulationResultDebug {
+    /// Whether the simulation succeeded
+    pub success: bool,
+    /// Gas used
+    pub gas_used: u64,
+    /// Revert reason if the call reverted
+    pub revert_reason: Option<String>,
+    /// Return data (hex encoded)
+    pub return_data: String,
+    /// Logs emitted during simulation
+    pub logs: Vec<LogDebug>,
+    /// State diff
+    pub state_diff: StateDiffDebug,
+    /// Formatted traces if available
+    pub traces: Option<String>,
+}
+
+/// Debug information about a log entry
+#[derive(Debug, Serialize)]
+pub struct LogDebug {
+    /// Address that emitted the log
+    pub address: Address,
+    /// Topics
+    pub topics: Vec<String>,
+    /// Data (hex encoded)
+    pub data: String,
+}
+
+/// Debug information about state diff
+#[derive(Debug, Serialize)]
+pub struct StateDiffDebug {
+    /// Pre-state of affected accounts
+    pub pre: BTreeMap<Address, AccountStateDebug>,
+    /// Post-state of affected accounts
+    pub post: BTreeMap<Address, AccountStateDebug>,
+}
+
+/// Debug information about account state
+#[derive(Debug, Serialize)]
+pub struct AccountStateDebug {
+    /// Account balance
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<String>,
+    /// Account nonce
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<u64>,
+    /// Storage slots (key -> value, both hex encoded)
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub storage: BTreeMap<String, String>,
+}
+
+impl SimulationDebugOutput {
+    /// Creates a new debug output from a simulation result and context
+    pub fn new(
+        chain_id: u64,
+        account_address: Address,
+        to: Address,
+        value: U256,
+        data: &Bytes,
+        operation: &crate::types::Operation,
+        result: &SimulationResult,
+    ) -> Self {
+        let timestamp = chrono::Utc::now().to_rfc3339();
+
+        let call = CallDebugInfo {
+            to,
+            value: value.to_string(),
+            data: format!("0x{}", alloy::primitives::hex::encode(data)),
+            operation: format!("{:?}", operation),
+        };
+
+        let logs = result
+            .logs
+            .iter()
+            .map(|log| LogDebug {
+                address: log.address,
+                topics: log
+                    .topics()
+                    .iter()
+                    .map(|t| format!("0x{}", alloy::primitives::hex::encode(t)))
+                    .collect(),
+                data: format!("0x{}", alloy::primitives::hex::encode(log.data.data.as_ref())),
+            })
+            .collect();
+
+        let state_diff = StateDiffDebug {
+            pre: result
+                .state_diff
+                .pre
+                .iter()
+                .map(|(addr, state)| (*addr, AccountStateDebug::from(state)))
+                .collect(),
+            post: result
+                .state_diff
+                .post
+                .iter()
+                .map(|(addr, state)| (*addr, AccountStateDebug::from(state)))
+                .collect(),
+        };
+
+        let result_debug = SimulationResultDebug {
+            success: result.success,
+            gas_used: result.gas_used,
+            revert_reason: result.revert_reason.clone(),
+            return_data: format!("0x{}", alloy::primitives::hex::encode(&result.return_data)),
+            logs,
+            state_diff,
+            traces: result.format_traces(),
+        };
+
+        Self {
+            timestamp,
+            chain_id,
+            account_address,
+            call,
+            result: result_debug,
+        }
+    }
+
+    /// Writes the debug output to a file in the given directory.
+    ///
+    /// The filename format is: `{chain_id}-{address}-{timestamp}.json`
+    ///
+    /// Creates the directory if it doesn't exist.
+    pub fn write_to_dir(&self, dir: &Path) -> std::io::Result<PathBuf> {
+        // Create directory if it doesn't exist
+        std::fs::create_dir_all(dir)?;
+
+        // Generate filename: {chain_id}-{address}-{timestamp}.json
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let filename = format!(
+            "{}-{}-{}.json",
+            self.chain_id,
+            self.account_address.to_string().to_lowercase(),
+            timestamp
+        );
+        let path = dir.join(filename);
+
+        // Write JSON to file
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&path, json)?;
+
+        Ok(path)
+    }
+}
+
+impl From<&AccountState> for AccountStateDebug {
+    fn from(state: &AccountState) -> Self {
+        Self {
+            balance: state.balance.map(|b| b.to_string()),
+            nonce: state.nonce,
+            storage: state
+                .storage
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        format!("0x{}", alloy::primitives::hex::encode(k)),
+                        format!("0x{}", alloy::primitives::hex::encode(v)),
+                    )
+                })
+                .collect(),
+        }
     }
 }
 
@@ -126,6 +328,9 @@ pub struct ForkSimulator<P> {
     block_number: Option<u64>,
     tracing: bool,
     caller_balance: Option<U256>,
+    debug_output_dir: Option<PathBuf>,
+    /// Account address for debug output (the Safe or EOA address)
+    debug_account_address: Option<Address>,
 }
 
 impl<P> ForkSimulator<P>
@@ -140,7 +345,22 @@ where
             block_number: None,
             tracing: false,
             caller_balance: None,
+            debug_output_dir: None,
+            debug_account_address: None,
         }
+    }
+
+    /// Configures a directory for writing debug output on simulation failures.
+    ///
+    /// When a simulation fails and this is set, a JSON file will be written
+    /// to the configured directory with the simulation details.
+    ///
+    /// The `account_address` is the Safe or EOA address that will be recorded
+    /// in the debug output.
+    pub fn with_debug_output_dir(mut self, dir: impl Into<PathBuf>, account_address: Address) -> Self {
+        self.debug_output_dir = Some(dir.into());
+        self.debug_account_address = Some(account_address);
+        self
     }
 
     /// Sets the block number to fork from
@@ -248,7 +468,7 @@ where
             })
             .with_tx(tx.clone());
 
-        if self.tracing {
+        let sim_result = if self.tracing {
             // Create inspector for tracing
             let config = TracingInspectorConfig::default_parity();
             let mut inspector = TracingInspector::new(config);
@@ -262,14 +482,35 @@ where
 
             let mut sim_result = self.process_result(result);
             sim_result.traces = traces;
-            Ok(sim_result)
+            sim_result
         } else {
             // Create and run the EVM without tracing
             let mut evm = ctx.build_mainnet();
             let result = evm.transact(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
 
-            Ok(self.process_result(result))
+            self.process_result(result)
+        };
+
+        // Write debug output if simulation failed and debug output is configured
+        if !sim_result.success {
+            if let (Some(dir), Some(account_address)) =
+                (&self.debug_output_dir, self.debug_account_address)
+            {
+                let debug_output = SimulationDebugOutput::new(
+                    self.chain_id,
+                    account_address,
+                    to,
+                    value,
+                    &data,
+                    &operation,
+                    &sim_result,
+                );
+                // Best-effort write - don't fail the simulation if we can't write debug output
+                let _ = debug_output.write_to_dir(dir);
+            }
         }
+
+        Ok(sim_result)
     }
 
     /// Estimates gas for a Safe internal call

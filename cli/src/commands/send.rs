@@ -2,7 +2,7 @@ use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::ProviderBuilder;
 use color_eyre::eyre::{eyre, Result};
-use safe_rs::{Account, Call, Safe};
+use safe_rs::{Account, Call, CallBuilder, Safe};
 
 use crate::bundle::load_bundle;
 use crate::cli::SendArgs;

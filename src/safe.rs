@@ -1,5 +1,7 @@
 //! Safe client and SafeBuilder implementation
 
+use std::path::{Path, PathBuf};
+
 use alloy::network::primitives::ReceiptResponse;
 use alloy::network::{AnyNetwork, Network};
 use alloy::primitives::{Address, Bytes, TxHash, U256};
@@ -75,6 +77,8 @@ pub struct Safe<P> {
     address: Address,
     /// Chain configuration
     config: ChainConfig,
+    /// Debug output directory for simulation failures
+    debug_output_dir: Option<PathBuf>,
 }
 
 impl<P> Safe<P>
@@ -88,7 +92,17 @@ where
             signer,
             address,
             config,
+            debug_output_dir: None,
         }
+    }
+
+    /// Configures a directory for writing debug output on simulation failures.
+    ///
+    /// When a simulation fails and this is set, a JSON file will be written
+    /// to the configured directory with the simulation details.
+    pub fn with_debug_output_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.debug_output_dir = Some(path.into());
+        self
     }
 
     /// Creates a Safe client with auto-detected chain configuration
@@ -234,7 +248,12 @@ where
 
         let (to, value, data, operation) = self.build_call_params()?;
 
-        let simulator = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id);
+        let mut simulator = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id);
+
+        // Configure debug output if the Safe has a debug output directory
+        if let Some(dir) = &self.safe.debug_output_dir {
+            simulator = simulator.with_debug_output_dir(dir.clone(), self.safe.address);
+        }
 
         // For DelegateCall operations (like MultiSend), we need to simulate through
         // Safe's execTransaction because the target contract expects delegatecall context.
@@ -563,6 +582,10 @@ where
 
     fn provider(&self) -> &P {
         &self.provider
+    }
+
+    fn debug_output_dir(&self) -> Option<&Path> {
+        self.debug_output_dir.as_deref()
     }
 
     async fn nonce(&self) -> Result<U256> {

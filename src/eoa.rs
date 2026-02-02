@@ -3,6 +3,8 @@
 //! Provides the same builder API as the Safe multicall, but executes each call
 //! as a separate transaction instead of batching into a single MultiSend.
 
+use std::path::{Path, PathBuf};
+
 use alloy::network::AnyNetwork;
 use alloy::network::primitives::ReceiptResponse;
 use alloy::network::TransactionBuilder;
@@ -61,6 +63,8 @@ pub struct Eoa<P> {
     signer: PrivateKeySigner,
     /// Chain configuration
     config: ChainConfig,
+    /// Debug output directory for simulation failures
+    debug_output_dir: Option<PathBuf>,
 }
 
 impl<P> Eoa<P>
@@ -73,7 +77,17 @@ where
             provider,
             signer,
             config,
+            debug_output_dir: None,
         }
+    }
+
+    /// Configures a directory for writing debug output on simulation failures.
+    ///
+    /// When a simulation fails and this is set, a JSON file will be written
+    /// to the configured directory with the simulation details.
+    pub fn with_debug_output_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.debug_output_dir = Some(path.into());
+        self
     }
 
     /// Creates an EOA client with auto-detected chain configuration
@@ -162,7 +176,13 @@ where
 
         self.validate_operations()?;
 
-        let simulator = ForkSimulator::new(self.eoa.provider.clone(), self.eoa.config.chain_id);
+        let mut simulator = ForkSimulator::new(self.eoa.provider.clone(), self.eoa.config.chain_id);
+
+        // Configure debug output if the EOA has a debug output directory
+        if let Some(dir) = &self.eoa.debug_output_dir {
+            simulator = simulator.with_debug_output_dir(dir.clone(), self.eoa.address());
+        }
+
         let mut simulation_results = Vec::with_capacity(self.calls.len());
 
         for call in self.calls.iter() {
@@ -458,6 +478,10 @@ where
 
     fn provider(&self) -> &P {
         &self.provider
+    }
+
+    fn debug_output_dir(&self) -> Option<&Path> {
+        self.debug_output_dir.as_deref()
     }
 
     async fn nonce(&self) -> crate::error::Result<U256> {

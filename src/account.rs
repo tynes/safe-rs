@@ -1,6 +1,7 @@
 //! Shared account trait for Safe and EOA wallets
 
 use std::future::Future;
+use std::path::Path;
 
 use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, U256};
@@ -41,6 +42,9 @@ pub trait Account {
 
     /// Returns a reference to the provider.
     fn provider(&self) -> &Self::Provider;
+
+    /// Returns the debug output directory for simulation failures, if configured.
+    fn debug_output_dir(&self) -> Option<&Path>;
 
     /// Gets the current nonce for the account.
     ///
