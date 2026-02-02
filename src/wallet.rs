@@ -226,15 +226,18 @@ where
 
     /// Connects as an EOA (no Safe).
     ///
+    /// # Arguments
+    /// * `rpc_url` - The RPC URL for sending signed transactions
+    ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let wallet = WalletBuilder::new(provider, signer)
-    ///     .connect_eoa()
+    ///     .connect_eoa(rpc_url)
     ///     .await?;
     /// ```
-    pub async fn connect_eoa(self) -> Result<Wallet<Eoa<P>>> {
-        let eoa = Eoa::connect(self.provider, self.signer).await?;
+    pub async fn connect_eoa(self, rpc_url: Url) -> Result<Wallet<Eoa<P>>> {
+        let eoa = Eoa::connect(self.provider, self.signer, rpc_url).await?;
         Ok(Wallet::from_account(eoa))
     }
 

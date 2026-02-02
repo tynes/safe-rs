@@ -5,12 +5,13 @@
 
 use std::path::{Path, PathBuf};
 
-use alloy::network::AnyNetwork;
+use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::network::primitives::ReceiptResponse;
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, Bytes, TxHash, U256};
-use alloy::providers::Provider;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
+use url::Url;
 
 use crate::account::Account;
 use crate::chain::ChainConfig;
@@ -65,6 +66,8 @@ pub struct Eoa<P> {
     config: ChainConfig,
     /// Debug output directory for simulation failures
     debug_output_dir: Option<PathBuf>,
+    /// RPC URL for creating wallet-attached provider
+    rpc_url: Url,
 }
 
 impl<P> Eoa<P>
@@ -72,12 +75,13 @@ where
     P: Provider<AnyNetwork> + Clone + 'static,
 {
     /// Creates a new EOA client with explicit chain configuration
-    pub fn new(provider: P, signer: PrivateKeySigner, config: ChainConfig) -> Self {
+    pub fn new(provider: P, signer: PrivateKeySigner, config: ChainConfig, rpc_url: Url) -> Self {
         Self {
             provider,
             signer,
             config,
             debug_output_dir: None,
+            rpc_url,
         }
     }
 
@@ -91,14 +95,14 @@ where
     }
 
     /// Creates an EOA client with auto-detected chain configuration
-    pub async fn connect(provider: P, signer: PrivateKeySigner) -> Result<Self> {
+    pub async fn connect(provider: P, signer: PrivateKeySigner, rpc_url: Url) -> Result<Self> {
         let chain_id = provider
             .get_chain_id()
             .await
             .map_err(|e| Error::Provider(e.to_string()))?;
 
         let config = ChainConfig::new(chain_id);
-        Ok(Self::new(provider, signer, config))
+        Ok(Self::new(provider, signer, config, rpc_url))
     }
 }
 
@@ -328,10 +332,14 @@ where
                 .with_nonce(nonce)
                 .with_gas_limit(gas_with_buffer);
 
+            // Create wallet-attached provider for signed transactions
+            let wallet_provider = ProviderBuilder::new()
+                .network::<AnyNetwork>()
+                .wallet(EthereumWallet::from(self.eoa.signer.clone()))
+                .connect_http(self.eoa.rpc_url.clone());
+
             // Send transaction
-            let pending_tx = self
-                .eoa
-                .provider
+            let pending_tx = wallet_provider
                 .send_transaction(tx_request)
                 .await
                 .map_err(|e| Error::TransactionSendFailed {

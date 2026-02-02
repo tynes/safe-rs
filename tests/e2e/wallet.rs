@@ -98,7 +98,7 @@ async fn test_wallet_connect_eoa() {
     let harness = TestHarness::new().await;
 
     let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
-        .connect_eoa()
+        .connect_eoa(harness._anvil.endpoint_url())
         .await
         .expect("Failed to connect EOA wallet");
 
@@ -487,7 +487,7 @@ async fn test_wallet_eoa_accessor() {
     let harness = TestHarness::new().await;
 
     let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
-        .connect_eoa()
+        .connect_eoa(harness._anvil.endpoint_url())
         .await
         .expect("Failed to connect EOA wallet");
 
@@ -523,7 +523,7 @@ async fn test_wallet_generic_methods() {
 
     // Test with EOA wallet
     let eoa_wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
-        .connect_eoa()
+        .connect_eoa(harness._anvil.endpoint_url())
         .await
         .expect("Failed to connect EOA wallet");
 

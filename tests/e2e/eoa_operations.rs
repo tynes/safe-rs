@@ -20,7 +20,12 @@ async fn test_eoa_new_with_explicit_config() {
     let harness = TestHarness::new().await;
     let config = ChainConfig::new(1); // Mainnet
 
-    let eoa = Eoa::new(harness.provider.clone(), harness.signer.clone(), config);
+    let eoa = Eoa::new(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        config,
+        harness._anvil.endpoint_url(),
+    );
 
     assert_eq!(eoa.address(), harness.signer_address());
     assert_eq!(eoa.config().chain_id, 1);
@@ -33,9 +38,13 @@ async fn test_eoa_connect_auto_detects_chain() {
 
     let harness = TestHarness::new().await;
 
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Should detect mainnet chain ID (1) from forked Anvil
     assert_eq!(eoa.address(), harness.signer_address());
@@ -49,9 +58,13 @@ async fn test_eoa_nonce_returns_current_nonce() {
 
     let harness = TestHarness::new().await;
 
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Get nonce from the provider directly
     let expected_nonce = harness
@@ -75,9 +88,13 @@ async fn test_builder_call_count() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     let recipient = address!("0x9999999999999999999999999999999999999999");
 
@@ -100,9 +117,13 @@ async fn test_builder_add_typed() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     let token_address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"); // USDC
     let recipient = address!("0x9999999999999999999999999999999999999999");
@@ -123,9 +144,13 @@ async fn test_builder_simulation_results_none_before_simulate() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     let recipient = address!("0x9999999999999999999999999999999999999999");
 
@@ -144,9 +169,13 @@ async fn test_simulate_empty_batch_returns_error() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     let result = eoa.batch().simulate().await;
 
@@ -159,9 +188,13 @@ async fn test_execute_empty_batch_returns_error() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     let result = eoa.batch().execute().await;
 
@@ -174,9 +207,13 @@ async fn test_simulate_rejects_delegatecall() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     let target = address!("0x1234567890123456789012345678901234567890");
     let delegate_call = Call::delegate_call(target, vec![0x12, 0x34]);
@@ -192,9 +229,13 @@ async fn test_execute_rejects_delegatecall() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     let target = address!("0x1234567890123456789012345678901234567890");
     let delegate_call = Call::delegate_call(target, vec![0x12, 0x34]);
@@ -214,9 +255,13 @@ async fn test_eoa_single_eth_transfer() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with ETH
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -261,9 +306,13 @@ async fn test_eoa_single_erc20_transfer() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Deploy MockERC20
     let token_address = harness
@@ -317,9 +366,13 @@ async fn test_eoa_nonce_increments_per_transaction() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with ETH
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -357,9 +410,13 @@ async fn test_eoa_batch_unique_tx_hashes() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with ETH
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -402,9 +459,13 @@ async fn test_eoa_consecutive_batches_nonce_continuity() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with ETH
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -465,9 +526,13 @@ async fn test_eoa_stops_on_first_failure_by_default() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with some ETH (but not enough for all transfers)
     let fund_amount = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
@@ -514,9 +579,13 @@ async fn test_eoa_continue_on_failure_executes_all() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with ETH
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -569,9 +638,13 @@ async fn test_eoa_simulate_populates_results() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -607,9 +680,13 @@ async fn test_eoa_total_gas_used() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -645,9 +722,13 @@ async fn test_eoa_simulate_then_execute() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -694,9 +775,13 @@ async fn test_eoa_simulate_failure_returns_revert_reason() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Deploy a token without giving EOA any balance
     let token_address = harness
@@ -742,10 +827,14 @@ async fn test_eoa_with_debug_output_dir() {
     let harness = TestHarness::new().await;
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect")
-        .with_debug_output_dir(temp_dir.path());
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect")
+    .with_debug_output_dir(temp_dir.path());
 
     // Verify debug output dir is set via Account trait
     assert_eq!(eoa.debug_output_dir(), Some(temp_dir.path()));
@@ -757,9 +846,13 @@ async fn test_eoa_simulation_success_error_when_not_simulated() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     let recipient = address!("0x9999999999999999999999999999999999999999");
 
@@ -777,9 +870,13 @@ async fn test_eoa_simulation_success_error_on_failure() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Deploy a token without giving EOA any balance
     let token_address = harness
@@ -812,9 +909,13 @@ async fn test_eoa_simulation_success_ok_on_success() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with ETH
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -844,9 +945,13 @@ async fn test_eoa_simulation_success_chained_with_execute() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with ETH
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
@@ -896,9 +1001,13 @@ async fn test_eoa_mixed_eth_and_erc20_batch() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect");
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect");
 
     // Fund the EOA with ETH
     let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH

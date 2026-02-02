@@ -210,10 +210,14 @@ async fn test_eoa_debug_output_on_simulation_failure() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Configure EOA with debug output directory
-    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
-        .await
-        .expect("Failed to connect")
-        .with_debug_output_dir(temp_dir.path());
+    let eoa = Eoa::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        harness._anvil.endpoint_url(),
+    )
+    .await
+    .expect("Failed to connect")
+    .with_debug_output_dir(temp_dir.path());
 
     // Deploy a token without giving EOA any balance
     let token_address = harness

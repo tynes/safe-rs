@@ -224,9 +224,10 @@ impl TestHarness {
             format!("0x{:x}", amount)
         ]);
 
+        // anvil_setBalance returns null on success
         self.provider
             .client()
-            .request::<_, bool>("anvil_setBalance", params)
+            .request::<_, Option<bool>>("anvil_setBalance", params)
             .await?;
 
         Ok(())
