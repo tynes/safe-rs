@@ -639,6 +639,48 @@ where
     }
 }
 
+impl<P> crate::account::Account for Safe<P>
+where
+    P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
+{
+    type Provider = P;
+    type Builder<'a> = SafeBuilder<'a, P> where Self: 'a;
+
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn signer_address(&self) -> Address {
+        self.signer.address()
+    }
+
+    fn config(&self) -> &ChainConfig {
+        &self.config
+    }
+
+    fn provider(&self) -> &P {
+        &self.provider
+    }
+
+    async fn nonce(&self) -> Result<U256> {
+        Safe::nonce(self).await
+    }
+
+    fn batch(&self) -> SafeBuilder<'_, P> {
+        self.multicall()
+    }
+
+    async fn execute_single(
+        &self,
+        to: Address,
+        value: U256,
+        data: Bytes,
+        operation: Operation,
+    ) -> Result<ExecutionResult> {
+        Safe::execute_single(self, to, value, data, operation).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]

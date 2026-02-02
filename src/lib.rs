@@ -50,6 +50,7 @@
 //! let result = builder.execute().await?;
 //! ```
 
+pub mod account;
 pub mod chain;
 pub mod contracts;
 pub mod create2;
@@ -63,6 +64,7 @@ pub mod types;
 pub mod wallet;
 
 // Re-export main types at crate root
+pub use account::Account;
 pub use chain::{ChainAddresses, ChainConfig};
 pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
 pub use create2::{compute_create2_address, encode_setup_call};

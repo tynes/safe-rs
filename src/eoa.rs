@@ -530,6 +530,49 @@ where
     }
 }
 
+impl<P> crate::account::Account for Eoa<P>
+where
+    P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
+{
+    type Provider = P;
+    type Builder<'a> = EoaBuilder<'a, P> where Self: 'a;
+
+    fn address(&self) -> Address {
+        self.signer.address()
+    }
+
+    fn signer_address(&self) -> Address {
+        self.signer.address()
+    }
+
+    fn config(&self) -> &crate::chain::ChainConfig {
+        &self.config
+    }
+
+    fn provider(&self) -> &P {
+        &self.provider
+    }
+
+    async fn nonce(&self) -> crate::error::Result<U256> {
+        let nonce = Eoa::nonce(self).await?;
+        Ok(U256::from(nonce))
+    }
+
+    fn batch(&self) -> EoaBuilder<'_, P> {
+        Eoa::batch(self)
+    }
+
+    async fn execute_single(
+        &self,
+        to: Address,
+        value: U256,
+        data: Bytes,
+        operation: Operation,
+    ) -> crate::error::Result<crate::safe::ExecutionResult> {
+        Eoa::execute_single(self, to, value, data, operation).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
