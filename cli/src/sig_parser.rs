@@ -147,8 +147,11 @@ fn parse_value(sol_type: &DynSolType, arg: &str) -> Result<DynSolValue> {
                     bytes.len()
                 ));
             }
+            // Pad to 32 bytes (right-padded with zeros)
+            let mut padded = [0u8; 32];
+            padded[..*len].copy_from_slice(&bytes);
             Ok(DynSolValue::FixedBytes(
-                alloy::primitives::FixedBytes::from_slice(&bytes),
+                alloy::primitives::FixedBytes::from_slice(&padded),
                 *len,
             ))
         }
@@ -340,5 +343,413 @@ mod tests {
             "0x1234567890123456789012345678901234567890".parse::<Address>().unwrap()
         );
         assert!(!data.is_empty());
+    }
+
+    // =========================================================================
+    // Bool Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_value_bool_true() {
+        let sol_type: DynSolType = "bool".parse().unwrap();
+
+        // Test various true representations
+        let result = parse_value(&sol_type, "true").unwrap();
+        assert_eq!(result, DynSolValue::Bool(true));
+
+        let result = parse_value(&sol_type, "1").unwrap();
+        assert_eq!(result, DynSolValue::Bool(true));
+
+        let result = parse_value(&sol_type, "TRUE").unwrap();
+        assert_eq!(result, DynSolValue::Bool(true));
+    }
+
+    #[test]
+    fn test_parse_value_bool_false() {
+        let sol_type: DynSolType = "bool".parse().unwrap();
+
+        // Test various false representations
+        let result = parse_value(&sol_type, "false").unwrap();
+        assert_eq!(result, DynSolValue::Bool(false));
+
+        let result = parse_value(&sol_type, "0").unwrap();
+        assert_eq!(result, DynSolValue::Bool(false));
+
+        let result = parse_value(&sol_type, "FALSE").unwrap();
+        assert_eq!(result, DynSolValue::Bool(false));
+    }
+
+    #[test]
+    fn test_parse_value_bool_invalid() {
+        let sol_type: DynSolType = "bool".parse().unwrap();
+        let result = parse_value(&sol_type, "maybe");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Uint Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_value_uint_decimal() {
+        let sol_type: DynSolType = "uint256".parse().unwrap();
+        let result = parse_value(&sol_type, "1000").unwrap();
+        assert_eq!(result, DynSolValue::Uint(U256::from(1000), 256));
+    }
+
+    #[test]
+    fn test_parse_value_uint_hex() {
+        let sol_type: DynSolType = "uint256".parse().unwrap();
+        let result = parse_value(&sol_type, "0x3e8").unwrap();
+        assert_eq!(result, DynSolValue::Uint(U256::from(1000), 256));
+
+        // Test uppercase 0X prefix
+        let result = parse_value(&sol_type, "0X3E8").unwrap();
+        assert_eq!(result, DynSolValue::Uint(U256::from(1000), 256));
+    }
+
+    #[test]
+    fn test_parse_value_uint_large() {
+        let sol_type: DynSolType = "uint256".parse().unwrap();
+        // 1 ETH in wei
+        let result = parse_value(&sol_type, "1000000000000000000").unwrap();
+        assert_eq!(
+            result,
+            DynSolValue::Uint(U256::from(1_000_000_000_000_000_000u128), 256)
+        );
+    }
+
+    #[test]
+    fn test_parse_value_uint_smaller_sizes() {
+        let sol_type: DynSolType = "uint8".parse().unwrap();
+        let result = parse_value(&sol_type, "255").unwrap();
+        assert_eq!(result, DynSolValue::Uint(U256::from(255), 8));
+
+        let sol_type: DynSolType = "uint128".parse().unwrap();
+        let result = parse_value(&sol_type, "12345").unwrap();
+        assert_eq!(result, DynSolValue::Uint(U256::from(12345), 128));
+    }
+
+    // =========================================================================
+    // Int Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_value_int_positive() {
+        let sol_type: DynSolType = "int256".parse().unwrap();
+        let result = parse_value(&sol_type, "1000").unwrap();
+        if let DynSolValue::Int(value, bits) = result {
+            assert_eq!(bits, 256);
+            assert!(value.is_positive());
+        } else {
+            panic!("Expected Int variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_value_int_negative() {
+        let sol_type: DynSolType = "int256".parse().unwrap();
+        let result = parse_value(&sol_type, "-1000").unwrap();
+        if let DynSolValue::Int(value, bits) = result {
+            assert_eq!(bits, 256);
+            assert!(value.is_negative());
+        } else {
+            panic!("Expected Int variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_value_int_zero() {
+        let sol_type: DynSolType = "int256".parse().unwrap();
+        let result = parse_value(&sol_type, "0").unwrap();
+        if let DynSolValue::Int(value, bits) = result {
+            assert_eq!(bits, 256);
+            assert!(value.is_zero());
+        } else {
+            panic!("Expected Int variant");
+        }
+    }
+
+    // =========================================================================
+    // Bytes Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_value_bytes_dynamic() {
+        let sol_type: DynSolType = "bytes".parse().unwrap();
+        let result = parse_value(&sol_type, "0xdeadbeef").unwrap();
+        assert_eq!(result, DynSolValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]));
+
+        // Without 0x prefix
+        let result = parse_value(&sol_type, "deadbeef").unwrap();
+        assert_eq!(result, DynSolValue::Bytes(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn test_parse_value_bytes_empty() {
+        let sol_type: DynSolType = "bytes".parse().unwrap();
+        let result = parse_value(&sol_type, "0x").unwrap();
+        assert_eq!(result, DynSolValue::Bytes(vec![]));
+    }
+
+    #[test]
+    fn test_parse_value_fixed_bytes() {
+        let sol_type: DynSolType = "bytes4".parse().unwrap();
+        let result = parse_value(&sol_type, "0xdeadbeef").unwrap();
+        if let DynSolValue::FixedBytes(fb, size) = result {
+            assert_eq!(size, 4);
+            // FixedBytes internally stores as bytes32 with right-padding
+            // The actual bytes are at the beginning
+            assert_eq!(fb[0], 0xde);
+            assert_eq!(fb[1], 0xad);
+            assert_eq!(fb[2], 0xbe);
+            assert_eq!(fb[3], 0xef);
+        } else {
+            panic!("Expected FixedBytes variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_value_bytes32() {
+        let sol_type: DynSolType = "bytes32".parse().unwrap();
+        let hash = "0x1234567890123456789012345678901234567890123456789012345678901234";
+        let result = parse_value(&sol_type, hash).unwrap();
+        if let DynSolValue::FixedBytes(fb, size) = result {
+            assert_eq!(size, 32);
+            assert_eq!(fb[0], 0x12);
+            assert_eq!(fb[31], 0x34);
+        } else {
+            panic!("Expected FixedBytes variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_value_fixed_bytes_wrong_length() {
+        let sol_type: DynSolType = "bytes4".parse().unwrap();
+        // Too many bytes
+        let result = parse_value(&sol_type, "0xdeadbeefcafe");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // String Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_value_string() {
+        let sol_type: DynSolType = "string".parse().unwrap();
+        let result = parse_value(&sol_type, "hello world").unwrap();
+        assert_eq!(result, DynSolValue::String("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_parse_value_string_empty() {
+        let sol_type: DynSolType = "string".parse().unwrap();
+        let result = parse_value(&sol_type, "").unwrap();
+        assert_eq!(result, DynSolValue::String("".to_string()));
+    }
+
+    #[test]
+    fn test_parse_value_string_special_chars() {
+        let sol_type: DynSolType = "string".parse().unwrap();
+        let result = parse_value(&sol_type, "hello, world! 🎉").unwrap();
+        assert_eq!(result, DynSolValue::String("hello, world! 🎉".to_string()));
+    }
+
+    // =========================================================================
+    // Array Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_value_array_uint() {
+        let sol_type: DynSolType = "uint256[]".parse().unwrap();
+        let result = parse_value(&sol_type, "[1,2,3]").unwrap();
+        if let DynSolValue::Array(values) = result {
+            assert_eq!(values.len(), 3);
+            assert_eq!(values[0], DynSolValue::Uint(U256::from(1), 256));
+            assert_eq!(values[1], DynSolValue::Uint(U256::from(2), 256));
+            assert_eq!(values[2], DynSolValue::Uint(U256::from(3), 256));
+        } else {
+            panic!("Expected Array variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_value_array_without_brackets() {
+        let sol_type: DynSolType = "uint256[]".parse().unwrap();
+        let result = parse_value(&sol_type, "1,2,3").unwrap();
+        if let DynSolValue::Array(values) = result {
+            assert_eq!(values.len(), 3);
+        } else {
+            panic!("Expected Array variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_value_array_empty() {
+        let sol_type: DynSolType = "uint256[]".parse().unwrap();
+        let result = parse_value(&sol_type, "[]").unwrap();
+        if let DynSolValue::Array(values) = result {
+            assert!(values.is_empty());
+        } else {
+            panic!("Expected Array variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_value_array_addresses() {
+        let sol_type: DynSolType = "address[]".parse().unwrap();
+        let result = parse_value(
+            &sol_type,
+            "[0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222]",
+        )
+        .unwrap();
+        if let DynSolValue::Array(values) = result {
+            assert_eq!(values.len(), 2);
+        } else {
+            panic!("Expected Array variant");
+        }
+    }
+
+    // =========================================================================
+    // Tuple Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_value_tuple() {
+        let sol_type: DynSolType = "(address,uint256)".parse().unwrap();
+        let result = parse_value(
+            &sol_type,
+            "(0x1234567890123456789012345678901234567890,1000)",
+        )
+        .unwrap();
+        if let DynSolValue::Tuple(values) = result {
+            assert_eq!(values.len(), 2);
+            if let DynSolValue::Address(addr) = &values[0] {
+                assert_eq!(
+                    *addr,
+                    "0x1234567890123456789012345678901234567890"
+                        .parse::<Address>()
+                        .unwrap()
+                );
+            } else {
+                panic!("Expected Address");
+            }
+            if let DynSolValue::Uint(val, _) = &values[1] {
+                assert_eq!(*val, U256::from(1000));
+            } else {
+                panic!("Expected Uint");
+            }
+        } else {
+            panic!("Expected Tuple variant");
+        }
+    }
+
+    #[test]
+    fn test_parse_value_tuple_missing_parens() {
+        let sol_type: DynSolType = "(uint256,uint256)".parse().unwrap();
+        // Missing opening paren should fail
+        let result = parse_value(&sol_type, "1,2)");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Call Spec Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_call_spec_no_args() {
+        let (to, data) = parse_call_spec(
+            "0x1234567890123456789012345678901234567890:totalSupply()",
+        )
+        .unwrap();
+
+        assert_eq!(
+            to,
+            "0x1234567890123456789012345678901234567890"
+                .parse::<Address>()
+                .unwrap()
+        );
+        // Should only have the 4-byte selector
+        assert_eq!(data.len(), 4);
+    }
+
+    #[test]
+    fn test_parse_call_spec_with_empty_args() {
+        let (to, data) = parse_call_spec(
+            "0x1234567890123456789012345678901234567890:totalSupply():",
+        )
+        .unwrap();
+
+        assert_eq!(
+            to,
+            "0x1234567890123456789012345678901234567890"
+                .parse::<Address>()
+                .unwrap()
+        );
+        // Should only have the 4-byte selector (empty args)
+        assert_eq!(data.len(), 4);
+    }
+
+    #[test]
+    fn test_parse_call_spec_invalid_format_no_colon() {
+        let result = parse_call_spec("0x1234567890123456789012345678901234567890");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_call_spec_invalid_address() {
+        let result = parse_call_spec("invalid:transfer(address,uint256):0x1111111111111111111111111111111111111111,100");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_call_spec_invalid_signature() {
+        let result = parse_call_spec("0x1234567890123456789012345678901234567890:invalid");
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Argument Count Mismatch Tests
+    // =========================================================================
+
+    #[test]
+    fn test_encode_function_call_wrong_arg_count() {
+        // Too few args
+        let result = encode_function_call(
+            "transfer(address,uint256)",
+            &["0x1234567890123456789012345678901234567890".to_string()],
+        );
+        assert!(result.is_err());
+
+        // Too many args
+        let result = encode_function_call(
+            "transfer(address,uint256)",
+            &[
+                "0x1234567890123456789012345678901234567890".to_string(),
+                "1000".to_string(),
+                "extra".to_string(),
+            ],
+        );
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Nested Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_param_types_nested_tuple() {
+        let types = parse_param_types("foo((address,uint256),bytes)").unwrap();
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0], "(address,uint256)");
+        assert_eq!(types[1], "bytes");
+    }
+
+    #[test]
+    fn test_parse_param_types_array_of_tuples() {
+        let types = parse_param_types("foo((address,uint256)[])").unwrap();
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0], "(address,uint256)[]");
     }
 }

@@ -285,4 +285,167 @@ mod tests {
         assert_eq!(call.data(), data);
         assert_eq!(call.operation(), Operation::DelegateCall);
     }
+
+    #[test]
+    fn test_call_call_constructor() {
+        let to = address!("0x1234567890123456789012345678901234567890");
+        let data = Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]);
+
+        let call = Call::call(to, data.clone());
+
+        assert_eq!(call.to(), to);
+        assert_eq!(call.value(), U256::ZERO);
+        assert_eq!(call.data(), data);
+        assert_eq!(call.operation(), Operation::Call);
+        assert!(call.gas_limit.is_none());
+    }
+
+    #[test]
+    fn test_call_with_operation() {
+        let to = address!("0x1234567890123456789012345678901234567890");
+        let data = Bytes::from(vec![0x01, 0x02]);
+
+        // Create a Call and change operation to DelegateCall
+        let call = Call::call(to, data).with_operation(Operation::DelegateCall);
+
+        assert_eq!(call.operation(), Operation::DelegateCall);
+    }
+
+    #[test]
+    fn test_call_with_value() {
+        let to = address!("0x1234567890123456789012345678901234567890");
+        let data = Bytes::from(vec![0x01, 0x02]);
+        let value = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
+
+        let call = Call::call(to, data).with_value(value);
+
+        assert_eq!(call.value(), value);
+    }
+
+    #[test]
+    fn test_call_with_gas_limit() {
+        let to = address!("0x1234567890123456789012345678901234567890");
+        let data = Bytes::from(vec![0x01, 0x02]);
+        let gas_limit = 100_000u64;
+
+        let call = Call::call(to, data).with_gas_limit(gas_limit);
+
+        assert_eq!(call.gas_limit, Some(gas_limit));
+    }
+
+    #[test]
+    fn test_call_chained_builders() {
+        let to = address!("0x1234567890123456789012345678901234567890");
+        let data = Bytes::from(vec![0xab, 0xcd]);
+        let value = U256::from(5000);
+        let gas_limit = 50_000u64;
+
+        let call = Call::call(to, data.clone())
+            .with_value(value)
+            .with_operation(Operation::Call)
+            .with_gas_limit(gas_limit);
+
+        assert_eq!(call.to(), to);
+        assert_eq!(call.value(), value);
+        assert_eq!(call.data(), data);
+        assert_eq!(call.operation(), Operation::Call);
+        assert_eq!(call.gas_limit, Some(gas_limit));
+    }
+
+    #[test]
+    fn test_typed_call_new() {
+        use alloy::sol;
+
+        // Define a simple interface for testing
+        sol! {
+            interface TestToken {
+                function transfer(address to, uint256 amount) external returns (bool);
+            }
+        }
+
+        let token_address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        let recipient = address!("0x9999999999999999999999999999999999999999");
+        let amount = U256::from(1000);
+
+        let transfer_call = TestToken::transferCall {
+            to: recipient,
+            amount,
+        };
+
+        let typed_call = TypedCall::new(token_address, transfer_call);
+
+        assert_eq!(typed_call.to(), token_address);
+        assert_eq!(typed_call.value(), U256::ZERO);
+        assert_eq!(typed_call.operation(), Operation::Call);
+        // Verify data is encoded (should start with transfer selector 0xa9059cbb)
+        let data = typed_call.data();
+        assert_eq!(&data[..4], &[0xa9, 0x05, 0x9c, 0xbb]);
+    }
+
+    #[test]
+    fn test_typed_call_with_value() {
+        use alloy::sol;
+
+        sol! {
+            interface TestContract {
+                function deposit() external payable;
+            }
+        }
+
+        let contract_address = address!("0x1234567890123456789012345678901234567890");
+        let deposit_call = TestContract::depositCall {};
+        let value = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
+
+        let typed_call = TypedCall::new(contract_address, deposit_call).with_value(value);
+
+        assert_eq!(typed_call.value(), value);
+    }
+
+    #[test]
+    fn test_typed_call_with_operation() {
+        use alloy::sol;
+
+        sol! {
+            interface TestMultiSend {
+                function multiSend(bytes calldata transactions) external;
+            }
+        }
+
+        let multisend_address = address!("0x1234567890123456789012345678901234567890");
+        let multisend_call = TestMultiSend::multiSendCall {
+            transactions: Bytes::from(vec![0x01, 0x02, 0x03]),
+        };
+
+        let typed_call = TypedCall::new(multisend_address, multisend_call)
+            .with_operation(Operation::DelegateCall);
+
+        assert_eq!(typed_call.operation(), Operation::DelegateCall);
+    }
+
+    #[test]
+    fn test_typed_call_safe_call_trait() {
+        use alloy::sol;
+
+        sol! {
+            interface TestToken {
+                function approve(address spender, uint256 amount) external returns (bool);
+            }
+        }
+
+        let token_address = address!("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+        let spender = address!("0x1111111111111111111111111111111111111111");
+        let amount = U256::MAX;
+
+        let approve_call = TestToken::approveCall { spender, amount };
+
+        let typed_call = TypedCall::new(token_address, approve_call);
+
+        // Test SafeCall trait implementation
+        assert_eq!(typed_call.to(), token_address);
+        assert_eq!(typed_call.value(), U256::ZERO);
+        assert_eq!(typed_call.operation(), Operation::Call);
+        // approve selector is 0x095ea7b3
+        let data = typed_call.data();
+        assert_eq!(&data[..4], &[0x09, 0x5e, 0xa7, 0xb3]);
+    }
 }

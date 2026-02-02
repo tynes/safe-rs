@@ -4,7 +4,7 @@ use alloy::primitives::U256;
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::{WalletBuilder, WalletConfig};
+use safe_rs::{Account, WalletBuilder, WalletConfig};
 
 /// Test connecting to an existing Safe
 #[tokio::test]
@@ -347,4 +347,188 @@ async fn test_wallet_config_zero_threshold() {
     let result = builder.deploy(harness._anvil.endpoint_url(), config).await;
 
     assert!(result.is_err(), "Should fail with zero threshold");
+}
+
+// ============================================================================
+// WalletBuilder Accessor Tests
+// ============================================================================
+
+/// Test WalletBuilder::signer() returns reference to signer
+#[tokio::test]
+async fn test_wallet_builder_signer() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+
+    let signer = builder.signer();
+    assert_eq!(signer.address(), harness.signer_address());
+}
+
+/// Test WalletBuilder::signer_address() returns address
+#[tokio::test]
+async fn test_wallet_builder_signer_address() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+
+    let signer_address = builder.signer_address();
+    assert_eq!(signer_address, harness.signer_address());
+}
+
+/// Test WalletBuilder::provider() returns reference to provider
+#[tokio::test]
+async fn test_wallet_builder_provider() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+
+    // Just verify we can call provider() and it returns something
+    let _provider = builder.provider();
+    // If we got here without panicking, the method works
+}
+
+// ============================================================================
+// Wallet Inner Tests
+// ============================================================================
+
+/// Test Wallet::inner() returns reference to underlying account
+#[tokio::test]
+async fn test_wallet_inner_returns_account() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let owner = harness.signer_address();
+
+    // Deploy a Safe
+    let salt_nonce = U256::from(100001);
+    let safe_address = harness
+        .deploy_safe(vec![owner], 1, salt_nonce)
+        .await
+        .expect("Failed to deploy Safe");
+
+    let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect(safe_address)
+        .await
+        .expect("Failed to connect to Safe");
+
+    // Get inner Safe reference
+    let safe = wallet.inner();
+    assert_eq!(safe.address(), safe_address);
+}
+
+/// Test Wallet::into_inner() consumes wallet and returns account
+#[tokio::test]
+async fn test_wallet_into_inner_consumes() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let owner = harness.signer_address();
+
+    // Deploy a Safe
+    let salt_nonce = U256::from(100002);
+    let safe_address = harness
+        .deploy_safe(vec![owner], 1, salt_nonce)
+        .await
+        .expect("Failed to deploy Safe");
+
+    let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect(safe_address)
+        .await
+        .expect("Failed to connect to Safe");
+
+    // Consume wallet and get Safe
+    let safe = wallet.into_inner();
+    assert_eq!(safe.address(), safe_address);
+
+    // wallet is now consumed - can't use it anymore
+    // safe can be used directly
+    let threshold = safe.threshold().await.expect("Failed to get threshold");
+    assert_eq!(threshold, 1);
+}
+
+/// Test Wallet::safe() for Safe wallets returns Safe reference
+#[tokio::test]
+async fn test_wallet_safe_accessor() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let owner = harness.signer_address();
+
+    // Deploy a Safe
+    let salt_nonce = U256::from(100003);
+    let safe_address = harness
+        .deploy_safe(vec![owner], 1, salt_nonce)
+        .await
+        .expect("Failed to deploy Safe");
+
+    let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect(safe_address)
+        .await
+        .expect("Failed to connect to Safe");
+
+    // Use safe() convenience method
+    let safe = wallet.safe();
+    assert_eq!(safe.address(), safe_address);
+
+    // Can call Safe methods through the accessor
+    let owners = safe.owners().await.expect("Failed to get owners");
+    assert_eq!(owners.len(), 1);
+    assert_eq!(owners[0], owner);
+}
+
+/// Test Wallet::eoa() for EOA wallets returns Eoa reference
+#[tokio::test]
+async fn test_wallet_eoa_accessor() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+
+    let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect_eoa()
+        .await
+        .expect("Failed to connect EOA wallet");
+
+    // Use eoa() convenience method
+    let eoa = wallet.eoa();
+    assert_eq!(eoa.address(), harness.signer_address());
+}
+
+/// Test Wallet generic methods work for both Safe and EOA
+#[tokio::test]
+async fn test_wallet_generic_methods() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let owner = harness.signer_address();
+
+    // Test with Safe wallet
+    let salt_nonce = U256::from(100004);
+    let safe_address = harness
+        .deploy_safe(vec![owner], 1, salt_nonce)
+        .await
+        .expect("Failed to deploy Safe");
+
+    let safe_wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect(safe_address)
+        .await
+        .expect("Failed to connect to Safe");
+
+    assert_eq!(safe_wallet.address(), safe_address);
+    assert_eq!(safe_wallet.signer_address(), owner);
+    assert!(safe_wallet.is_safe());
+    assert!(!safe_wallet.is_eoa());
+
+    // Test with EOA wallet
+    let eoa_wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect_eoa()
+        .await
+        .expect("Failed to connect EOA wallet");
+
+    assert_eq!(eoa_wallet.address(), owner);
+    assert_eq!(eoa_wallet.signer_address(), owner);
+    assert!(!eoa_wallet.is_safe());
+    assert!(eoa_wallet.is_eoa());
 }

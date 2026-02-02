@@ -730,6 +730,166 @@ async fn test_eoa_simulate_failure_returns_revert_reason() {
 // Mixed Operations Tests
 // ============================================================================
 
+// ============================================================================
+// Debug Output and simulation_success() Tests
+// ============================================================================
+
+/// Test Eoa::with_debug_output_dir() configures debug directory
+#[tokio::test(flavor = "multi_thread")]
+async fn test_eoa_with_debug_output_dir() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
+        .await
+        .expect("Failed to connect")
+        .with_debug_output_dir(temp_dir.path());
+
+    // Verify debug output dir is set via Account trait
+    assert_eq!(eoa.debug_output_dir(), Some(temp_dir.path()));
+}
+
+/// Test simulation_success() returns error when simulation not performed
+#[tokio::test(flavor = "multi_thread")]
+async fn test_eoa_simulation_success_error_when_not_simulated() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
+        .await
+        .expect("Failed to connect");
+
+    let recipient = address!("0x9999999999999999999999999999999999999999");
+
+    // Create builder without calling simulate()
+    let builder = eoa.batch().add_raw(recipient, U256::from(1000), vec![]);
+
+    // simulation_success() should fail because simulate() was not called
+    let result = builder.simulation_success();
+    assert!(matches!(result, Err(Error::SimulationNotPerformed)));
+}
+
+/// Test simulation_success() returns error when simulation failed
+#[tokio::test(flavor = "multi_thread")]
+async fn test_eoa_simulation_success_error_on_failure() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
+        .await
+        .expect("Failed to connect");
+
+    // Deploy a token without giving EOA any balance
+    let token_address = harness
+        .deploy_mock_erc20()
+        .await
+        .expect("Failed to deploy MockERC20");
+
+    let recipient = address!("0x9999999999999999999999999999999999999999");
+    let failing_transfer_call = IERC20::transferCall {
+        to: recipient,
+        amount: U256::from(1000), // EOA has no tokens, should revert
+    };
+
+    // Simulate first
+    let builder = eoa
+        .batch()
+        .add_typed(token_address, failing_transfer_call)
+        .simulate()
+        .await
+        .expect("simulate() should return Ok");
+
+    // simulation_success() should fail because the simulation reverted
+    let result = builder.simulation_success();
+    assert!(matches!(result, Err(Error::SimulationReverted { .. })));
+}
+
+/// Test simulation_success() returns Ok when simulation succeeded
+#[tokio::test(flavor = "multi_thread")]
+async fn test_eoa_simulation_success_ok_on_success() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
+        .await
+        .expect("Failed to connect");
+
+    // Fund the EOA with ETH
+    let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
+    harness
+        .mint_eth(eoa.address(), fund_amount)
+        .await
+        .expect("Failed to fund EOA");
+
+    let recipient = address!("0x9999999999999999999999999999999999999999");
+
+    // Simulate a valid ETH transfer
+    let builder = eoa
+        .batch()
+        .add_raw(recipient, U256::from(1000), vec![])
+        .simulate()
+        .await
+        .expect("simulate() should return Ok");
+
+    // simulation_success() should return Ok
+    let result = builder.simulation_success();
+    assert!(result.is_ok());
+}
+
+/// Test simulation_success() can be chained with execute()
+#[tokio::test(flavor = "multi_thread")]
+async fn test_eoa_simulation_success_chained_with_execute() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let eoa = Eoa::connect(harness.provider.clone(), harness.signer.clone())
+        .await
+        .expect("Failed to connect");
+
+    // Fund the EOA with ETH
+    let fund_amount = U256::from(10_000_000_000_000_000_000u128); // 10 ETH
+    harness
+        .mint_eth(eoa.address(), fund_amount)
+        .await
+        .expect("Failed to fund EOA");
+
+    let recipient = address!("0x9999999999999999999999999999999999999999");
+    let transfer_amount = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
+
+    let initial_balance = harness
+        .get_balance(recipient)
+        .await
+        .expect("Failed to get initial balance");
+
+    // Full simulate-then-execute workflow with simulation_success() check
+    let result = eoa
+        .batch()
+        .add_raw(recipient, transfer_amount, vec![])
+        .simulate()
+        .await
+        .expect("simulate should succeed")
+        .simulation_success()
+        .expect("simulation_success should return Ok")
+        .execute()
+        .await
+        .expect("execute should succeed");
+
+    assert!(result.all_succeeded());
+
+    let final_balance = harness
+        .get_balance(recipient)
+        .await
+        .expect("Failed to get final balance");
+
+    assert_eq!(final_balance, initial_balance + transfer_amount);
+}
+
+// ============================================================================
+// Mixed Operations Tests
+// ============================================================================
+
 /// Test batch with both ETH and ERC20 transfers
 #[tokio::test(flavor = "multi_thread")]
 async fn test_eoa_mixed_eth_and_erc20_batch() {

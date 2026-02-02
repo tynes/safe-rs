@@ -10,11 +10,17 @@ mod erc20_operations;
 #[path = "e2e/is_safe.rs"]
 mod is_safe;
 
+#[path = "e2e/safe_client.rs"]
+mod safe_client;
+
 #[path = "e2e/safe_deployment.rs"]
 mod safe_deployment;
 
 #[path = "e2e/safe_transactions.rs"]
 mod safe_transactions;
+
+#[path = "e2e/simulation_debug.rs"]
+mod simulation_debug;
 
 #[path = "e2e/simulation_verification.rs"]
 mod simulation_verification;
