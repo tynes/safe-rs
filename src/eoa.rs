@@ -9,14 +9,13 @@ use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, Bytes, TxHash, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
-use alloy::sol_types::SolCall;
 
 use crate::account::Account;
 use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
 use crate::safe::ExecutionResult;
 use crate::simulation::{ForkSimulator, SimulationResult};
-use crate::types::{Call, CallBuilder, Operation, SafeCall, TypedCall};
+use crate::types::{Call, CallBuilder, Operation};
 
 /// Result of executing a single EOA transaction
 #[derive(Debug, Clone)]
@@ -123,50 +122,6 @@ where
         }
         Ok(())
     }
-    /// Adds a typed call to the batch
-    pub fn add_typed<C: SolCall + Clone>(mut self, to: Address, call: C) -> Self {
-        let typed_call = TypedCall::new(to, call);
-        self.calls.push(Call::new(
-            typed_call.to(),
-            typed_call.value,
-            typed_call.data(),
-        ));
-        self
-    }
-
-    /// Adds a typed call with value to the batch
-    pub fn add_typed_with_value<C: SolCall + Clone>(
-        mut self,
-        to: Address,
-        call: C,
-        value: U256,
-    ) -> Self {
-        let typed_call = TypedCall::new(to, call).with_value(value);
-        self.calls.push(Call::new(
-            typed_call.to(),
-            typed_call.value,
-            typed_call.data(),
-        ));
-        self
-    }
-
-    /// Adds a raw call to the batch
-    pub fn add_raw(mut self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
-        self.calls.push(Call::new(to, value, data));
-        self
-    }
-
-    /// Adds a call implementing SafeCall to the batch
-    pub fn add(mut self, call: impl SafeCall) -> Self {
-        self.calls.push(Call {
-            to: call.to(),
-            value: call.value(),
-            data: call.data(),
-            operation: call.operation(),
-            gas_limit: None,
-        });
-        self
-    }
 
     /// Continue executing remaining transactions even if one fails
     ///
@@ -259,11 +214,6 @@ where
         self.simulation_results
             .as_ref()
             .map(|results| results.iter().map(|r| r.gas_used).sum())
-    }
-
-    /// Returns the number of calls in the batch
-    pub fn call_count(&self) -> usize {
-        self.calls.len()
     }
 
     /// Executes all transactions
@@ -429,32 +379,20 @@ where
     }
 }
 
-impl<'a, P> CallBuilder for EoaBuilder<'a, P>
+impl<P> CallBuilder for EoaBuilder<'_, P>
 where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
 {
-    fn add_typed<C: SolCall + Clone>(self, to: Address, call: C) -> Self {
-        EoaBuilder::add_typed(self, to, call)
+    fn calls_mut(&mut self) -> &mut Vec<Call> {
+        &mut self.calls
     }
 
-    fn add_typed_with_value<C: SolCall + Clone>(self, to: Address, call: C, value: U256) -> Self {
-        EoaBuilder::add_typed_with_value(self, to, call, value)
-    }
-
-    fn add_raw(self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
-        EoaBuilder::add_raw(self, to, value, data)
-    }
-
-    fn add(self, call: impl SafeCall) -> Self {
-        EoaBuilder::add(self, call)
+    fn calls(&self) -> &Vec<Call> {
+        &self.calls
     }
 
     fn with_gas_limit(self, gas_limit: u64) -> Self {
         EoaBuilder::with_gas_limit(self, gas_limit)
-    }
-
-    fn call_count(&self) -> usize {
-        EoaBuilder::call_count(self)
     }
 
     async fn simulate(self) -> Result<Self> {
@@ -462,7 +400,7 @@ where
     }
 
     fn simulation_result(&self) -> Option<&SimulationResult> {
-        EoaBuilder::simulation_result(self)
+        self.aggregated_result.as_ref()
     }
 }
 

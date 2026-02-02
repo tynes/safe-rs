@@ -13,30 +13,70 @@ use crate::simulation::SimulationResult;
 /// This trait provides a common interface for both `EoaBuilder` and `SafeBuilder`,
 /// enabling generic code to work with either builder type.
 pub trait CallBuilder: Sized {
+    /// Returns a mutable reference to the internal calls vector.
+    fn calls_mut(&mut self) -> &mut Vec<Call>;
+
+    /// Returns a reference to the internal calls vector.
+    fn calls(&self) -> &Vec<Call>;
+
     /// Adds a typed call to the batch.
-    fn add_typed<C: SolCall + Clone>(self, to: Address, call: C) -> Self;
+    fn add_typed<C: SolCall + Clone>(mut self, to: Address, call: C) -> Self {
+        let typed_call = TypedCall::new(to, call);
+        self.calls_mut().push(Call::new(
+            typed_call.to(),
+            typed_call.value,
+            typed_call.data(),
+        ));
+        self
+    }
 
     /// Adds a typed call with value to the batch.
-    fn add_typed_with_value<C: SolCall + Clone>(self, to: Address, call: C, value: U256) -> Self;
+    fn add_typed_with_value<C: SolCall + Clone>(
+        mut self,
+        to: Address,
+        call: C,
+        value: U256,
+    ) -> Self {
+        let typed_call = TypedCall::new(to, call).with_value(value);
+        self.calls_mut().push(Call::new(
+            typed_call.to(),
+            typed_call.value,
+            typed_call.data(),
+        ));
+        self
+    }
 
     /// Adds a raw call to the batch.
-    fn add_raw(self, to: Address, value: U256, data: impl Into<Bytes>) -> Self;
+    fn add_raw(mut self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
+        self.calls_mut().push(Call::new(to, value, data));
+        self
+    }
 
     /// Adds a call implementing SafeCall to the batch.
-    fn add(self, call: impl SafeCall) -> Self;
+    fn add(mut self, call: impl SafeCall) -> Self {
+        self.calls_mut().push(Call {
+            to: call.to(),
+            value: call.value(),
+            data: call.data(),
+            operation: call.operation(),
+            gas_limit: None,
+        });
+        self
+    }
 
-    /// Sets a fixed gas limit for the most recently added call.
+    /// Sets a fixed gas limit for the transaction.
     ///
-    /// This bypasses gas estimation for that call, which is useful when
-    /// you want to execute a transaction that would revert (and thus fail
-    /// gas estimation).
+    /// For `EoaBuilder`: Sets the gas limit on the most recently added call.
+    /// For `SafeBuilder`: Sets the top-level `safe_tx_gas` for the entire transaction.
     ///
     /// # Panics
-    /// Panics if called before adding any calls to the batch.
+    /// For `EoaBuilder`, panics if called before adding any calls to the batch.
     fn with_gas_limit(self, gas_limit: u64) -> Self;
 
     /// Returns the number of calls in the batch.
-    fn call_count(&self) -> usize;
+    fn call_count(&self) -> usize {
+        self.calls().len()
+    }
 
     /// Simulates all calls and stores the results.
     ///

@@ -4,7 +4,7 @@ use alloy::primitives::U256;
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::{Account, IERC20};
+use safe_rs::{Account, CallBuilder, IERC20};
 
 /// Test deploying a MockERC20 token and minting to Safe
 #[tokio::test(flavor = "multi_thread")]

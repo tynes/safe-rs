@@ -4,7 +4,7 @@ use alloy::primitives::{keccak256, Bytes, U256};
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::{Account, IERC20};
+use safe_rs::{Account, CallBuilder, IERC20};
 
 /// Test state diff balance changes for ETH transfer
 #[tokio::test(flavor = "multi_thread")]

@@ -6,7 +6,7 @@ use alloy::providers::Provider;
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::{Account, IERC20};
+use safe_rs::{Account, CallBuilder, IERC20};
 
 /// Test that simulation gas is within 20% of actual execution gas
 #[tokio::test(flavor = "multi_thread")]

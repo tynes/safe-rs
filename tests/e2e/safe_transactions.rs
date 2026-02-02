@@ -4,7 +4,7 @@ use alloy::primitives::{Bytes, U256};
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::{Account, Operation};
+use safe_rs::{Account, CallBuilder, Operation};
 
 /// Test executing a single ETH transfer from the Safe
 #[tokio::test(flavor = "multi_thread")]

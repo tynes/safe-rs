@@ -14,7 +14,7 @@ use crate::encoding::{compute_safe_transaction_hash, encode_multisend_data, Safe
 use crate::error::{Error, Result};
 use crate::signing::sign_hash;
 use crate::simulation::{ForkSimulator, SimulationResult};
-use crate::types::{Call, CallBuilder, Operation, SafeCall, TypedCall};
+use crate::types::{Call, CallBuilder, Operation};
 
 /// Safe proxy singleton storage slot (slot 0)
 /// Safe proxies store the implementation/singleton address at storage slot 0,
@@ -192,60 +192,11 @@ where
             simulation_result: None,
         }
     }
-    /// Adds a typed call to the batch
-    pub fn add_typed<C: SolCall + Clone>(mut self, to: Address, call: C) -> Self {
-        let typed_call = TypedCall::new(to, call);
-        self.calls.push(Call::new(
-            typed_call.to(),
-            typed_call.value,
-            typed_call.data(),
-        ));
-        self
-    }
-
-    /// Adds a typed call with value to the batch
-    pub fn add_typed_with_value<C: SolCall + Clone>(
-        mut self,
-        to: Address,
-        call: C,
-        value: U256,
-    ) -> Self {
-        let typed_call = TypedCall::new(to, call).with_value(value);
-        self.calls.push(Call::new(
-            typed_call.to(),
-            typed_call.value,
-            typed_call.data(),
-        ));
-        self
-    }
-
-    /// Adds a raw call to the batch
-    pub fn add_raw(mut self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
-        self.calls.push(Call::new(to, value, data));
-        self
-    }
-
-    /// Adds a call implementing SafeCall to the batch
-    pub fn add(mut self, call: impl SafeCall) -> Self {
-        self.calls.push(Call {
-            to: call.to(),
-            value: call.value(),
-            data: call.data(),
-            operation: call.operation(),
-            gas_limit: None,
-        });
-        self
-    }
 
     /// Use MultiSendCallOnly instead of MultiSend (no delegatecall allowed)
     pub fn call_only(mut self) -> Self {
         self.use_call_only = true;
         self
-    }
-
-    /// Returns the number of calls in the batch
-    pub fn call_count(&self) -> usize {
-        self.calls.len()
     }
 
     /// Sets the operation type for the outer call (usually DelegateCall for MultiSend)
@@ -260,20 +211,11 @@ where
         self
     }
 
-    /// Sets a fixed gas limit for the most recently added call.
+    /// Sets the top-level `safe_tx_gas` for the entire Safe transaction.
     ///
-    /// This bypasses gas estimation for that call, which is useful when
-    /// you want to execute a transaction that would revert (and thus fail
-    /// gas estimation).
-    ///
-    /// # Panics
-    /// Panics if called before adding any calls to the batch.
+    /// This is equivalent to `with_safe_tx_gas(U256::from(gas_limit))`.
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
-        let last_call = self
-            .calls
-            .last_mut()
-            .expect("with_gas_limit called before adding any calls");
-        last_call.gas_limit = Some(gas_limit);
+        self.safe_tx_gas = Some(U256::from(gas_limit));
         self
     }
 
@@ -547,32 +489,20 @@ where
     }
 }
 
-impl<'a, P> CallBuilder for SafeBuilder<'a, P>
+impl<P> CallBuilder for SafeBuilder<'_, P>
 where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
 {
-    fn add_typed<C: SolCall + Clone>(self, to: Address, call: C) -> Self {
-        SafeBuilder::add_typed(self, to, call)
+    fn calls_mut(&mut self) -> &mut Vec<Call> {
+        &mut self.calls
     }
 
-    fn add_typed_with_value<C: SolCall + Clone>(self, to: Address, call: C, value: U256) -> Self {
-        SafeBuilder::add_typed_with_value(self, to, call, value)
-    }
-
-    fn add_raw(self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
-        SafeBuilder::add_raw(self, to, value, data)
-    }
-
-    fn add(self, call: impl SafeCall) -> Self {
-        SafeBuilder::add(self, call)
+    fn calls(&self) -> &Vec<Call> {
+        &self.calls
     }
 
     fn with_gas_limit(self, gas_limit: u64) -> Self {
         SafeBuilder::with_gas_limit(self, gas_limit)
-    }
-
-    fn call_count(&self) -> usize {
-        SafeBuilder::call_count(self)
     }
 
     async fn simulate(self) -> Result<Self> {
@@ -580,7 +510,7 @@ where
     }
 
     fn simulation_result(&self) -> Option<&SimulationResult> {
-        SafeBuilder::simulation_result(self)
+        self.simulation_result.as_ref()
     }
 }
 

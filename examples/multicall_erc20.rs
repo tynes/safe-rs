@@ -15,7 +15,7 @@ use alloy::network::AnyNetwork;
 use alloy::primitives::{address, Address, U256};
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
-use safe_rs::{Account, Safe, IERC20};
+use safe_rs::{Account, CallBuilder, Safe, IERC20};
 use url::Url;
 
 #[tokio::main]

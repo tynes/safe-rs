@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::common::{MockERC20, TestHarness};
 use crate::skip_if_no_rpc;
-use safe_rs::{Account, Call, ChainConfig, Eoa, Error, IERC20};
+use safe_rs::{Account, Call, CallBuilder, ChainConfig, Eoa, Error, IERC20};
 
 // ============================================================================
 // Eoa Client Construction Tests
