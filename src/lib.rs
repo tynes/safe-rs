@@ -74,7 +74,13 @@ pub use error::{Error, Result};
 pub use safe::{is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
 pub use simulation::{AccountState, CallTraceArena, DiffMode, ForkSimulator, SimulationResult};
 pub use types::{BatchResult, BatchSimulationResult, Call, CallBuilder, Operation, SafeCall, TypedCall};
-pub use wallet::{BatchBuilder, SimulatedBatchBuilder, Wallet, WalletConfig};
+pub use wallet::{Wallet, WalletConfig};
+
+/// Type alias for a Safe wallet
+pub type SafeWallet<P> = Wallet<Safe<P>>;
+
+/// Type alias for an EOA wallet
+pub type EoaWallet<P> = Wallet<Eoa<P>>;
 
 // Re-export alloy types that are commonly used
 pub use alloy::network::AnyNetwork;
