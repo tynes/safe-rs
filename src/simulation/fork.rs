@@ -125,6 +125,7 @@ pub struct ForkSimulator<P> {
     chain_id: u64,
     block_number: Option<u64>,
     tracing: bool,
+    caller_balance: Option<U256>,
 }
 
 impl<P> ForkSimulator<P>
@@ -138,6 +139,7 @@ where
             chain_id,
             block_number: None,
             tracing: false,
+            caller_balance: None,
         }
     }
 
@@ -154,6 +156,14 @@ where
     /// Access traces via `SimulationResult::format_traces()`.
     pub fn with_tracing(mut self, enable: bool) -> Self {
         self.tracing = enable;
+        self
+    }
+
+    /// Sets a custom balance for the caller during simulation.
+    ///
+    /// If not set, the caller's on-chain balance is used.
+    pub fn with_caller_balance(mut self, balance: U256) -> Self {
+        self.caller_balance = Some(balance);
         self
     }
 
@@ -194,13 +204,14 @@ where
     ) -> Result<SimulationResult> {
         let mut db = self.create_fork_db().await?;
 
-        // Set a high balance for the caller to ensure the call can proceed
-        let caller_info = AccountInfo::default();
-        db.insert_account_info(from, caller_info);
+        // Only override caller balance if configured
+        if let Some(balance) = self.caller_balance {
+            let caller_info = AccountInfo::default();
+            db.insert_account_info(from, caller_info);
 
-        // Update the balance separately
-        if let Some(account) = db.cache.accounts.get_mut(&from) {
-            account.info.balance = U256::from(1_000_000_000_000_000_000_000u128); // 1000 ETH
+            if let Some(account) = db.cache.accounts.get_mut(&from) {
+                account.info.balance = balance;
+            }
         }
 
         // Determine the actual call target and calldata
