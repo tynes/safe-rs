@@ -5,5 +5,5 @@ mod call;
 mod operation;
 
 pub use batch_result::{BatchResult, BatchSimulationResult};
-pub use call::{Call, SafeCall, TypedCall};
+pub use call::{Call, CallBuilder, SafeCall, TypedCall};
 pub use operation::Operation;

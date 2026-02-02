@@ -15,7 +15,7 @@ use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
 use crate::safe::ExecutionResult;
 use crate::simulation::{ForkSimulator, SimulationResult};
-use crate::types::{Call, Operation, SafeCall, TypedCall};
+use crate::types::{Call, CallBuilder, Operation, SafeCall, TypedCall};
 
 /// Result of executing a single EOA transaction
 #[derive(Debug, Clone)]
@@ -490,6 +490,43 @@ where
             state_diff,
             traces: None,
         }
+    }
+}
+
+impl<'a, P> CallBuilder for EoaBuilder<'a, P>
+where
+    P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
+{
+    fn add_typed<C: SolCall + Clone>(self, to: Address, call: C) -> Self {
+        EoaBuilder::add_typed(self, to, call)
+    }
+
+    fn add_typed_with_value<C: SolCall + Clone>(self, to: Address, call: C, value: U256) -> Self {
+        EoaBuilder::add_typed_with_value(self, to, call, value)
+    }
+
+    fn add_raw(self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
+        EoaBuilder::add_raw(self, to, value, data)
+    }
+
+    fn add(self, call: impl SafeCall) -> Self {
+        EoaBuilder::add(self, call)
+    }
+
+    fn with_gas_limit(self, gas_limit: u64) -> Self {
+        EoaBuilder::with_gas_limit(self, gas_limit)
+    }
+
+    fn call_count(&self) -> usize {
+        EoaBuilder::call_count(self)
+    }
+
+    async fn simulate(self) -> Result<Self> {
+        EoaBuilder::simulate(self).await
+    }
+
+    fn simulation_result(&self) -> Option<&SimulationResult> {
+        EoaBuilder::simulation_result(self)
     }
 }
 

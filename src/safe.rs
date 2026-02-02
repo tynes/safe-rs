@@ -13,7 +13,7 @@ use crate::encoding::{compute_safe_transaction_hash, encode_multisend_data, Safe
 use crate::error::{Error, Result};
 use crate::signing::sign_hash;
 use crate::simulation::{ForkSimulator, SimulationResult};
-use crate::types::{Call, Operation, SafeCall, TypedCall};
+use crate::types::{Call, CallBuilder, Operation, SafeCall, TypedCall};
 
 /// Safe proxy singleton storage slot (slot 0)
 /// Safe proxies store the implementation/singleton address at storage slot 0,
@@ -315,6 +315,23 @@ where
         self
     }
 
+    /// Sets a fixed gas limit for the most recently added call.
+    ///
+    /// This bypasses gas estimation for that call, which is useful when
+    /// you want to execute a transaction that would revert (and thus fail
+    /// gas estimation).
+    ///
+    /// # Panics
+    /// Panics if called before adding any calls to the batch.
+    pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
+        let last_call = self
+            .calls
+            .last_mut()
+            .expect("with_gas_limit called before adding any calls");
+        last_call.gas_limit = Some(gas_limit);
+        self
+    }
+
     /// Simulates the multicall and stores the result
     ///
     /// After simulation, you can inspect the results via `simulation_result()`
@@ -582,6 +599,43 @@ where
             // MultiSend is called with zero value; individual call values are encoded in the data
             Ok((multisend_address, U256::ZERO, calldata, Operation::DelegateCall))
         }
+    }
+}
+
+impl<'a, P> CallBuilder for MulticallBuilder<'a, P>
+where
+    P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
+{
+    fn add_typed<C: SolCall + Clone>(self, to: Address, call: C) -> Self {
+        MulticallBuilder::add_typed(self, to, call)
+    }
+
+    fn add_typed_with_value<C: SolCall + Clone>(self, to: Address, call: C, value: U256) -> Self {
+        MulticallBuilder::add_typed_with_value(self, to, call, value)
+    }
+
+    fn add_raw(self, to: Address, value: U256, data: impl Into<Bytes>) -> Self {
+        MulticallBuilder::add_raw(self, to, value, data)
+    }
+
+    fn add(self, call: impl SafeCall) -> Self {
+        MulticallBuilder::add(self, call)
+    }
+
+    fn with_gas_limit(self, gas_limit: u64) -> Self {
+        MulticallBuilder::with_gas_limit(self, gas_limit)
+    }
+
+    fn call_count(&self) -> usize {
+        MulticallBuilder::call_count(self)
+    }
+
+    async fn simulate(self) -> Result<Self> {
+        MulticallBuilder::simulate(self).await
+    }
+
+    fn simulation_result(&self) -> Option<&SimulationResult> {
+        MulticallBuilder::simulation_result(self)
     }
 }
 

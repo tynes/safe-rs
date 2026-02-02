@@ -2,8 +2,51 @@
 
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::sol_types::SolCall;
+use std::future::Future;
 
 use super::Operation;
+use crate::error::Result;
+use crate::simulation::SimulationResult;
+
+/// Trait for builders that construct and execute batches of calls.
+///
+/// This trait provides a common interface for both `EoaBuilder` and `MulticallBuilder`,
+/// enabling generic code to work with either builder type.
+pub trait CallBuilder: Sized {
+    /// Adds a typed call to the batch.
+    fn add_typed<C: SolCall + Clone>(self, to: Address, call: C) -> Self;
+
+    /// Adds a typed call with value to the batch.
+    fn add_typed_with_value<C: SolCall + Clone>(self, to: Address, call: C, value: U256) -> Self;
+
+    /// Adds a raw call to the batch.
+    fn add_raw(self, to: Address, value: U256, data: impl Into<Bytes>) -> Self;
+
+    /// Adds a call implementing SafeCall to the batch.
+    fn add(self, call: impl SafeCall) -> Self;
+
+    /// Sets a fixed gas limit for the most recently added call.
+    ///
+    /// This bypasses gas estimation for that call, which is useful when
+    /// you want to execute a transaction that would revert (and thus fail
+    /// gas estimation).
+    ///
+    /// # Panics
+    /// Panics if called before adding any calls to the batch.
+    fn with_gas_limit(self, gas_limit: u64) -> Self;
+
+    /// Returns the number of calls in the batch.
+    fn call_count(&self) -> usize;
+
+    /// Simulates all calls and stores the results.
+    ///
+    /// After simulation, you can inspect the results via `simulation_result()`
+    /// and then call `execute()` which will use the simulation gas values.
+    fn simulate(self) -> impl Future<Output = Result<Self>> + Send;
+
+    /// Returns the simulation result if simulation was performed.
+    fn simulation_result(&self) -> Option<&SimulationResult>;
+}
 
 /// Trait for types that can be converted to a Safe call
 pub trait SafeCall {
