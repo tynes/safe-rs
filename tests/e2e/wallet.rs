@@ -4,7 +4,7 @@ use alloy::primitives::U256;
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::{Wallet, WalletConfig};
+use safe_rs::{WalletBuilder, WalletConfig};
 
 /// Test connecting to an existing Safe
 #[tokio::test]
@@ -21,14 +21,11 @@ async fn test_wallet_connect_safe() {
         .await
         .expect("Failed to deploy Safe");
 
-    // Now connect to it
-    let wallet = Wallet::connect_safe(
-        harness.provider.clone(),
-        harness.signer.clone(),
-        safe_address,
-    )
-    .await
-    .expect("Failed to connect to Safe");
+    // Now connect to it using the fluent builder API
+    let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect(safe_address)
+        .await
+        .expect("Failed to connect to Safe");
 
     assert!(wallet.is_safe(), "Wallet should be Safe");
     assert!(!wallet.is_eoa(), "Wallet should not be EOA");
@@ -62,13 +59,10 @@ async fn test_wallet_connect_safe_with_config() {
     // Now connect with the same salt nonce - should detect the Safe
     let config = WalletConfig::new().with_salt_nonce(salt_nonce);
 
-    let wallet = Wallet::connect_safe_with_config(
-        harness.provider.clone(),
-        harness.signer.clone(),
-        config,
-    )
-    .await
-    .expect("Failed to connect wallet");
+    let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect_with_config(config)
+        .await
+        .expect("Failed to connect wallet");
 
     assert!(wallet.is_safe(), "Wallet should be Safe when deployed");
     assert!(!wallet.is_eoa(), "Wallet should not be EOA when Safe is deployed");
@@ -79,9 +73,9 @@ async fn test_wallet_connect_safe_with_config() {
     );
 }
 
-/// Test that connect_safe_with_config fails when no Safe exists
+/// Test that connect_with_config fails when no Safe exists
 #[tokio::test]
-async fn test_wallet_connect_safe_with_config_fails_when_no_safe() {
+async fn test_wallet_connect_with_config_fails_when_no_safe() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
@@ -89,12 +83,9 @@ async fn test_wallet_connect_safe_with_config_fails_when_no_safe() {
     // Use a unique salt nonce to ensure no Safe exists at the computed address
     let config = WalletConfig::new().with_salt_nonce(U256::from(999999));
 
-    let result = Wallet::connect_safe_with_config(
-        harness.provider.clone(),
-        harness.signer.clone(),
-        config,
-    )
-    .await;
+    let result = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect_with_config(config)
+        .await;
 
     assert!(result.is_err(), "Should fail when no Safe is deployed");
 }
@@ -106,7 +97,8 @@ async fn test_wallet_connect_eoa() {
 
     let harness = TestHarness::new().await;
 
-    let wallet = Wallet::connect_eoa(harness.provider.clone(), harness.signer.clone())
+    let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
+        .connect_eoa()
         .await
         .expect("Failed to connect EOA wallet");
 
@@ -124,9 +116,9 @@ async fn test_wallet_connect_eoa() {
     );
 }
 
-/// Test that connect_or_deploy deploys a Safe if not exists
+/// Test that deploy creates a Safe if not exists
 #[tokio::test]
-async fn test_wallet_connect_or_deploy_creates_safe() {
+async fn test_wallet_deploy_creates_safe() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
@@ -134,14 +126,14 @@ async fn test_wallet_connect_or_deploy_creates_safe() {
     // Use a unique salt nonce to ensure no Safe exists
     let config = WalletConfig::new().with_salt_nonce(U256::from(20001));
 
-    let wallet = Wallet::connect_or_deploy_safe_with_rpc_and_config(
-        harness.provider.clone(),
-        harness.signer.clone(),
-        harness._anvil.endpoint_url(),
-        config,
-    )
-    .await
-    .expect("Failed to connect and deploy wallet");
+    // Deploy then connect using the fluent builder API
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+    let address = builder
+        .deploy(harness._anvil.endpoint_url(), config)
+        .await
+        .expect("Failed to deploy Safe");
+
+    let wallet = builder.connect(address).await.expect("Failed to connect to Safe");
 
     assert!(wallet.is_safe(), "Wallet should be Safe after deployment");
     assert!(!wallet.is_eoa(), "Wallet should not be EOA");
@@ -160,9 +152,9 @@ async fn test_wallet_connect_or_deploy_creates_safe() {
     );
 }
 
-/// Test that connect_or_deploy returns existing Safe without re-deploying
+/// Test that deploy is idempotent and returns existing Safe address
 #[tokio::test]
-async fn test_wallet_connect_or_deploy_uses_existing_safe() {
+async fn test_wallet_deploy_uses_existing_safe() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
@@ -175,29 +167,27 @@ async fn test_wallet_connect_or_deploy_uses_existing_safe() {
         .await
         .expect("Failed to deploy Safe");
 
-    // Now call connect_or_deploy with the same salt nonce
+    // Now call deploy with the same salt nonce - should return existing address
     let config = WalletConfig::new().with_salt_nonce(salt_nonce);
 
-    let wallet = Wallet::connect_or_deploy_safe_with_rpc_and_config(
-        harness.provider.clone(),
-        harness.signer.clone(),
-        harness._anvil.endpoint_url(),
-        config,
-    )
-    .await
-    .expect("Failed to connect and deploy wallet");
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+    let deployed_address = builder
+        .deploy(harness._anvil.endpoint_url(), config)
+        .await
+        .expect("Failed to deploy Safe");
 
-    assert!(wallet.is_safe(), "Wallet should be Safe");
     assert_eq!(
-        wallet.address(),
-        safe_address,
-        "Should use existing Safe address"
+        deployed_address, safe_address,
+        "Should return existing Safe address"
     );
+
+    let wallet = builder.connect(deployed_address).await.expect("Failed to connect");
+    assert!(wallet.is_safe(), "Wallet should be Safe");
 }
 
-/// Test that computed_safe_address matches the actual deployed address
+/// Test that compute_address matches the actual deployed address
 #[tokio::test]
-async fn test_wallet_computed_safe_address() {
+async fn test_wallet_compute_address() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
@@ -206,14 +196,12 @@ async fn test_wallet_computed_safe_address() {
     let salt_nonce = U256::from(40001);
     let config = WalletConfig::new().with_salt_nonce(salt_nonce);
 
-    // Compute the address first
-    let computed_address = Wallet::<safe_rs::Safe<_>>::compute_safe_address(
-        &harness.provider,
-        &harness.signer,
-        &config,
-    )
-    .await
-    .expect("Failed to compute Safe address");
+    // Compute the address first using the builder
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+    let computed_address = builder
+        .compute_address(&config)
+        .await
+        .expect("Failed to compute Safe address");
 
     // Deploy the Safe
     let safe_address = harness
@@ -238,21 +226,17 @@ async fn test_wallet_config_salt_nonce() {
     let config1 = WalletConfig::new().with_salt_nonce(U256::from(50001));
     let config2 = WalletConfig::new().with_salt_nonce(U256::from(50002));
 
-    let addr1 = Wallet::<safe_rs::Safe<_>>::compute_safe_address(
-        &harness.provider,
-        &harness.signer,
-        &config1,
-    )
-    .await
-    .expect("Failed to compute address 1");
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
 
-    let addr2 = Wallet::<safe_rs::Safe<_>>::compute_safe_address(
-        &harness.provider,
-        &harness.signer,
-        &config2,
-    )
-    .await
-    .expect("Failed to compute address 2");
+    let addr1 = builder
+        .compute_address(&config1)
+        .await
+        .expect("Failed to compute address 1");
+
+    let addr2 = builder
+        .compute_address(&config2)
+        .await
+        .expect("Failed to compute address 2");
 
     assert_ne!(addr1, addr2, "Different salt nonces should produce different addresses");
 }
@@ -273,21 +257,17 @@ async fn test_wallet_config_additional_owners() {
         .with_salt_nonce(U256::from(60001))
         .with_additional_owners(vec![owner2]);
 
-    let addr1 = Wallet::<safe_rs::Safe<_>>::compute_safe_address(
-        &harness.provider,
-        &harness.signer,
-        &config1,
-    )
-    .await
-    .expect("Failed to compute address 1");
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
 
-    let addr2 = Wallet::<safe_rs::Safe<_>>::compute_safe_address(
-        &harness.provider,
-        &harness.signer,
-        &config2,
-    )
-    .await
-    .expect("Failed to compute address 2");
+    let addr1 = builder
+        .compute_address(&config1)
+        .await
+        .expect("Failed to compute address 1");
+
+    let addr2 = builder
+        .compute_address(&config2)
+        .await
+        .expect("Failed to compute address 2");
 
     // Different owners should produce different addresses (even with same salt)
     assert_ne!(addr1, addr2, "Different owners should produce different addresses");
@@ -295,7 +275,7 @@ async fn test_wallet_config_additional_owners() {
 
 /// Test WalletConfig with different threshold
 #[tokio::test]
-async fn test_wallet_connect_or_deploy_with_threshold() {
+async fn test_wallet_deploy_with_threshold() {
     skip_if_no_rpc!();
 
     let harness = TestHarness::new().await;
@@ -306,14 +286,13 @@ async fn test_wallet_connect_or_deploy_with_threshold() {
         .with_additional_owners(vec![owner2])
         .with_threshold(2);
 
-    let wallet = Wallet::connect_or_deploy_safe_with_rpc_and_config(
-        harness.provider.clone(),
-        harness.signer.clone(),
-        harness._anvil.endpoint_url(),
-        config,
-    )
-    .await
-    .expect("Failed to connect and deploy wallet");
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+    let address = builder
+        .deploy(harness._anvil.endpoint_url(), config)
+        .await
+        .expect("Failed to deploy Safe");
+
+    let wallet = builder.connect(address).await.expect("Failed to connect");
 
     assert!(wallet.is_safe(), "Wallet should be Safe");
 
@@ -338,13 +317,8 @@ async fn test_wallet_config_invalid_threshold() {
         .with_salt_nonce(U256::from(80001))
         .with_threshold(2);
 
-    let result = Wallet::connect_or_deploy_safe_with_rpc_and_config(
-        harness.provider.clone(),
-        harness.signer.clone(),
-        harness._anvil.endpoint_url(),
-        config,
-    )
-    .await;
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+    let result = builder.deploy(harness._anvil.endpoint_url(), config).await;
 
     match result {
         Err(err) => {
@@ -369,13 +343,8 @@ async fn test_wallet_config_zero_threshold() {
         .with_salt_nonce(U256::from(90001))
         .with_threshold(0);
 
-    let result = Wallet::connect_or_deploy_safe_with_rpc_and_config(
-        harness.provider.clone(),
-        harness.signer.clone(),
-        harness._anvil.endpoint_url(),
-        config,
-    )
-    .await;
+    let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
+    let result = builder.deploy(harness._anvil.endpoint_url(), config).await;
 
     assert!(result.is_err(), "Should fail with zero threshold");
 }

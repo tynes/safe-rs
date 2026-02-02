@@ -62,6 +62,7 @@ fn convert_transaction(tx: BundleTransaction) -> Result<Call> {
         value,
         data,
         operation,
+        gas_limit: None,
     })
 }
 

@@ -74,7 +74,7 @@ pub use error::{Error, Result};
 pub use safe::{is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
 pub use simulation::{AccountState, CallTraceArena, DiffMode, ForkSimulator, SimulationResult};
 pub use types::{BatchResult, BatchSimulationResult, Call, CallBuilder, Operation, SafeCall, TypedCall};
-pub use wallet::{Wallet, WalletConfig};
+pub use wallet::{Wallet, WalletBuilder, WalletConfig};
 
 /// Type alias for a Safe wallet
 pub type SafeWallet<P> = Wallet<Safe<P>>;

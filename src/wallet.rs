@@ -6,13 +6,22 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use safe_rs::{Wallet, WalletConfig, Account};
+//! use safe_rs::{WalletBuilder, WalletConfig, Account};
 //!
-//! // Connect to a Safe wallet
-//! let safe_wallet = Wallet::connect_safe(provider, signer, safe_address).await?;
+//! // Connect to a Safe wallet using the fluent builder API
+//! let safe_wallet = WalletBuilder::new(provider, signer)
+//!     .connect(safe_address)
+//!     .await?;
 //!
 //! // Connect to an EOA wallet
-//! let eoa_wallet = Wallet::connect_eoa(provider, signer).await?;
+//! let eoa_wallet = WalletBuilder::new(provider, signer)
+//!     .connect_eoa()
+//!     .await?;
+//!
+//! // Deploy a new Safe and connect to it
+//! let builder = WalletBuilder::new(provider, signer);
+//! let address = builder.deploy(rpc_url, config.clone()).await?;
+//! let wallet = builder.connect(address).await?;
 //!
 //! // Generic function that works with any account type
 //! async fn do_something<A: Account>(wallet: &Wallet<A>) -> Result<()> {
@@ -111,6 +120,272 @@ impl WalletConfig {
     }
 }
 
+// =============================================================================
+// WalletBuilder
+// =============================================================================
+
+/// Builder for creating wallets with a fluent API.
+///
+/// This builder holds the provider and signer, allowing you to:
+/// - Connect to an existing Safe at a known address
+/// - Connect to a Safe at a computed CREATE2 address
+/// - Connect as an EOA (no Safe)
+/// - Deploy a new Safe and then connect to it
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Connect to existing Safe
+/// let wallet = WalletBuilder::new(provider, signer)
+///     .connect(address)
+///     .await?;
+///
+/// // Deploy then connect (builder not consumed by deploy)
+/// let builder = WalletBuilder::new(provider, signer);
+/// let address = builder.deploy(rpc_url, config.clone()).await?;
+/// let wallet = builder.connect(address).await?;
+/// ```
+pub struct WalletBuilder<P> {
+    provider: P,
+    signer: PrivateKeySigner,
+}
+
+impl<P> WalletBuilder<P> {
+    /// Creates a new WalletBuilder with the given provider and signer.
+    pub fn new(provider: P, signer: PrivateKeySigner) -> Self {
+        Self { provider, signer }
+    }
+
+    /// Returns a reference to the signer.
+    pub fn signer(&self) -> &PrivateKeySigner {
+        &self.signer
+    }
+
+    /// Returns the signer's address.
+    pub fn signer_address(&self) -> Address {
+        self.signer.address()
+    }
+
+    /// Returns a reference to the provider.
+    pub fn provider(&self) -> &P {
+        &self.provider
+    }
+}
+
+impl<P> WalletBuilder<P>
+where
+    P: Provider<AnyNetwork> + Clone + 'static,
+{
+    /// Connects to an existing Safe at the given address.
+    ///
+    /// # Arguments
+    /// * `address` - The Safe contract address
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let wallet = WalletBuilder::new(provider, signer)
+    ///     .connect(safe_address)
+    ///     .await?;
+    /// ```
+    pub async fn connect(self, address: Address) -> Result<Wallet<Safe<P>>> {
+        let safe = Safe::connect(self.provider, self.signer, address).await?;
+        Ok(Wallet::from_account(safe))
+    }
+
+    /// Connects to a Safe at the computed CREATE2 address for the given config.
+    ///
+    /// This computes the deterministic Safe address based on the signer and config,
+    /// then connects to it. Returns an error if no Safe is deployed at that address.
+    ///
+    /// # Arguments
+    /// * `config` - Configuration for Safe address computation
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let config = WalletConfig::new().with_salt_nonce(U256::from(42));
+    /// let wallet = WalletBuilder::new(provider, signer)
+    ///     .connect_with_config(config)
+    ///     .await?;
+    /// ```
+    pub async fn connect_with_config(self, config: WalletConfig) -> Result<Wallet<Safe<P>>> {
+        let safe_address = self.compute_address(&config).await?;
+
+        // Check if Safe is deployed
+        if !is_safe(&self.provider, safe_address).await? {
+            return Err(Error::InvalidConfig(format!(
+                "No Safe deployed at computed address {}",
+                safe_address
+            )));
+        }
+
+        let safe = Safe::connect(self.provider, self.signer, safe_address).await?;
+        Ok(Wallet::from_account(safe))
+    }
+
+    /// Connects as an EOA (no Safe).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let wallet = WalletBuilder::new(provider, signer)
+    ///     .connect_eoa()
+    ///     .await?;
+    /// ```
+    pub async fn connect_eoa(self) -> Result<Wallet<Eoa<P>>> {
+        let eoa = Eoa::connect(self.provider, self.signer).await?;
+        Ok(Wallet::from_account(eoa))
+    }
+
+    /// Computes the Safe address that would be used for the given config.
+    ///
+    /// This is useful for checking what Safe address would be computed without
+    /// actually connecting or deploying.
+    ///
+    /// # Arguments
+    /// * `config` - Configuration for Safe address computation
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let builder = WalletBuilder::new(provider, signer);
+    /// let config = WalletConfig::new().with_salt_nonce(U256::from(42));
+    /// let address = builder.compute_address(&config).await?;
+    /// ```
+    pub async fn compute_address(&self, config: &WalletConfig) -> Result<Address> {
+        let addresses = ChainAddresses::v1_4_1();
+        let signer_address = self.signer.address();
+
+        // Build owners array
+        let owners = config.build_owners(signer_address);
+
+        // Get fallback handler
+        let fallback_handler = config.get_fallback_handler();
+
+        // Encode initializer
+        let initializer = encode_setup_call(&owners, config.threshold, fallback_handler);
+
+        // Get proxy creation code
+        let factory = ISafeProxyFactory::new(addresses.proxy_factory, &self.provider);
+        let creation_code = factory
+            .proxyCreationCode()
+            .call()
+            .await
+            .map_err(|e| Error::Fetch {
+                what: "proxy creation code",
+                reason: e.to_string(),
+            })?;
+
+        // Compute deterministic address
+        let safe_address = compute_create2_address(
+            addresses.proxy_factory,
+            addresses.safe_singleton,
+            &initializer,
+            config.salt_nonce,
+            &creation_code,
+        );
+
+        Ok(safe_address)
+    }
+
+    /// Deploys a Safe with the given configuration. Idempotent.
+    ///
+    /// If a Safe already exists at the computed address, returns that address
+    /// without deploying. Otherwise, deploys a new Safe.
+    ///
+    /// Uses `&self` so the builder can be reused for `connect()` afterward.
+    ///
+    /// # Arguments
+    /// * `rpc_url` - The RPC URL for sending the deployment transaction
+    /// * `config` - Configuration for Safe deployment
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let builder = WalletBuilder::new(provider, signer);
+    /// let config = WalletConfig::new().with_salt_nonce(U256::from(42));
+    /// let address = builder.deploy(rpc_url, config.clone()).await?;
+    /// let wallet = builder.connect(address).await?;
+    /// ```
+    pub async fn deploy(&self, rpc_url: Url, config: WalletConfig) -> Result<Address> {
+        let addresses = ChainAddresses::v1_4_1();
+        let signer_address = self.signer.address();
+
+        // Build owners array
+        let owners = config.build_owners(signer_address);
+
+        // Validate threshold
+        if config.threshold == 0 || config.threshold as usize > owners.len() {
+            return Err(Error::InvalidConfig(format!(
+                "Invalid threshold: {} (must be 1-{})",
+                config.threshold,
+                owners.len()
+            )));
+        }
+
+        // Get fallback handler
+        let fallback_handler = config.get_fallback_handler();
+
+        // Encode initializer
+        let initializer = encode_setup_call(&owners, config.threshold, fallback_handler);
+
+        // Get proxy creation code
+        let factory = ISafeProxyFactory::new(addresses.proxy_factory, &self.provider);
+        let creation_code = factory
+            .proxyCreationCode()
+            .call()
+            .await
+            .map_err(|e| Error::Fetch {
+                what: "proxy creation code",
+                reason: e.to_string(),
+            })?;
+
+        // Compute deterministic address
+        let safe_address = compute_create2_address(
+            addresses.proxy_factory,
+            addresses.safe_singleton,
+            &initializer,
+            config.salt_nonce,
+            &creation_code,
+        );
+
+        // Check if Safe is already deployed
+        if is_safe(&self.provider, safe_address).await? {
+            return Ok(safe_address);
+        }
+
+        // Deploy the Safe
+        let wallet_provider = ProviderBuilder::new()
+            .network::<AnyNetwork>()
+            .wallet(EthereumWallet::from(self.signer.clone()))
+            .connect_http(rpc_url);
+
+        let factory_with_wallet = ISafeProxyFactory::new(addresses.proxy_factory, &wallet_provider);
+
+        let pending_tx = factory_with_wallet
+            .createProxyWithNonce(addresses.safe_singleton, initializer, config.salt_nonce)
+            .send()
+            .await
+            .map_err(|e| Error::ExecutionFailed {
+                reason: format!("Failed to send deployment transaction: {}", e),
+            })?;
+
+        let _receipt = pending_tx.get_receipt().await.map_err(|e| Error::ExecutionFailed {
+            reason: format!("Failed to get deployment receipt: {}", e),
+        })?;
+
+        // Verify deployment
+        if !is_safe(&self.provider, safe_address).await? {
+            return Err(Error::ExecutionFailed {
+                reason: format!("Deployment failed: no Safe at expected address {}", safe_address),
+            });
+        }
+
+        Ok(safe_address)
+    }
+}
+
 /// A wallet that wraps any account type implementing the `Account` trait.
 ///
 /// This provides a unified interface for both Safe and EOA wallets with
@@ -123,8 +398,10 @@ impl WalletConfig {
 /// # Example
 ///
 /// ```rust,ignore
-/// // Connect to a Safe
-/// let wallet = Wallet::connect_safe(provider, signer, safe_address).await?;
+/// // Connect to a Safe using the fluent builder API
+/// let wallet = WalletBuilder::new(provider, signer)
+///     .connect(safe_address)
+///     .await?;
 ///
 /// // Use the unified batch API
 /// wallet.batch()
@@ -137,7 +414,7 @@ pub struct Wallet<A: Account> {
 
 impl<A: Account> Wallet<A> {
     /// Creates a new wallet wrapping the given account.
-    pub fn new(account: A) -> Self {
+    pub fn from_account(account: A) -> Self {
         Self { account }
     }
 
@@ -228,207 +505,6 @@ impl<P> Wallet<Safe<P>>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
 {
-    /// Connects to an existing Safe at the given address.
-    ///
-    /// # Arguments
-    /// * `provider` - The provider for RPC calls
-    /// * `signer` - The private key signer (must be an owner of the Safe)
-    /// * `address` - The Safe contract address
-    pub async fn connect_safe(
-        provider: P,
-        signer: PrivateKeySigner,
-        address: Address,
-    ) -> Result<Self> {
-        let safe = Safe::connect(provider, signer, address).await?;
-        Ok(Self::new(safe))
-    }
-
-    /// Connects to a Safe at the computed CREATE2 address for the given config.
-    ///
-    /// This computes the deterministic Safe address based on the signer and config,
-    /// then connects to it. Returns an error if no Safe is deployed at that address.
-    ///
-    /// # Arguments
-    /// * `provider` - The provider for RPC calls
-    /// * `signer` - The private key signer
-    /// * `config` - Configuration for Safe address computation
-    pub async fn connect_safe_with_config(
-        provider: P,
-        signer: PrivateKeySigner,
-        config: WalletConfig,
-    ) -> Result<Self> {
-        let safe_address = Self::compute_safe_address(&provider, &signer, &config).await?;
-
-        // Check if Safe is deployed
-        if !is_safe(&provider, safe_address).await? {
-            return Err(Error::InvalidConfig(format!(
-                "No Safe deployed at computed address {}",
-                safe_address
-            )));
-        }
-
-        let safe = Safe::connect(provider, signer, safe_address).await?;
-        Ok(Self::new(safe))
-    }
-
-    /// Connects to a Safe or deploys one if it doesn't exist.
-    ///
-    /// # Arguments
-    /// * `provider` - The provider for RPC calls
-    /// * `signer` - The private key signer
-    /// * `rpc_url` - The RPC URL for sending deployment transaction
-    pub async fn connect_or_deploy_safe_with_rpc(
-        provider: P,
-        signer: PrivateKeySigner,
-        rpc_url: Url,
-    ) -> Result<Self> {
-        Self::connect_or_deploy_safe_with_rpc_and_config(
-            provider,
-            signer,
-            rpc_url,
-            WalletConfig::default(),
-        )
-        .await
-    }
-
-    /// Connects to a Safe or deploys one with custom configuration.
-    ///
-    /// If a Safe already exists at the computed address, connects to it.
-    /// Otherwise, deploys a new Safe with the specified configuration.
-    ///
-    /// # Arguments
-    /// * `provider` - The provider for RPC calls
-    /// * `signer` - The private key signer
-    /// * `rpc_url` - The RPC URL for sending deployment transaction
-    /// * `config` - Configuration for Safe address computation and deployment
-    pub async fn connect_or_deploy_safe_with_rpc_and_config(
-        provider: P,
-        signer: PrivateKeySigner,
-        rpc_url: Url,
-        config: WalletConfig,
-    ) -> Result<Self> {
-        let addresses = ChainAddresses::v1_4_1();
-        let signer_address = signer.address();
-
-        // Build owners array
-        let owners = config.build_owners(signer_address);
-
-        // Validate threshold
-        if config.threshold == 0 || config.threshold as usize > owners.len() {
-            return Err(Error::InvalidConfig(format!(
-                "Invalid threshold: {} (must be 1-{})",
-                config.threshold,
-                owners.len()
-            )));
-        }
-
-        // Get fallback handler
-        let fallback_handler = config.get_fallback_handler();
-
-        // Encode initializer
-        let initializer = encode_setup_call(&owners, config.threshold, fallback_handler);
-
-        // Get proxy creation code
-        let factory = ISafeProxyFactory::new(addresses.proxy_factory, &provider);
-        let creation_code = factory
-            .proxyCreationCode()
-            .call()
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "proxy creation code",
-                reason: e.to_string(),
-            })?;
-
-        // Compute deterministic address
-        let safe_address = compute_create2_address(
-            addresses.proxy_factory,
-            addresses.safe_singleton,
-            &initializer,
-            config.salt_nonce,
-            &creation_code,
-        );
-
-        // Check if Safe is already deployed
-        if is_safe(&provider, safe_address).await? {
-            let safe = Safe::connect(provider, signer, safe_address).await?;
-            return Ok(Self::new(safe));
-        }
-
-        // Deploy the Safe
-        let wallet_provider = ProviderBuilder::new()
-            .network::<AnyNetwork>()
-            .wallet(EthereumWallet::from(signer.clone()))
-            .connect_http(rpc_url);
-
-        let factory_with_wallet = ISafeProxyFactory::new(addresses.proxy_factory, &wallet_provider);
-
-        let pending_tx = factory_with_wallet
-            .createProxyWithNonce(addresses.safe_singleton, initializer, config.salt_nonce)
-            .send()
-            .await
-            .map_err(|e| Error::ExecutionFailed {
-                reason: format!("Failed to send deployment transaction: {}", e),
-            })?;
-
-        let _receipt = pending_tx.get_receipt().await.map_err(|e| Error::ExecutionFailed {
-            reason: format!("Failed to get deployment receipt: {}", e),
-        })?;
-
-        // Verify deployment
-        if !is_safe(&provider, safe_address).await? {
-            return Err(Error::ExecutionFailed {
-                reason: format!("Deployment failed: no Safe at expected address {}", safe_address),
-            });
-        }
-
-        let safe = Safe::connect(provider, signer, safe_address).await?;
-        Ok(Self::new(safe))
-    }
-
-    /// Computes the Safe address that would be used for the given signer and config.
-    ///
-    /// This is useful for checking what Safe address would be computed without
-    /// actually connecting or deploying.
-    pub async fn compute_safe_address(
-        provider: &P,
-        signer: &PrivateKeySigner,
-        config: &WalletConfig,
-    ) -> Result<Address> {
-        let addresses = ChainAddresses::v1_4_1();
-        let signer_address = signer.address();
-
-        // Build owners array
-        let owners = config.build_owners(signer_address);
-
-        // Get fallback handler
-        let fallback_handler = config.get_fallback_handler();
-
-        // Encode initializer
-        let initializer = encode_setup_call(&owners, config.threshold, fallback_handler);
-
-        // Get proxy creation code
-        let factory = ISafeProxyFactory::new(addresses.proxy_factory, provider);
-        let creation_code = factory
-            .proxyCreationCode()
-            .call()
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "proxy creation code",
-                reason: e.to_string(),
-            })?;
-
-        // Compute deterministic address
-        let safe_address = compute_create2_address(
-            addresses.proxy_factory,
-            addresses.safe_singleton,
-            &initializer,
-            config.salt_nonce,
-            &creation_code,
-        );
-
-        Ok(safe_address)
-    }
-
     /// Returns true (this is a Safe wallet).
     pub fn is_safe(&self) -> bool {
         true
@@ -453,16 +529,6 @@ impl<P> Wallet<Eoa<P>>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
 {
-    /// Connects to an EOA wallet.
-    ///
-    /// # Arguments
-    /// * `provider` - The provider for RPC calls
-    /// * `signer` - The private key signer
-    pub async fn connect_eoa(provider: P, signer: PrivateKeySigner) -> Result<Self> {
-        let eoa = Eoa::connect(provider, signer).await?;
-        Ok(Self::new(eoa))
-    }
-
     /// Returns false (this is not a Safe wallet).
     pub fn is_safe(&self) -> bool {
         false
