@@ -401,8 +401,15 @@ where
                 let gas_used = sim.gas_used;
                 U256::from(gas_used + gas_used / 10)
             }
+            // For a DelegateCall (MultiSend batch), a raw `from -> to` estimate
+            // models a direct CALL into the MultiSend singleton, which reverts
+            // its `address(this) != _self` guard ("MultiSend should only be
+            // called via delegatecall"). The inner safe_tx_gas may be 0 (forward
+            // all available gas); the outer execTransaction send does its own
+            // operation-correct eth_estimateGas. So skip the broken estimate.
+            (None, None) if !raw_gas_estimate_is_valid(operation) => U256::ZERO,
             (None, None) => {
-                // Estimate gas via RPC
+                // Estimate gas via RPC (valid for a plain Call to `to`).
                 use alloy::network::TransactionBuilder;
                 let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
                     .with_from(self.safe.address)
@@ -623,6 +630,14 @@ where
     }
 }
 
+/// Whether a raw `eth_estimateGas` against the inner `(to, data)` models the call
+/// correctly. It does for a plain `Call`, but not for a `DelegateCall`: the inner
+/// target (a MultiSend singleton) is only valid under delegatecall and reverts a
+/// direct call, so the raw estimate must be skipped for delegatecall operations.
+fn raw_gas_estimate_is_valid(operation: Operation) -> bool {
+    matches!(operation, Operation::Call)
+}
+
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
@@ -639,5 +654,13 @@ mod tests {
     #[test]
     fn test_safe_singleton_slot_is_zero() {
         assert_eq!(SAFE_SINGLETON_SLOT, U256::ZERO);
+    }
+
+    #[test]
+    fn raw_gas_estimate_only_valid_for_call() {
+        // DelegateCall (MultiSend batch) must NOT use the raw inner-call estimate,
+        // which would revert the MultiSend "only via delegatecall" guard.
+        assert!(raw_gas_estimate_is_valid(Operation::Call));
+        assert!(!raw_gas_estimate_is_valid(Operation::DelegateCall));
     }
 }
