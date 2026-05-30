@@ -270,3 +270,81 @@ async fn test_batch_erc20_operations() {
     assert_eq!(balance2, transfer_amount, "Recipient2 should have 50 tokens");
     assert_eq!(allowance, approve_amount, "Spender should have max allowance");
 }
+
+/// Regression test for the MultiSend batch gas-estimation bug (see #2/#3): a
+/// multi-call batch executed WITHOUT a preceding `.simulate()` must succeed.
+///
+/// This is the path the circles-sdk Safe runner (and the word-circles bot) takes.
+/// Before the fix, `execute()`'s `(None, None)` gas-estimate arm modeled the
+/// DelegateCall into MultiSend as a plain CALL, so MultiSend's guard reverted at
+/// gas estimation ("MultiSend should only be called via delegatecall"). The other
+/// batch tests here pass `.simulate()` first, which masks the bug by skipping the
+/// estimate — so this test deliberately omits it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_batch_execute_without_simulate() {
+    skip_if_no_rpc!();
+
+    let harness = TestHarness::new().await;
+    let owner = harness.signer_address();
+
+    let safe_address = harness
+        .deploy_safe(vec![owner], 1, U256::from(6010))
+        .await
+        .expect("Failed to deploy Safe");
+    harness
+        .mint_eth(safe_address, U256::from(1_000_000_000_000_000_000u128))
+        .await
+        .expect("Failed to fund Safe");
+
+    let token_address = harness
+        .deploy_mock_erc20()
+        .await
+        .expect("Failed to deploy MockERC20");
+    let mint_amount = U256::from(1000_000_000_000_000_000_000u128);
+    harness
+        .mint_erc20(token_address, safe_address, mint_amount)
+        .await
+        .expect("Failed to mint tokens");
+
+    let safe = harness
+        .safe_client(safe_address)
+        .await
+        .expect("Failed to create Safe client");
+
+    let spender = alloy::primitives::address!("0x1111111111111111111111111111111111111111");
+    let recipient = alloy::primitives::address!("0x2222222222222222222222222222222222222222");
+    let transfer_amount = U256::from(100_000_000_000_000_000_000u128);
+
+    // Two calls -> Operation::DelegateCall into MultiSend. No `.simulate()`:
+    // this exercises the gas-estimate arm that previously reverted.
+    let result = safe
+        .batch()
+        .add_typed(
+            token_address,
+            IERC20::approveCall {
+                spender,
+                amount: U256::MAX,
+            },
+        )
+        .add_typed(
+            token_address,
+            IERC20::transferCall {
+                to: recipient,
+                amount: transfer_amount,
+            },
+        )
+        .execute()
+        .await
+        .expect("Batch execute (no simulate) should not revert at gas estimation");
+
+    assert!(result.success, "Batch transaction should succeed");
+
+    let token = IERC20::new(token_address, &harness.provider);
+    let allowance = token.allowance(safe_address, spender).call().await.unwrap();
+    let recipient_balance = token.balanceOf(recipient).call().await.unwrap();
+    assert_eq!(allowance, U256::MAX, "approve should have applied");
+    assert_eq!(
+        recipient_balance, transfer_amount,
+        "transfer should have applied"
+    );
+}
