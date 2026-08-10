@@ -542,19 +542,17 @@ where
             exec_call.signatures,
         );
 
+        // The GS013 revert normally surfaces here: alloy pre-estimates gas on
+        // `send()`, so the failing `execTransaction` is caught before broadcast.
         let pending_tx = builder
             .send()
             .await
-            .map_err(|e| Error::ExecutionFailed {
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| map_execution_error(e.to_string()))?;
 
         let receipt = pending_tx
             .get_receipt()
             .await
-            .map_err(|e| Error::ExecutionFailed {
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| map_execution_error(e.to_string()))?;
 
         // Check if Safe execution succeeded
         let success = receipt.status();
@@ -688,6 +686,40 @@ where
     }
 }
 
+/// `GS013` as the hex bytes it takes inside an ABI-encoded `Error(string)`
+/// payload (`0x08c379a0...`), which is how most providers report the revert.
+const GS013_ERROR_STRING_HEX: &str = "4753303133";
+
+/// Whether a provider error describes Safe's `GS013` revert.
+///
+/// `execTransaction` reverts with `GS013` when the inner transaction fails while
+/// `safeTxGas == 0` and `gasPrice == 0` - a deliberate fail-closed path that
+/// discards the inner revert reason. Providers report it either as plain text
+/// (`execution reverted: GS013`) or as the ABI-encoded `Error(string)` data blob,
+/// so both forms are matched.
+fn is_gs013_revert(reason: &str) -> bool {
+    // Plain-text form. Safe emits the code uppercase, so match it exactly rather
+    // than case-insensitively, which would misfire on ordinary prose.
+    if reason.contains("GS013") {
+        return true;
+    }
+
+    // ABI-encoded form. Providers differ on hex casing, so normalise first.
+    reason.to_ascii_lowercase().contains(GS013_ERROR_STRING_HEX)
+}
+
+/// Map a failure from the outer `execTransaction` send onto an [`Error`],
+/// promoting Safe's opaque `GS013` revert to [`Error::InnerTransactionReverted`]
+/// so callers can match on it instead of string-matching. The original provider
+/// message is preserved either way.
+fn map_execution_error(reason: String) -> Error {
+    if is_gs013_revert(&reason) {
+        Error::InnerTransactionReverted { reason }
+    } else {
+        Error::ExecutionFailed { reason }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[allow(unused_imports)]
@@ -715,5 +747,63 @@ mod tests {
         // emit ExecutionFailure. If this assertion has to change, the safe_tx_gas
         // arms in `execute()` must change with it.
         assert!(NO_REFUND_GAS_PRICE.is_zero());
+    }
+
+    #[test]
+    fn detects_gs013_in_plain_text_revert() {
+        // The message an RPC returns for a batch whose inner call reverts.
+        assert!(is_gs013_revert(
+            "server returned an error response: error code 3: execution reverted: GS013"
+        ));
+    }
+
+    #[test]
+    fn detects_gs013_in_abi_encoded_data() {
+        // `Error(string)` selector + offset + length + "GS013" padded to 32 bytes.
+        let data = "0x08c379a0\
+                    0000000000000000000000000000000000000000000000000000000000000020\
+                    0000000000000000000000000000000000000000000000000000000000000005\
+                    4753303133000000000000000000000000000000000000000000000000000000";
+        assert!(is_gs013_revert(&format!(
+            "server returned an error response: error code 3: execution reverted, data: \"{data}\""
+        )));
+    }
+
+    #[test]
+    fn detects_gs013_regardless_of_hex_casing() {
+        let payload = "0x08C379A000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000005475330313300000000000000000000000000000000000000000000000000000000";
+        assert!(is_gs013_revert(payload));
+        assert!(is_gs013_revert(&payload.to_ascii_lowercase()));
+    }
+
+    #[test]
+    fn unrelated_provider_errors_are_not_gs013() {
+        assert!(!is_gs013_revert(
+            "insufficient funds for gas * price + value"
+        ));
+        assert!(!is_gs013_revert("nonce too low"));
+        // A different Safe error code must not be swallowed by the GS013 branch.
+        assert!(!is_gs013_revert("execution reverted: GS020"));
+        // An unrelated ABI-encoded revert reason ("Insufficient balance").
+        let insufficient_balance = "0x08c379a0\
+            0000000000000000000000000000000000000000000000000000000000000020\
+            0000000000000000000000000000000000000000000000000000000000000014\
+            496e73756666696369656e742062616c616e6365000000000000000000000000";
+        assert!(!is_gs013_revert(insufficient_balance));
+    }
+
+    #[test]
+    fn map_execution_error_routes_by_revert_kind() {
+        // GS013 gets the dedicated variant, with the provider message retained.
+        assert!(matches!(
+            map_execution_error("execution reverted: GS013".to_string()),
+            Error::InnerTransactionReverted { reason } if reason == "execution reverted: GS013"
+        ));
+
+        // Everything else keeps the existing behaviour.
+        assert!(matches!(
+            map_execution_error("nonce too low".to_string()),
+            Error::ExecutionFailed { reason } if reason == "nonce too low"
+        ));
     }
 }
