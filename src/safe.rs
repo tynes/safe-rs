@@ -23,6 +23,23 @@ use crate::types::{Call, CallBuilder, Operation};
 /// as the first declared variable in the proxy contract.
 pub const SAFE_SINGLETON_SLOT: U256 = U256::ZERO;
 
+/// Gas price used for every `execTransaction` built by this crate: zero, i.e. the
+/// Safe pays no gas refund and the executing EOA bears the whole cost.
+///
+/// This is load-bearing, not cosmetic. `Safe.execTransaction` forwards
+///
+/// ```solidity
+/// success = execute(to, value, data, operation, gasPrice == 0 ? (gasleft() - 2500) : safeTxGas);
+/// ```
+///
+/// so while `gasPrice == 0` the inner call gets all remaining gas and `safeTxGas`
+/// only feeds the GS010 pre-check and the GS013 branch. That is what makes
+/// `safe_tx_gas = 0` viable for MultiSend delegatecall batches (see
+/// `SafeBuilder::execute`). Supporting refunds (a non-zero gas price, `gas_token`
+/// or `refund_receiver`) means `safeTxGas` starts gating the inner call, so every
+/// site that leaves `safe_tx_gas` at zero must be revisited at the same time.
+const NO_REFUND_GAS_PRICE: U256 = U256::ZERO;
+
 /// Checks if an address is a Safe contract by reading the singleton storage slot
 /// and matching against known Safe singleton addresses.
 ///
@@ -313,6 +330,10 @@ where
         // Use a high gas estimate for simulation - we'll refine it after
         let safe_tx_gas = U256::from(10_000_000);
 
+        // No gas refunds: the executing EOA pays. Same invariant as
+        // `SafeBuilder::execute` - keep both sites in sync if refunds are added.
+        let gas_price = NO_REFUND_GAS_PRICE;
+
         // Build SafeTxParams
         let params = SafeTxParams {
             to,
@@ -321,7 +342,7 @@ where
             operation,
             safe_tx_gas,
             base_gas: U256::ZERO,
-            gas_price: U256::ZERO,
+            gas_price,
             gas_token: Address::ZERO,
             refund_receiver: Address::ZERO,
             nonce,
@@ -415,6 +436,10 @@ where
         // Get nonce
         let nonce = self.safe.nonce().await?;
 
+        // No gas refunds: the executing EOA pays. This is what makes
+        // `safe_tx_gas = 0` safe below - see the delegatecall arm.
+        let gas_price = NO_REFUND_GAS_PRICE;
+
         // Determine safe_tx_gas: explicit > simulation > estimate
         let safe_tx_gas = match (&self.simulation_result, self.safe_tx_gas) {
             (_, Some(gas)) => gas, // User provided explicit gas
@@ -430,7 +455,18 @@ where
             // delegatecall"). The inner safe_tx_gas may be 0 (forward all available
             // gas); the outer execTransaction send does its own operation-correct
             // eth_estimateGas. So skip the broken estimate.
-            (None, None) if operation == Operation::DelegateCall => U256::ZERO,
+            //
+            // "Forward all available gas" holds only while `gas_price == 0`: the
+            // Safe passes `gasleft() - 2500` to the inner call when the gas price
+            // is zero, and exactly `safeTxGas` otherwise. See NO_REFUND_GAS_PRICE.
+            (None, None) if operation == Operation::DelegateCall => {
+                debug_assert!(
+                    gas_price.is_zero(),
+                    "safe_tx_gas = 0 only forwards all available gas while gas_price == 0; \
+                     with a non-zero gas_price the Safe would forward zero gas to the inner call"
+                );
+                U256::ZERO
+            }
             (None, None) => {
                 // Estimate gas via RPC (valid for a plain Call to `to`).
                 use alloy::network::TransactionBuilder;
@@ -460,7 +496,7 @@ where
             operation,
             safe_tx_gas,
             base_gas: U256::ZERO,
-            gas_price: U256::ZERO,
+            gas_price,
             gas_token: Address::ZERO,
             refund_receiver: Address::ZERO,
             nonce,
@@ -668,5 +704,16 @@ mod tests {
     #[test]
     fn test_safe_singleton_slot_is_zero() {
         assert_eq!(SAFE_SINGLETON_SLOT, U256::ZERO);
+    }
+
+    #[test]
+    fn no_refund_gas_price_is_zero() {
+        // `SafeBuilder::execute` sends DelegateCall (MultiSend) batches with
+        // safe_tx_gas = 0, which forwards all remaining gas only while the Safe
+        // sees gasPrice == 0. A non-zero gas price makes safeTxGas gate the inner
+        // call, so a zero safe_tx_gas would forward zero gas and every batch would
+        // emit ExecutionFailure. If this assertion has to change, the safe_tx_gas
+        // arms in `execute()` must change with it.
+        assert!(NO_REFUND_GAS_PRICE.is_zero());
     }
 }
