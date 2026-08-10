@@ -17,7 +17,7 @@ Built for single-owner (1/1) Safes with a focus on simplicity, safety, and devel
 - **Type-safe contract calls** — First-class support for alloy's `sol!` macro
 - **Multi-chain support** — Pre-configured for Ethereum, Arbitrum, Optimism, Base, Polygon, and more
 - **Deterministic deployment** — Deploy new Safes with predictable addresses via CREATE2
-- **Gas estimation** — Automatic safeTxGas calculation with safety buffer
+- **Gas estimation** — Single calls get an automatic safeTxGas with safety buffer; MultiSend batches use `safeTxGas = 0` and defer to the outer transaction's estimate
 - **Revert decoding** — Human-readable error messages from failed simulations
 - **EOA fallback mode** — Same builder API for executing as individual transactions from an EOA
 
