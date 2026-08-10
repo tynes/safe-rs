@@ -372,9 +372,39 @@ where
 
     /// Executes the multicall transaction
     ///
-    /// If simulation was performed, uses the simulated gas + 10% buffer.
-    /// If no simulation, estimates gas via `eth_estimateGas` RPC call.
-    /// If `with_safe_tx_gas()` was called, uses that value instead.
+    /// # How `safeTxGas` is chosen
+    ///
+    /// The first rule that applies wins:
+    ///
+    /// 1. **Explicit** — `with_safe_tx_gas()` or `with_gas_limit()` was called:
+    ///    that value is used verbatim, no estimation happens.
+    /// 2. **Simulated** — `simulate()` was performed: the simulated `gas_used`
+    ///    plus a 10% buffer.
+    /// 3. **`DelegateCall` batch** — the transaction is a `DelegateCall` into
+    ///    `MultiSend`, which is how any batch of more than one call is sent: `0`.
+    ///    A raw `eth_estimateGas` on the inner `(to, data)` would model a direct
+    ///    `CALL` into the `MultiSend` singleton and revert its
+    ///    `address(this) != _self` guard, so the estimate is skipped entirely.
+    ///    The outer `execTransaction` send still does its own,
+    ///    operation-correct estimate.
+    /// 4. **Single plain `Call`** — `eth_estimateGas` on the inner call plus a
+    ///    10% buffer.
+    ///
+    /// # Why `0` is safe
+    ///
+    /// The Safe forwards `gasPrice == 0 ? gasleft() - 2500 : safeTxGas` to the
+    /// inner call, and this library always submits with `gasPrice == 0`. So
+    /// `safeTxGas` never caps the inner call's gas; it only feeds the `GS010`
+    /// pre-check (trivially satisfied at `0`) and the `GS013`
+    /// "internal transaction must succeed" branch.
+    ///
+    /// # Consequence for failing transactions
+    ///
+    /// That `GS013` branch is user-visible: with `safeTxGas == 0` and
+    /// `gasPrice == 0`, a failing inner transaction reverts the whole outer
+    /// `execTransaction` call rather than mining a successful receipt carrying
+    /// an `ExecutionFailure` event. The on-chain revert does not carry the inner
+    /// reason, so use `simulate()` to find out why a transaction fails.
     pub async fn execute(self) -> Result<ExecutionResult> {
         if self.calls.is_empty() {
             return Err(Error::NoCalls);
