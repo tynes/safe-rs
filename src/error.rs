@@ -49,6 +49,15 @@ pub enum Error {
     #[error("Execution failed: {reason}")]
     ExecutionFailed { reason: String },
 
+    /// The Safe reverted with `GS013`: the inner transaction failed while
+    /// `safeTxGas == 0` and `gasPrice == 0`, so `execTransaction` failed closed
+    /// without surfacing the inner revert reason. Simulating the batch replays it
+    /// against a fork and decodes the real revert reason.
+    #[error(
+        "The inner Safe transaction reverted (GS013); call simulate() before execute() to recover the revert reason: {reason}"
+    )]
+    InnerTransactionReverted { reason: String },
+
     /// Transaction was rejected by the Safe
     #[error("Safe rejected transaction: {reason}")]
     SafeRejected { reason: String },
