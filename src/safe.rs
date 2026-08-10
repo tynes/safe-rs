@@ -188,7 +188,6 @@ pub struct SafeBuilder<'a, P> {
     calls: Vec<Call>,
     use_call_only: bool,
     safe_tx_gas: Option<U256>,
-    operation: Operation,
     simulation_result: Option<SimulationResult>,
 }
 
@@ -202,7 +201,6 @@ where
             calls: Vec::new(),
             use_call_only: false,
             safe_tx_gas: None,
-            operation: Operation::DelegateCall, // MultiSend is called via delegatecall
             simulation_result: None,
         }
     }
@@ -210,12 +208,6 @@ where
     /// Use MultiSendCallOnly instead of MultiSend (no delegatecall allowed)
     pub fn call_only(mut self) -> Self {
         self.use_call_only = true;
-        self
-    }
-
-    /// Sets the operation type for the outer call (usually DelegateCall for MultiSend)
-    pub fn with_operation(mut self, operation: Operation) -> Self {
-        self.operation = operation;
         self
     }
 
@@ -508,9 +500,9 @@ where
 
     fn build_call_params(&self) -> Result<(Address, U256, Bytes, Operation)> {
         if self.calls.len() == 1 {
-            // Single call - execute directly
+            // Single call - execute directly, honoring the call's own operation
             let call = &self.calls[0];
-            Ok((call.to, call.value, call.data.clone(), Operation::Call))
+            Ok((call.to, call.value, call.data.clone(), call.operation))
         } else {
             // Multiple calls - use MultiSend
             let multisend_data = encode_multisend_data(&self.calls);
@@ -620,8 +612,7 @@ where
         operation: Operation,
     ) -> Result<ExecutionResult> {
         self.batch()
-            .add_raw(to, value, data)
-            .with_operation(operation)
+            .add(Call::new(to, value, data).with_operation(operation))
             .simulate()
             .await?
             .simulation_success()?
