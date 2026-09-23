@@ -719,12 +719,33 @@ pub fn decode_revert_reason(output: &[u8]) -> String {
 /// Safe reports a failed inner call with its own opaque `GS013`; the trace still
 /// holds the inner frame that actually reverted.
 pub fn innermost_revert_reason(traces: &CallTraceArena) -> Option<String> {
-    traces
+    let failed: Vec<_> = traces
         .nodes()
         .iter()
-        .filter(|node| !node.trace.success && !node.trace.output.is_empty())
-        .max_by_key(|node| node.trace.depth)
-        .map(|node| decode_revert_reason(&node.trace.output))
+        .filter(|node| !node.trace.success)
+        .collect();
+    let deepest = failed.iter().max_by_key(|node| node.trace.depth)?;
+    // A frame that halted (out of gas, invalid opcode, ...) returns no data;
+    // name the halt so it is not reported as an unknown revert.
+    let halt = match deepest.trace.status {
+        Some(status) if !status.is_revert() && deepest.trace.output.is_empty() => {
+            Some(format!("{status:?}"))
+        }
+        _ => None,
+    };
+    let reverted = failed
+        .iter()
+        .filter(|node| !node.trace.output.is_empty())
+        .max_by_key(|node| node.trace.depth);
+    match (reverted, halt) {
+        (Some(node), Some(halt)) if node.trace.depth < deepest.trace.depth => Some(format!(
+            "{} (inner call halted: {halt})",
+            decode_revert_reason(&node.trace.output)
+        )),
+        (Some(node), _) => Some(decode_revert_reason(&node.trace.output)),
+        (None, Some(halt)) => Some(format!("halted: {halt}")),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]

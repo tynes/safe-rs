@@ -146,6 +146,8 @@ pub struct TxChecks {
     pub base_fee: bool,
     /// Enforce the sender nonce
     pub nonce: bool,
+    /// Enforce that the sender can pay `gas_limit * max_fee_per_gas + value`
+    pub balance: bool,
 }
 
 impl TxChecks {
@@ -153,11 +155,20 @@ impl TxChecks {
     pub const STRICT: Self = Self {
         base_fee: true,
         nonce: true,
+        balance: true,
+    };
+    /// Valid as sent except for the sender's balance: used to measure gas with
+    /// a generous gas limit the sender need not be able to afford.
+    pub const MEASURE: Self = Self {
+        base_fee: true,
+        nonce: true,
+        balance: false,
     };
     /// No fee or nonce checks, for exploratory calls with gas price zero.
     pub const RELAXED: Self = Self {
         base_fee: false,
         nonce: false,
+        balance: true,
     };
 }
 
@@ -377,6 +388,7 @@ impl ForkSession {
                 cfg.disable_eip3607 = true;
                 cfg.disable_base_fee = !checks.base_fee;
                 cfg.disable_nonce_check = !checks.nonce;
+                cfg.disable_balance_check = !checks.balance;
                 cfg.tx_gas_limit_cap = cap;
             })
             .modify_block_chained(|block| env.apply(block));

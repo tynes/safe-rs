@@ -566,3 +566,53 @@ async fn broadcast_then_timeout_returns_hash_then_mined() {
     };
     assert!(decode_safe_outcome(&logs(&receipt), safe, prepared.safe_tx_hash).is_success());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn measure_checks_skip_only_the_sender_balance() {
+    let h = LocalHarness::new().await;
+    let poor = Address::repeat_byte(0x77);
+    h.provider
+        .anvil_set_balance(poor, U256::from(1_000))
+        .await
+        .unwrap();
+    let mut session = session_at_latest(&h).await.with_tx_gas_cap(1 << 24);
+    let fee = session.block_env().basefee * 2 + 1_000_000_000;
+    let tx = |checks, nonce| SimTx {
+        from: poor,
+        to: Address::repeat_byte(9),
+        value: U256::ZERO,
+        input: Bytes::new(),
+        gas_limit: 1 << 24,
+        max_fee_per_gas: u128::from(fee),
+        max_priority_fee_per_gas: Some(1_000_000_000),
+        nonce: Some(nonce),
+        checks,
+    };
+    // The sender cannot afford gas_limit * max_fee: invalid as sent...
+    assert!(session.transact(tx(TxChecks::STRICT, 0)).is_err());
+    // ...but measurable, while the nonce is still enforced.
+    assert!(session.transact(tx(TxChecks::MEASURE, 0)).unwrap().success);
+    assert!(session.transact(tx(TxChecks::MEASURE, 5)).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn halted_frames_are_named_in_revert_reasons() {
+    let h = LocalHarness::new().await;
+    // Runtime `JUMPDEST PUSH1 0 JUMP`: loops until out of gas.
+    let looper = h
+        .create2("0x635b6000566000526004601cf3".parse().unwrap())
+        .await;
+    let mut session = session_at_latest(&h).await.with_tracing(true);
+    let result = session
+        .transact(SimTx::relaxed(
+            h.deployer.address(),
+            looper,
+            U256::ZERO,
+            Bytes::new(),
+            100_000,
+        ))
+        .unwrap();
+    assert!(!result.success);
+    let reason = result.revert_reason.unwrap_or_default();
+    assert!(reason.contains("OutOfGas"), "{reason}");
+}

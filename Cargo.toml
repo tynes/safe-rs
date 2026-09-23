@@ -18,7 +18,7 @@ alloy-primitives = "1.6"
 alloy-sol-types = "1.6"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 foundry-fork-db = "0.27"
-revm = { version = "41", default-features = false, features = ["std", "optional_eip3607", "optional_no_base_fee"] }
+revm = { version = "41", default-features = false, features = ["std", "optional_eip3607", "optional_no_base_fee", "optional_balance_check"] }
 revm-inspectors = { version = "0.41", default-features = false, features = ["std"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }

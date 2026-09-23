@@ -170,6 +170,16 @@ impl SafeExecutionOutcome {
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Success { .. })
     }
+
+    /// Stable machine-readable name: `success`, `failure`, `not_found` or `conflicting`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Success { .. } => "success",
+            Self::Failure { .. } => "failure",
+            Self::NotFound => "not_found",
+            Self::Conflicting => "conflicting",
+        }
+    }
 }
 
 /// Classifies the outcome of `safe_tx_hash` from a list of logs.
