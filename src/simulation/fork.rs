@@ -292,11 +292,11 @@ fn build_state_diff(state: &EvmState) -> DiffMode {
         }
 
         // Build pre-state from original_info
+        let original_info = account.original_info();
         let pre_state = AccountState {
-            balance: Some(account.original_info.balance),
-            nonce: Some(account.original_info.nonce),
-            code: account
-                .original_info
+            balance: Some(original_info.balance),
+            nonce: Some(original_info.nonce),
+            code: original_info
                 .code
                 .as_ref()
                 .map(|c| Bytes::from(c.original_bytes().to_vec())),
@@ -438,8 +438,7 @@ where
         let caller_nonce = db
             .basic(from)
             .map_err(|e| Error::ForkDb(format!("Failed to fetch caller info: {:?}", e)))?
-            .map(|info| info.nonce)
-            .unwrap_or(0);
+            .map_or(0, |info| info.nonce);
 
         // Determine the actual call target and calldata
         let (call_to, call_data) = match operation {
@@ -561,11 +560,12 @@ where
 
         match result.result {
             ExecutionResult::Success {
-                gas_used,
+                gas,
                 output,
                 logs,
                 ..
             } => {
+                let gas_used = gas.tx_gas_used();
                 let return_data = match output {
                     Output::Call(data) => Bytes::from(data.to_vec()),
                     Output::Create(_, _) => Bytes::new(),
@@ -588,7 +588,8 @@ where
                     traces: None,
                 }
             }
-            ExecutionResult::Revert { gas_used, output } => {
+            ExecutionResult::Revert { gas, output, .. } => {
+                let gas_used = gas.tx_gas_used();
                 let revert_reason = Self::decode_revert_reason(&output);
                 SimulationResult {
                     success: false,
@@ -600,9 +601,9 @@ where
                     traces: None,
                 }
             }
-            ExecutionResult::Halt { gas_used, reason } => SimulationResult {
+            ExecutionResult::Halt { gas, reason, .. } => SimulationResult {
                 success: false,
-                gas_used,
+                gas_used: gas.tx_gas_used(),
                 return_data: Bytes::new(),
                 logs: vec![],
                 revert_reason: Some(format!("Halted: {:?}", reason)),
