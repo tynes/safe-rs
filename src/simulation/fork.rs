@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use alloy::eips::{BlockId, RpcBlockHash};
 use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, Log, TxKind, B256, U256};
 use alloy::providers::Provider;
@@ -16,12 +17,13 @@ use revm::database::CacheDB;
 use revm::primitives::hardfork::SpecId;
 use revm::state::EvmState;
 use revm::Database;
-use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
+use revm::{Context, ExecuteEvm, InspectEvm, MainBuilder, MainContext};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 
 pub use revm_inspectors::tracing::CallTraceArena;
 
 use crate::error::{Error, Result};
+use crate::simulation::session::SimBlockEnv;
 use crate::types::Operation;
 
 /// Result of a simulated transaction
@@ -270,7 +272,7 @@ impl From<&AccountState> for AccountStateDebug {
 ///
 /// REVM tracks original values in `Account.original_info` and `EvmStorageSlot.original_value`,
 /// so we can reconstruct both pre and post state from the final state.
-fn build_state_diff(state: &EvmState) -> DiffMode {
+pub(crate) fn build_state_diff(state: &EvmState) -> DiffMode {
     let mut pre = BTreeMap::new();
     let mut post = BTreeMap::new();
 
@@ -327,6 +329,10 @@ pub struct ForkSimulator<P> {
     provider: P,
     chain_id: u64,
     block_number: Option<u64>,
+    block_hash: Option<B256>,
+    block_env: Option<SimBlockEnv>,
+    spec: SpecId,
+    tx_gas_limit: u64,
     tracing: bool,
     caller_balance: Option<U256>,
     debug_output_dir: Option<PathBuf>,
@@ -344,6 +350,10 @@ where
             provider,
             chain_id,
             block_number: None,
+            block_hash: None,
+            block_env: None,
+            spec: SpecId::CANCUN,
+            tx_gas_limit: 30_000_000,
             tracing: false,
             caller_balance: None,
             debug_output_dir: None,
@@ -370,6 +380,35 @@ where
         self
     }
 
+    /// Pins the fork to a block hash (takes precedence over [`ForkSimulator::at_block`])
+    pub fn at_block_hash(mut self, hash: B256) -> Self {
+        self.block_hash = Some(hash);
+        self
+    }
+
+    /// Sets the block environment used for execution.
+    ///
+    /// Without it the simulator uses revm defaults (block number 0, timestamp 1,
+    /// base fee 0), which makes deadline and expiry checks meaningless. Callers
+    /// that care about time-dependent logic should always set it; see
+    /// [`SimBlockEnv::next_after`].
+    pub fn with_block_env(mut self, env: SimBlockEnv) -> Self {
+        self.block_env = Some(env);
+        self
+    }
+
+    /// Sets the EVM specification (default: CANCUN)
+    pub fn with_spec(mut self, spec: SpecId) -> Self {
+        self.spec = spec;
+        self
+    }
+
+    /// Sets the transaction gas limit used for simulated calls (default: 30M)
+    pub fn with_tx_gas_limit(mut self, gas_limit: u64) -> Self {
+        self.tx_gas_limit = gas_limit;
+        self
+    }
+
     /// Enables transaction tracing (cast run style)
     ///
     /// When enabled, `simulate_call()` will capture detailed call traces
@@ -390,13 +429,15 @@ where
 
     /// Creates a forked database from the current provider state
     pub async fn create_fork_db(&self) -> Result<CacheDB<SharedBackend>> {
-        let block = match self.block_number {
-            Some(b) => b,
-            None => self
+        let block: BlockId = match (self.block_hash, self.block_number) {
+            (Some(hash), _) => BlockId::Hash(RpcBlockHash::from_hash(hash, Some(true))),
+            (None, Some(b)) => b.into(),
+            (None, None) => self
                 .provider
                 .get_block_number()
                 .await
-                .map_err(|e| Error::ForkDb(e.to_string()))?,
+                .map_err(|e| Error::ForkDb(e.to_string()))?
+                .into(),
         };
 
         let meta = BlockchainDbMeta::new(
@@ -408,7 +449,7 @@ where
         let backend = SharedBackend::spawn_backend_thread(
             Arc::new(self.provider.clone()),
             db,
-            Some(block.into()),
+            Some(block),
         );
 
         Ok(CacheDB::new(backend))
@@ -452,7 +493,7 @@ where
 
         let tx = TxEnv {
             caller: from,
-            gas_limit: 30_000_000,
+            gas_limit: self.tx_gas_limit,
             gas_price: 0,
             kind: TxKind::Call(call_to),
             value,
@@ -463,15 +504,22 @@ where
         };
 
         // Build the EVM context
+        let spec = self.spec;
+        let block_env = self.block_env.clone();
         let ctx = Context::mainnet()
             .with_db(db)
             .modify_cfg_chained(|cfg| {
-                cfg.spec = SpecId::CANCUN;
+                cfg.set_spec_and_mainnet_gas_params(spec);
                 cfg.chain_id = self.chain_id;
                 // Allow simulation from contract addresses (e.g., Safe contracts)
                 cfg.disable_eip3607 = true;
+                // Gas price is zero for these simulations
+                cfg.disable_base_fee = true;
             })
             .modify_block_chained(|block| {
+                if let Some(env) = &block_env {
+                    env.apply(block);
+                }
                 block.basefee = 0;
             })
             .with_tx(tx.clone());
@@ -481,14 +529,15 @@ where
             let config = TracingInspectorConfig::default_parity();
             let mut inspector = TracingInspector::new(config);
 
-            // Build EVM with inspector attached and execute
+            // Build EVM with inspector attached and execute through the inspector
             let mut evm = ctx.build_mainnet_with_inspector(&mut inspector);
-            let result = evm.transact(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
+            let result = evm.inspect_tx(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
+            drop(evm);
 
             // Extract traces from the inspector
             let traces = Some(inspector.into_traces());
 
-            let mut sim_result = self.process_result(result);
+            let mut sim_result = process_result(result);
             sim_result.traces = traces;
             sim_result
         } else {
@@ -496,7 +545,7 @@ where
             let mut evm = ctx.build_mainnet();
             let result = evm.transact(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
 
-            self.process_result(result)
+            process_result(result)
         };
 
         // Write debug output if simulation failed and debug output is configured
@@ -546,8 +595,10 @@ where
         Ok(U256::from(gas_with_buffer))
     }
 
-    fn process_result<H>(
-        &self,
+}
+
+/// Converts a revm execution result into a [`SimulationResult`].
+pub(crate) fn process_result<H>(
         result: revm::context::result::ExecResultAndState<revm::context::result::ExecutionResult<H>>,
     ) -> SimulationResult
     where
@@ -590,7 +641,7 @@ where
             }
             ExecutionResult::Revert { gas, output, .. } => {
                 let gas_used = gas.tx_gas_used();
-                let revert_reason = Self::decode_revert_reason(&output);
+                let revert_reason = decode_revert_reason(&output);
                 SimulationResult {
                     success: false,
                     gas_used,
@@ -613,7 +664,8 @@ where
         }
     }
 
-    fn decode_revert_reason(output: &revm::primitives::Bytes) -> String {
+/// Decodes `Error(string)` and `Panic(uint256)` revert payloads; falls back to hex.
+pub fn decode_revert_reason(output: &[u8]) -> String {
         if output.len() < 4 {
             return "Unknown revert".to_string();
         }
@@ -660,7 +712,19 @@ where
         }
 
         format!("Revert: 0x{}", alloy::primitives::hex::encode(output))
-    }
+}
+
+/// Returns the decoded revert reason of the deepest reverted call in a trace.
+///
+/// Safe reports a failed inner call with its own opaque `GS013`; the trace still
+/// holds the inner frame that actually reverted.
+pub fn innermost_revert_reason(traces: &CallTraceArena) -> Option<String> {
+    traces
+        .nodes()
+        .iter()
+        .filter(|node| !node.trace.success && !node.trace.output.is_empty())
+        .max_by_key(|node| node.trace.depth)
+        .map(|node| decode_revert_reason(&node.trace.output))
 }
 
 #[cfg(test)]

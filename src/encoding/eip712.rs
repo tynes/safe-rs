@@ -6,7 +6,7 @@ use crate::contracts::{DOMAIN_SEPARATOR_TYPEHASH, SAFE_TX_TYPEHASH};
 use crate::types::Operation;
 
 /// Safe transaction parameters for hashing
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeTxParams {
     /// Target address
     pub to: Address,

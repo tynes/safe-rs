@@ -180,7 +180,27 @@ where
         Ok(is_owner)
     }
 
-    /// Verifies that the signer is an owner and threshold is 1
+    /// Verifies that the Safe is a strict 1-of-1 owned by `expected`: exactly one
+    /// owner, equal to `expected`, and threshold 1.
+    pub async fn verify_sole_owner(&self, expected: Address) -> Result<()> {
+        let threshold = self.threshold().await?;
+        if threshold != 1 {
+            return Err(Error::InvalidThreshold { threshold });
+        }
+        let owners = self.owners().await?;
+        if owners != [expected] {
+            return Err(Error::InvalidConfig(format!(
+                "Safe {} must have exactly one owner {expected}, found {owners:?}",
+                self.address
+            )));
+        }
+        Ok(())
+    }
+
+    /// Verifies that the signer is an owner and threshold is 1.
+    ///
+    /// This does not check the owner count: a Safe with several owners and
+    /// threshold 1 passes. Use [`Safe::verify_sole_owner`] for a strict 1-of-1 check.
     pub async fn verify_single_owner(&self) -> Result<()> {
         let threshold = self.threshold().await?;
         if threshold != 1 {
@@ -205,6 +225,7 @@ pub struct SafeBuilder<'a, P> {
     calls: Vec<Call>,
     use_call_only: bool,
     safe_tx_gas: Option<U256>,
+    nonce: Option<U256>,
     simulation_result: Option<SimulationResult>,
 }
 
@@ -218,11 +239,38 @@ where
             calls: Vec::new(),
             use_call_only: false,
             safe_tx_gas: None,
+            nonce: None,
             simulation_result: None,
         }
     }
 
-    /// Use MultiSendCallOnly instead of MultiSend (no delegatecall allowed)
+    /// Uses a fixed Safe nonce instead of reading the current one.
+    ///
+    /// Execution fails if the on-chain nonce differs, rather than silently
+    /// signing a different Safe transaction.
+    pub fn with_nonce(mut self, nonce: U256) -> Self {
+        self.nonce = Some(nonce);
+        self
+    }
+
+    /// Resolves the nonce to sign for: the fixed one (checked against the chain)
+    /// or the current on-chain nonce.
+    async fn resolve_nonce(&self) -> Result<U256> {
+        let current = self.safe.nonce().await?;
+        match self.nonce {
+            Some(expected) if expected != current => Err(Error::NonceMismatch {
+                expected,
+                actual: current,
+            }),
+            Some(expected) => Ok(expected),
+            None => Ok(current),
+        }
+    }
+
+    /// Use MultiSendCallOnly instead of MultiSend and reject any DelegateCall.
+    ///
+    /// With `call_only()`, a DelegateCall entry (including a single DelegateCall)
+    /// makes `simulate()` and `execute()` fail with [`Error::DelegateCallNotAllowed`].
     pub fn call_only(mut self) -> Self {
         self.use_call_only = true;
         self
@@ -264,21 +312,12 @@ where
             simulator = simulator.with_debug_output_dir(dir.clone(), self.safe.address);
         }
 
-        // For DelegateCall operations (like MultiSend), we need to simulate through
-        // Safe's execTransaction because the target contract expects delegatecall context.
-        // For regular Call operations, we can simulate the inner call directly.
-        let result = match operation {
-            Operation::DelegateCall => {
-                // Simulate through Safe.execTransaction
-                self.simulate_via_exec_transaction(&simulator, to, value, data, operation)
-                    .await?
-            }
-            Operation::Call => {
-                simulator
-                    .simulate_call(self.safe.address, to, value, data, operation)
-                    .await?
-            }
-        };
+        // Always simulate the real path: the owner calling Safe.execTransaction.
+        // This checks the signature, nonce and Safe configuration, and gives
+        // DelegateCall targets (like MultiSend) their delegatecall context.
+        let result = self
+            .simulate_via_exec_transaction(&simulator, to, value, data, operation)
+            .await?;
 
         // Store the result regardless of success/failure
         self.simulation_result = Some(result);
@@ -324,11 +363,14 @@ where
         data: Bytes,
         operation: Operation,
     ) -> Result<SimulationResult> {
-        // Get nonce
-        let nonce = self.safe.nonce().await?;
+        let nonce = self.resolve_nonce().await?;
 
-        // Use a high gas estimate for simulation - we'll refine it after
-        let safe_tx_gas = U256::from(10_000_000);
+        // Simulate with the explicit safeTxGas if one was set, otherwise with 0.
+        // With safeTxGas == 0 and gasPrice == 0 a failing inner call reverts the
+        // whole execTransaction (GS013), so a failed batch cannot look successful.
+        // A non-zero value would let the Safe swallow the failure and emit
+        // ExecutionFailure instead of reverting.
+        let safe_tx_gas = self.safe_tx_gas.unwrap_or(U256::ZERO);
 
         // No gas refunds: the executing EOA pays. Same invariant as
         // `SafeBuilder::execute` - keep both sites in sync if refunds are added.
@@ -375,15 +417,56 @@ where
         let exec_data = Bytes::from(exec_call.abi_encode());
 
         // Simulate the execTransaction call
-        simulator
+        let mut result = simulator
             .simulate_call(
                 self.safe.signer.address(), // EOA calls Safe
                 self.safe.address,           // Safe address
                 U256::ZERO,                  // No ETH value for outer call
-                exec_data,
+                exec_data.clone(),
                 Operation::Call,             // Regular call to Safe
             )
-            .await
+            .await?;
+
+        // A non-zero safeTxGas makes the Safe emit ExecutionFailure instead of
+        // reverting; treat that as a failed simulation too.
+        if result.success {
+            let outcome =
+                crate::submit::decode_safe_outcome(&result.logs, self.safe.address, tx_hash);
+            if !outcome.is_success() {
+                result.success = false;
+                result.revert_reason = Some(format!(
+                    "Safe did not report ExecutionSuccess for {tx_hash} ({outcome:?})"
+                ));
+            }
+        }
+
+        // GS013 hides the inner revert reason; replay with tracing to recover it.
+        if !result.success
+            && result
+                .revert_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("GS013"))
+        {
+            let traced = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id)
+                .with_tracing(true)
+                .simulate_call(
+                    self.safe.signer.address(),
+                    self.safe.address,
+                    U256::ZERO,
+                    exec_data,
+                    Operation::Call,
+                )
+                .await?;
+            if let Some(inner) = traced
+                .traces
+                .as_ref()
+                .and_then(crate::simulation::innermost_revert_reason)
+            {
+                result.revert_reason = Some(format!("GS013: inner call reverted: {inner}"));
+            }
+        }
+
+        Ok(result)
     }
 
     /// Returns the simulation result if simulation was performed
@@ -433,8 +516,7 @@ where
 
         let (to, value, data, operation) = self.build_call_params()?;
 
-        // Get nonce
-        let nonce = self.safe.nonce().await?;
+        let nonce = self.resolve_nonce().await?;
 
         // No gas refunds: the executing EOA pays. This is what makes
         // `safe_tx_gas = 0` safe below - see the delegatecall arm.
@@ -554,8 +636,13 @@ where
             .await
             .map_err(|e| map_execution_error(e.to_string()))?;
 
-        // Check if Safe execution succeeded
-        let success = receipt.status();
+        // Success requires both a successful receipt and the Safe's own
+        // ExecutionSuccess event for this Safe transaction hash. With a non-zero
+        // safeTxGas a failed inner call is mined successfully but emits
+        // ExecutionFailure.
+        let logs = crate::submit::receipt_logs(&receipt);
+        let outcome = crate::submit::decode_safe_outcome(&logs, self.safe.address, tx_hash);
+        let success = receipt.status() && outcome.is_success();
 
         Ok(ExecutionResult {
             tx_hash: receipt.transaction_hash,
@@ -564,6 +651,15 @@ where
     }
 
     fn build_call_params(&self) -> Result<(Address, U256, Bytes, Operation)> {
+        if self.use_call_only {
+            if let Some(index) = self
+                .calls
+                .iter()
+                .position(|call| call.operation != Operation::Call)
+            {
+                return Err(Error::DelegateCallNotAllowed { index });
+            }
+        }
         if self.calls.len() == 1 {
             // Single call - execute directly, honoring the call's own operation
             let call = &self.calls[0];

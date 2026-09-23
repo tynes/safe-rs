@@ -44,7 +44,8 @@ use crate::chain::{ChainAddresses, ChainConfig};
 use crate::create2::{compute_create2_address, encode_setup_call};
 use crate::eoa::Eoa;
 use crate::error::{Error, Result};
-use crate::safe::{is_safe, ExecutionResult, Safe};
+use crate::inspect::is_safe_with;
+use crate::safe::{ExecutionResult, Safe};
 use crate::types::Operation;
 use crate::ISafeProxyFactory;
 
@@ -57,8 +58,10 @@ pub struct WalletConfig {
     pub additional_owners: Vec<Address>,
     /// Threshold for the Safe (default: 1)
     pub threshold: u64,
-    /// Fallback handler address (default: v1.4.1 fallback handler)
+    /// Fallback handler address (default: the handler in `addresses`)
     pub fallback_handler: Option<Address>,
+    /// Safe deployment addresses (default: canonical v1.4.1)
+    pub addresses: Option<ChainAddresses>,
 }
 
 impl Default for WalletConfig {
@@ -68,6 +71,7 @@ impl Default for WalletConfig {
             additional_owners: Vec::new(),
             threshold: 1,
             fallback_handler: None,
+            addresses: None,
         }
     }
 }
@@ -102,6 +106,18 @@ impl WalletConfig {
         self
     }
 
+    /// Uses a specific Safe deployment (singleton, proxy factory, handler) instead
+    /// of the canonical v1.4.1 addresses, e.g. for a local test chain.
+    pub fn with_addresses(mut self, addresses: ChainAddresses) -> Self {
+        self.addresses = Some(addresses);
+        self
+    }
+
+    /// The Safe deployment addresses in effect.
+    pub fn addresses(&self) -> ChainAddresses {
+        self.addresses.clone().unwrap_or_else(ChainAddresses::v1_4_1)
+    }
+
     /// Builds the owners array (signer + additional owners)
     fn build_owners(&self, signer_address: Address) -> Vec<Address> {
         let mut owners = vec![signer_address];
@@ -113,10 +129,10 @@ impl WalletConfig {
         owners
     }
 
-    /// Gets the fallback handler, using the v1.4.1 default if not specified
+    /// Gets the fallback handler, defaulting to the handler in `addresses`
     fn get_fallback_handler(&self) -> Address {
         self.fallback_handler
-            .unwrap_or_else(|| ChainAddresses::v1_4_1().fallback_handler)
+            .unwrap_or_else(|| self.addresses().fallback_handler)
     }
 }
 
@@ -213,7 +229,7 @@ where
         let safe_address = self.compute_address(&config).await?;
 
         // Check if Safe is deployed
-        if !is_safe(&self.provider, safe_address).await? {
+        if !is_safe_with(&self.provider, safe_address, &[config.addresses().safe_singleton]).await? {
             return Err(Error::InvalidConfig(format!(
                 "No Safe deployed at computed address {}",
                 safe_address
@@ -257,7 +273,7 @@ where
     /// let address = builder.compute_address(&config).await?;
     /// ```
     pub async fn compute_address(&self, config: &WalletConfig) -> Result<Address> {
-        let addresses = ChainAddresses::v1_4_1();
+        let addresses = config.addresses();
         let signer_address = self.signer.address();
 
         // Build owners array
@@ -312,7 +328,7 @@ where
     /// let wallet = builder.connect(address).await?;
     /// ```
     pub async fn deploy(&self, rpc_url: Url, config: WalletConfig) -> Result<Address> {
-        let addresses = ChainAddresses::v1_4_1();
+        let addresses = config.addresses();
         let signer_address = self.signer.address();
 
         // Build owners array
@@ -354,7 +370,7 @@ where
         );
 
         // Check if Safe is already deployed
-        if is_safe(&self.provider, safe_address).await? {
+        if is_safe_with(&self.provider, safe_address, &[addresses.safe_singleton]).await? {
             return Ok(safe_address);
         }
 
@@ -379,7 +395,7 @@ where
         })?;
 
         // Verify deployment
-        if !is_safe(&self.provider, safe_address).await? {
+        if !is_safe_with(&self.provider, safe_address, &[addresses.safe_singleton]).await? {
             return Err(Error::ExecutionFailed {
                 reason: format!("Deployment failed: no Safe at expected address {}", safe_address),
             });

@@ -7,7 +7,7 @@
 use alloy::primitives::{keccak256, Address, Bytes, U256};
 use alloy::sol_types::SolCall;
 
-use crate::contracts::ISafeSetup;
+use crate::contracts::{ISafeProxyFactory, ISafeSetup};
 
 /// Encodes the Safe.setup() call for proxy initialization
 ///
@@ -86,6 +86,40 @@ pub fn compute_create2_address(
     let hash = keccak256(&create2_input);
 
     Address::from_slice(&hash[12..])
+}
+
+/// Encodes `SafeProxyFactory.createProxyWithNonce(singleton, initializer, saltNonce)`.
+///
+/// Proxy creation and initialization happen in the same call, so the proxy is
+/// never left uninitialized and claimable.
+pub fn encode_create_proxy_with_nonce(singleton: Address, initializer: Bytes, salt_nonce: U256) -> Bytes {
+    Bytes::from(
+        ISafeProxyFactory::createProxyWithNonceCall {
+            _singleton: singleton,
+            initializer,
+            saltNonce: salt_nonce,
+        }
+        .abi_encode(),
+    )
+}
+
+/// Predicts a Safe address and returns it with the initializer used.
+///
+/// The initializer sets exactly `owners` and `threshold`, the given fallback
+/// handler, no setup delegatecall and no payment. `creation_code` is the
+/// factory's `proxyCreationCode()`.
+pub fn predict_safe_address(
+    factory: Address,
+    singleton: Address,
+    owners: &[Address],
+    threshold: u64,
+    fallback_handler: Address,
+    salt_nonce: U256,
+    creation_code: &Bytes,
+) -> (Address, Bytes) {
+    let initializer = encode_setup_call(owners, threshold, fallback_handler);
+    let address = compute_create2_address(factory, singleton, &initializer, salt_nonce, creation_code);
+    (address, initializer)
 }
 
 #[cfg(test)]
