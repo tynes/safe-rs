@@ -1,3 +1,10 @@
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "example program: panics and stdout are the intended UX"
+)]
 //! Multicall ERC20 example
 //!
 //! This example demonstrates how to batch multiple ERC20 operations into a single

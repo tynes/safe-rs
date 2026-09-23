@@ -121,7 +121,7 @@ async fn test_state_diff_storage_changes() {
         .await
         .expect("Failed to deploy MockERC20");
 
-    let mint_amount = U256::from(1000_000_000_000_000_000_000u128);
+    let mint_amount = U256::from(1_000_000_000_000_000_000_000_u128);
     harness
         .mint_erc20(token_address, safe_address, mint_amount)
         .await

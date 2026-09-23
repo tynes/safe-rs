@@ -1,3 +1,10 @@
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "example program: panics and stdout are the intended UX"
+)]
 //! Simple ERC20 transfer example
 //!
 //! This example demonstrates how to execute a single ERC20 transfer through a Safe.

@@ -158,6 +158,7 @@ where
     ///
     /// # Panics
     /// Panics if called before adding any calls to the batch.
+    #[allow(clippy::expect_used, reason = "documented panic: misuse of the builder API")]
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
         let last_call = self.calls.last_mut()
             .expect("with_gas_limit called before adding any calls");

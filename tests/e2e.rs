@@ -1,3 +1,10 @@
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::expect_used,
+    reason = "e2e harness: diagnostic output and setup panics are intended"
+)]
+
 #[path = "e2e/common.rs"]
 mod common;
 

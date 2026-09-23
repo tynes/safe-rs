@@ -722,7 +722,7 @@ fn map_execution_error(reason: String) -> Error {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
+    #[allow(unused_imports, reason = "glob import shared by tests that use varying subsets")]
     use super::*;
     use alloy::primitives::address;
 

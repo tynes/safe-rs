@@ -81,7 +81,7 @@ async fn test_wallet_connect_with_config_fails_when_no_safe() {
     let harness = TestHarness::new().await;
 
     // Use a unique salt nonce to ensure no Safe exists at the computed address
-    let config = WalletConfig::new().with_salt_nonce(U256::from(999999));
+    let config = WalletConfig::new().with_salt_nonce(U256::from(999_999));
 
     let result = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
         .connect_with_config(config)
@@ -403,7 +403,7 @@ async fn test_wallet_inner_returns_account() {
     let owner = harness.signer_address();
 
     // Deploy a Safe
-    let salt_nonce = U256::from(100001);
+    let salt_nonce = U256::from(100_001);
     let safe_address = harness
         .deploy_safe(vec![owner], 1, salt_nonce)
         .await
@@ -428,7 +428,7 @@ async fn test_wallet_into_inner_consumes() {
     let owner = harness.signer_address();
 
     // Deploy a Safe
-    let salt_nonce = U256::from(100002);
+    let salt_nonce = U256::from(100_002);
     let safe_address = harness
         .deploy_safe(vec![owner], 1, salt_nonce)
         .await
@@ -458,7 +458,7 @@ async fn test_wallet_safe_accessor() {
     let owner = harness.signer_address();
 
     // Deploy a Safe
-    let salt_nonce = U256::from(100003);
+    let salt_nonce = U256::from(100_003);
     let safe_address = harness
         .deploy_safe(vec![owner], 1, salt_nonce)
         .await
@@ -505,7 +505,7 @@ async fn test_wallet_generic_methods() {
     let owner = harness.signer_address();
 
     // Test with Safe wallet
-    let salt_nonce = U256::from(100004);
+    let salt_nonce = U256::from(100_004);
     let safe_address = harness
         .deploy_safe(vec![owner], 1, salt_nonce)
         .await

@@ -321,7 +321,7 @@ async fn test_eoa_single_erc20_transfer() {
         .expect("Failed to deploy MockERC20");
 
     // Mint tokens to EOA
-    let mint_amount = U256::from(1000_000_000_000_000_000_000u128); // 1000 tokens
+    let mint_amount = U256::from(1_000_000_000_000_000_000_000_u128); // 1000 tokens
     harness
         .mint_erc20(token_address, eoa.address(), mint_amount)
         .await
@@ -1022,7 +1022,7 @@ async fn test_eoa_mixed_eth_and_erc20_batch() {
         .await
         .expect("Failed to deploy MockERC20");
 
-    let token_mint_amount = U256::from(1000_000_000_000_000_000_000u128); // 1000 tokens
+    let token_mint_amount = U256::from(1_000_000_000_000_000_000_000_u128); // 1000 tokens
     harness
         .mint_erc20(token_address, eoa.address(), token_mint_amount)
         .await
