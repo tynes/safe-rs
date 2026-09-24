@@ -78,7 +78,7 @@ pub use create2::{
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
-pub use safe::{is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
+pub use safe::{is_gs013_revert, is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
 pub use envelope::{
     batch_params, decode_exec_calldata, BatchTarget, DecodedExecTransaction, PreparedSafeTx,
     SafeTxGasPolicy, SignedSafeTx,

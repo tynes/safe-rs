@@ -6,9 +6,9 @@ use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
 use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::{
-    broadcast_raw, safe_outcome_for_receipt, sign_outer_tx, wait_for_receipt, Account,
-    BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig, OuterTxParams, ReceiptWait,
-    Safe, SignedSafeTx, SimTx, SimulationResult, TxChecks,
+    broadcast_raw, is_gs013_revert, safe_outcome_for_receipt, sign_outer_tx, wait_for_receipt,
+    Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig, OuterTxParams,
+    ReceiptWait, Safe, SignedSafeTx, SimTx, SimulationResult, TxChecks,
 };
 
 use crate::bundle::load_bundle;
@@ -280,10 +280,16 @@ async fn estimate_outer_gas(
         .with_from(from)
         .with_to(signed.prepared.safe)
         .with_input(signed.exec_calldata());
-    let estimate = provider
-        .estimate_gas(tx)
-        .await
-        .map_err(|e| eyre!("gas estimation failed: {e}"))?;
+    let estimate = provider.estimate_gas(tx).await.map_err(|e| {
+        let reason = e.to_string();
+        if is_gs013_revert(&reason) {
+            eyre!(
+                "the inner Safe transaction reverts (GS013); run without --skip-simulation to see why"
+            )
+        } else {
+            eyre!("gas estimation failed: {reason}")
+        }
+    })?;
     Ok(estimate + estimate / 5)
 }
 

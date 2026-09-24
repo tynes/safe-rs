@@ -571,7 +571,7 @@ const GS013_ERROR_STRING_HEX: &str = "4753303133";
 /// discards the inner revert reason. Providers report it either as plain text
 /// (`execution reverted: GS013`) or as the ABI-encoded `Error(string)` data blob,
 /// so both forms are matched.
-fn is_gs013_revert(reason: &str) -> bool {
+pub fn is_gs013_revert(reason: &str) -> bool {
     // Plain-text form. Safe emits the code uppercase, so match it exactly rather
     // than case-insensitively, which would misfire on ordinary prose.
     if reason.contains("GS013") {
