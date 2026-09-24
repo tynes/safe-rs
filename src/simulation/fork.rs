@@ -22,7 +22,7 @@ pub use revm_inspectors::tracing::CallTraceArena;
 use crate::error::{Error, Result};
 use crate::simulation::evm::{self, canonical_hash, EvmSettings};
 use crate::simulation::session::{SimBlockEnv, TxChecks};
-use crate::types::Operation;
+use crate::types::{Call, Operation};
 
 /// Result of a simulated transaction
 #[derive(Debug, Clone)]
@@ -482,6 +482,29 @@ where
     ) -> Result<SimulationResult> {
         let mut db = self.fork_for(from).await?;
         self.run_call(&mut db, from, to, value, data, operation, false)
+    }
+
+    /// Simulates `calls` in order from `from` on a single fork, so every call
+    /// sees the state changes of the calls before it.
+    ///
+    /// All calls are simulated, including those after a failure; a failed call
+    /// still consumes the sender nonce, as it would on chain.
+    pub async fn simulate_calls(&self, from: Address, calls: &[Call]) -> Result<Vec<SimulationResult>> {
+        let mut db = self.fork_for(from).await?;
+        calls
+            .iter()
+            .map(|call| {
+                self.run_call(
+                    &mut db,
+                    from,
+                    call.to,
+                    call.value,
+                    call.data.clone(),
+                    call.operation,
+                    true,
+                )
+            })
+            .collect()
     }
 
     /// Estimates gas for a Safe internal call

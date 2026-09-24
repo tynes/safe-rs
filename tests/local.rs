@@ -20,12 +20,14 @@ use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::Provider;
 use alloy::sol_types::SolValue;
-use common::{enable_module_call, reverter_initcode, set_guard_call, LocalHarness};
+use common::{
+    enable_module_call, one_shot_initcode, reverter_initcode, set_guard_call, LocalHarness,
+};
 use safe_rs::inspect::{enumerate_modules, read_safe_state, ReadSafeStateOptions};
 use safe_rs::{
     broadcast_raw, decode_safe_outcome, wait_for_receipt, Account, BroadcastOutcome, Call,
-    CallBuilder, Error, ForkSession, ISafe, ParentHeader, ReceiptWait, SafeExecutionOutcome,
-    SafeTxGasPolicy, SimTx, SpecId, TxChecks, WalletBuilder, WalletConfig,
+    CallBuilder, ChainConfig, Eoa, Error, ForkSession, ISafe, ParentHeader, ReceiptWait,
+    SafeExecutionOutcome, SafeTxGasPolicy, SimTx, SpecId, TxChecks, WalletBuilder, WalletConfig,
 };
 
 /// Gas limit used for outer transactions in these tests (fixed so that failing
@@ -686,4 +688,28 @@ async fn builder_execute_after_simulate_stays_fail_closed() {
         stale.execute().await,
         Err(Error::NonceMismatch { .. })
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn eoa_batch_simulation_is_stateful() {
+    let h = LocalHarness::new().await;
+    let one_shot = h.create2(one_shot_initcode()).await;
+    let eoa = Eoa::new(
+        h.provider.clone(),
+        h.owner.clone(),
+        ChainConfig::with_addresses(h.chain_id, h.addresses.clone()),
+        h.url(),
+    );
+    let builder = eoa
+        .batch()
+        .add(Call::call(one_shot, Bytes::new()))
+        .add(Call::call(one_shot, Bytes::new()))
+        .simulate()
+        .await
+        .unwrap();
+    let results = builder.simulation_results().unwrap();
+    // The second call sees the first call's storage write and reverts.
+    assert!(results[0].success);
+    assert!(!results[1].success);
+    assert!(builder.simulation_success().is_err());
 }

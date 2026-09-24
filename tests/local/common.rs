@@ -57,6 +57,17 @@ pub fn reverter_initcode() -> Bytes {
         .expect("hex")
 }
 
+/// A contract that succeeds on its first call (setting slot 0) and reverts on
+/// every call after that.
+pub fn one_shot_initcode() -> Bytes {
+    // init: copy the 17-byte runtime (at offset 12) to memory and return it
+    // runtime: PUSH1 0 SLOAD PUSH1 12 JUMPI PUSH1 1 PUSH1 0 SSTORE STOP
+    //          JUMPDEST PUSH1 0 DUP1 REVERT
+    "0x6011600c60003960116000f3600054600c576001600055005b600080fd"
+        .parse()
+        .expect("hex")
+}
+
 pub struct LocalHarness {
     pub anvil: AnvilInstance,
     /// Provider without a wallet (raw broadcasts, reads)
