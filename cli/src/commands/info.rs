@@ -1,33 +1,24 @@
-use alloy::network::AnyNetwork;
-use alloy::primitives::Address;
-use alloy::providers::ProviderBuilder;
+use alloy::eips::BlockId;
 use color_eyre::eyre::Result;
-use safe_rs::ISafe;
+use safe_rs::{read_safe_state, ParentHeader, ReadSafeStateOptions};
 
 use crate::cli::InfoArgs;
-use crate::output::SafeInfoOutput;
+use crate::commands::http_provider;
+use crate::output::{Report, SafeInfoOutput};
 
 pub async fn run(args: InfoArgs, json: bool) -> Result<()> {
-    let provider = ProviderBuilder::new()
-        .network::<AnyNetwork>()
-        .connect_http(args.rpc_url.parse()?);
+    let provider = http_provider(&args.rpc.rpc_url);
 
-    let safe_address: Address = args.safe.parse()?;
+    // Resolve the block to a hash first so every read sees the same state.
+    let header = ParentHeader::fetch(&provider, args.block.unwrap_or(BlockId::latest())).await?;
+    let state = read_safe_state(
+        &provider,
+        args.safe.safe,
+        header.block_id(),
+        ReadSafeStateOptions::default(),
+    )
+    .await?;
 
-    let safe = ISafe::new(safe_address, &provider);
-
-    let nonce = safe.nonce().call().await?;
-    let threshold = safe.getThreshold().call().await?;
-    let owners = safe.getOwners().call().await?;
-
-    let output = SafeInfoOutput {
-        address: safe_address,
-        nonce,
-        threshold: threshold.to::<u64>(),
-        owners,
-    };
-
-    output.print(json);
-
+    SafeInfoOutput::new(state, header.number, header.hash).print(json);
     Ok(())
 }
