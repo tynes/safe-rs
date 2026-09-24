@@ -795,14 +795,19 @@ async fn test_eoa_simulate_failure_returns_revert_reason() {
         amount: U256::from(1000), // EOA has no tokens, should revert
     };
 
-    let result = eoa
+    // simulate() stores a failed result rather than erroring;
+    // simulation_success() is what reports the revert.
+    let builder = eoa
         .batch()
         .add_typed(token_address, failing_transfer_call)
         .simulate()
-        .await;
+        .await
+        .expect("Simulation should run");
+    let results = builder.simulation_results().expect("Results should be stored");
+    assert!(!results[0].success);
+    assert!(results[0].revert_reason.is_some());
 
-    assert!(result.is_err());
-    match result {
+    match builder.simulation_success() {
         Err(Error::SimulationReverted { reason }) => {
             assert!(!reason.is_empty(), "Should include revert reason");
         }

@@ -526,7 +526,8 @@ where
 
         let sim_result = if self.tracing {
             // Create inspector for tracing
-            let config = TracingInspectorConfig::default_parity();
+            // Record logs so traces show emitted events, as `cast run` does
+            let config = TracingInspectorConfig::default_parity().record_logs();
             let mut inspector = TracingInspector::new(config);
 
             // Build EVM with inspector attached and execute through the inspector

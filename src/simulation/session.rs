@@ -394,7 +394,9 @@ impl ForkSession {
             .modify_block_chained(|block| env.apply(block));
 
         let (output, traces) = if self.tracing {
-            let mut inspector = TracingInspector::new(TracingInspectorConfig::default_parity());
+            // Record logs so traces show emitted events, as `cast run` does
+            let config = TracingInspectorConfig::default_parity().record_logs();
+            let mut inspector = TracingInspector::new(config);
             let mut evm = ctx.build_mainnet_with_inspector(&mut inspector);
             let output = evm
                 .inspect_tx(tx_env)

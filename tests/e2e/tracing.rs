@@ -154,18 +154,19 @@ async fn test_tracing_captures_transfer_event() {
         .expect("Simulation should succeed");
 
     let traces = result.traces.as_ref().expect("Traces should be captured");
-    let root = &traces.nodes()[0];
 
-    // Check for Transfer event in logs
+    // USDC is a proxy: the root call delegatecalls the implementation, and the
+    // Transfer event is recorded in that child frame, not in the root node.
     let transfer_topic = keccak256("Transfer(address,address,uint256)");
-    let has_transfer_event = root
-        .logs
-        .iter()
-        .any(|log| log.raw_log.topics().first() == Some(&transfer_topic));
+    let has_transfer_event = traces.nodes().iter().any(|node| {
+        node.logs
+            .iter()
+            .any(|log| log.raw_log.topics().first() == Some(&transfer_topic))
+    });
 
     assert!(
         has_transfer_event,
-        "Root node logs should contain Transfer event"
+        "Some trace node should contain the Transfer event"
     );
 }
 
