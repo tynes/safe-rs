@@ -1,5 +1,6 @@
 //! Transaction simulation using fork database and revm
 
+mod evm;
 mod fork;
 pub mod session;
 

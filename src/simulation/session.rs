@@ -11,24 +11,21 @@
 //! calling thread while it fetches from the RPC. Use a multi-threaded tokio
 //! runtime.
 
-use std::sync::Arc;
-
 use alloy::eips::eip1559::BaseFeeParams;
 use alloy::eips::BlockId;
 use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
 use alloy::providers::Provider;
-use foundry_fork_db::{cache::BlockchainDbMeta, BlockchainDb, SharedBackend};
+use foundry_fork_db::SharedBackend;
 use revm::context::{BlockEnv, TxEnv};
 use revm::context_interface::block::BlobExcessGasAndPrice;
 use revm::database::CacheDB;
-use revm::{Context, Database, DatabaseCommit, ExecuteEvm, InspectEvm, MainBuilder, MainContext};
-use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
+use revm::Database;
 
 pub use revm::primitives::hardfork::SpecId;
 
 use crate::error::{Error, Result};
-use crate::simulation::fork::{build_state_diff, innermost_revert_reason, process_result};
+use crate::simulation::evm::{self, EvmSettings};
 use crate::simulation::SimulationResult;
 
 /// Gas limit for read-only [`ForkSession::call`]s: the Osaka per-transaction cap (EIP-7825).
@@ -242,11 +239,8 @@ impl ForkSession {
     where
         P: Provider<AnyNetwork> + Clone + 'static,
     {
-        let meta = BlockchainDbMeta::new(Default::default(), format!("ulp-session-{chain_id}"));
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend_thread(Arc::new(provider), db, Some(pin));
         Self {
-            db: CacheDB::new(backend),
+            db: evm::fork_db(provider, chain_id, pin),
             chain_id,
             pin,
             env,
@@ -368,63 +362,23 @@ impl ForkSession {
             gas_price: tx.max_fee_per_gas,
             kind: TxKind::Call(tx.to),
             value: tx.value,
-            data: tx.input.clone(),
+            data: tx.input,
             nonce,
             chain_id: Some(self.chain_id),
             gas_priority_fee: tx.max_priority_fee_per_gas,
             ..Default::default()
         };
 
-        let spec = self.spec;
-        let chain_id = self.chain_id;
-        let checks = tx.checks;
-        let cap = self.tx_gas_cap;
-        let env = self.env.clone();
-        let ctx = Context::mainnet()
-            .with_db(&mut self.db)
-            .modify_cfg_chained(|cfg| {
-                cfg.set_spec_and_mainnet_gas_params(spec);
-                cfg.chain_id = chain_id;
-                cfg.disable_eip3607 = true;
-                cfg.disable_base_fee = !checks.base_fee;
-                cfg.disable_nonce_check = !checks.nonce;
-                cfg.disable_balance_check = !checks.balance;
-                cfg.tx_gas_limit_cap = cap;
-            })
-            .modify_block_chained(|block| env.apply(block));
-
-        let (output, traces) = if self.tracing {
-            // Record logs so traces show emitted events, as `cast run` does
-            let config = TracingInspectorConfig::default_parity().record_logs();
-            let mut inspector = TracingInspector::new(config);
-            let mut evm = ctx.build_mainnet_with_inspector(&mut inspector);
-            let output = evm
-                .inspect_tx(tx_env)
-                .map_err(|e| Error::Revm(format!("{e:?}")))?;
-            drop(evm);
-            (output, Some(inspector.into_traces()))
-        } else {
-            let mut evm = ctx.build_mainnet();
-            let output = evm
-                .transact(tx_env)
-                .map_err(|e| Error::Revm(format!("{e:?}")))?;
-            (output, None)
+        let settings = EvmSettings {
+            chain_id: self.chain_id,
+            spec: self.spec,
+            checks: tx.checks,
+            tx_gas_cap: self.tx_gas_cap,
+            block_env: Some(self.env.clone()),
+            zero_basefee: false,
         };
-
-        let state = output.state.clone();
-        let mut result = process_result(output);
-        result.state_diff = build_state_diff(&state);
-        if let Some(traces) = &traces {
-            if !result.success {
-                if let Some(inner) = innermost_revert_reason(traces) {
-                    result.revert_reason = Some(inner);
-                }
-            }
-        }
-        result.traces = traces;
-        if commit {
-            self.db.commit(state);
-        }
+        let mut result = evm::execute(&mut self.db, &settings, tx_env, self.tracing, commit)?;
+        result.apply_inner_revert_reason();
         Ok(result)
     }
 }

@@ -2,28 +2,26 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alloy::eips::{BlockId, RpcBlockHash};
+use alloy::eips::BlockId;
 use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, Log, TxKind, B256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::trace::geth::pre_state::{AccountState, DiffMode};
-use serde::Serialize;
-use foundry_fork_db::{cache::BlockchainDbMeta, BlockchainDb, SharedBackend};
+use foundry_fork_db::SharedBackend;
 use revm::context::TxEnv;
 use revm::database::CacheDB;
 use revm::primitives::hardfork::SpecId;
 use revm::state::EvmState;
 use revm::Database;
-use revm::{Context, ExecuteEvm, InspectEvm, MainBuilder, MainContext};
-use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
+use serde::Serialize;
 
 pub use revm_inspectors::tracing::CallTraceArena;
 
 use crate::error::{Error, Result};
-use crate::simulation::session::SimBlockEnv;
+use crate::simulation::evm::{self, canonical_hash, EvmSettings};
+use crate::simulation::session::{SimBlockEnv, TxChecks};
 use crate::types::Operation;
 
 /// Result of a simulated transaction
@@ -54,6 +52,17 @@ impl SimulationResult {
     /// Returns the revert reason if available
     pub fn error_message(&self) -> Option<&str> {
         self.revert_reason.as_deref()
+    }
+
+    /// Replaces the revert reason of a failed, traced result with the reason of
+    /// the innermost failed call (see [`innermost_revert_reason`]).
+    pub fn apply_inner_revert_reason(&mut self) {
+        if self.success {
+            return;
+        }
+        if let Some(inner) = self.traces.as_ref().and_then(innermost_revert_reason) {
+            self.revert_reason = Some(inner);
+        }
     }
 
     /// Format traces as human-readable text (cast run style)
@@ -430,7 +439,7 @@ where
     /// Creates a forked database from the current provider state
     pub async fn create_fork_db(&self) -> Result<CacheDB<SharedBackend>> {
         let block: BlockId = match (self.block_hash, self.block_number) {
-            (Some(hash), _) => BlockId::Hash(RpcBlockHash::from_hash(hash, Some(true))),
+            (Some(hash), _) => canonical_hash(hash),
             (None, Some(b)) => b.into(),
             (None, None) => self
                 .provider
@@ -439,20 +448,7 @@ where
                 .map_err(|e| Error::ForkDb(e.to_string()))?
                 .into(),
         };
-
-        let meta = BlockchainDbMeta::new(
-            Default::default(), // empty known contracts
-            format!("fork-{}", self.chain_id),
-        );
-
-        let db = BlockchainDb::new(meta, None);
-        let backend = SharedBackend::spawn_backend_thread(
-            Arc::new(self.provider.clone()),
-            db,
-            Some(block),
-        );
-
-        Ok(CacheDB::new(backend))
+        Ok(evm::fork_db(self.provider.clone(), self.chain_id, block))
     }
 
     /// Simulates a call from the Safe
@@ -464,111 +460,8 @@ where
         data: Bytes,
         operation: Operation,
     ) -> Result<SimulationResult> {
-        let mut db = self.create_fork_db().await?;
-
-        // Only override caller balance if configured
-        // Use load_account to preserve existing account info (code, nonce, code_hash)
-        if let Some(balance) = self.caller_balance {
-            let existing_account = db
-                .load_account(from)
-                .map_err(|e| Error::ForkDb(format!("Failed to load caller account: {:?}", e)))?;
-            existing_account.info.balance = balance;
-        }
-
-        // Fetch the caller's actual nonce from the forked database
-        let caller_nonce = db
-            .basic(from)
-            .map_err(|e| Error::ForkDb(format!("Failed to fetch caller info: {:?}", e)))?
-            .map_or(0, |info| info.nonce);
-
-        // Determine the actual call target and calldata
-        let (call_to, call_data) = match operation {
-            Operation::Call => (to, data.to_vec()),
-            Operation::DelegateCall => {
-                // For delegatecall simulation, we execute directly from the Safe
-                // This is a simplification - in reality the Safe would delegatecall
-                (to, data.to_vec())
-            }
-        };
-
-        let tx = TxEnv {
-            caller: from,
-            gas_limit: self.tx_gas_limit,
-            gas_price: 0,
-            kind: TxKind::Call(call_to),
-            value,
-            data: call_data.into(),
-            nonce: caller_nonce,
-            chain_id: Some(self.chain_id),
-            ..Default::default()
-        };
-
-        // Build the EVM context
-        let spec = self.spec;
-        let block_env = self.block_env.clone();
-        let ctx = Context::mainnet()
-            .with_db(db)
-            .modify_cfg_chained(|cfg| {
-                cfg.set_spec_and_mainnet_gas_params(spec);
-                cfg.chain_id = self.chain_id;
-                // Allow simulation from contract addresses (e.g., Safe contracts)
-                cfg.disable_eip3607 = true;
-                // Gas price is zero for these simulations
-                cfg.disable_base_fee = true;
-            })
-            .modify_block_chained(|block| {
-                if let Some(env) = &block_env {
-                    env.apply(block);
-                }
-                block.basefee = 0;
-            })
-            .with_tx(tx.clone());
-
-        let sim_result = if self.tracing {
-            // Create inspector for tracing
-            // Record logs so traces show emitted events, as `cast run` does
-            let config = TracingInspectorConfig::default_parity().record_logs();
-            let mut inspector = TracingInspector::new(config);
-
-            // Build EVM with inspector attached and execute through the inspector
-            let mut evm = ctx.build_mainnet_with_inspector(&mut inspector);
-            let result = evm.inspect_tx(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
-            drop(evm);
-
-            // Extract traces from the inspector
-            let traces = Some(inspector.into_traces());
-
-            let mut sim_result = process_result(result);
-            sim_result.traces = traces;
-            sim_result
-        } else {
-            // Create and run the EVM without tracing
-            let mut evm = ctx.build_mainnet();
-            let result = evm.transact(tx).map_err(|e| Error::Revm(format!("{:?}", e)))?;
-
-            process_result(result)
-        };
-
-        // Write debug output if simulation failed and debug output is configured
-        if !sim_result.success {
-            if let (Some(dir), Some(account_address)) =
-                (&self.debug_output_dir, self.debug_account_address)
-            {
-                let debug_output = SimulationDebugOutput::new(
-                    self.chain_id,
-                    account_address,
-                    to,
-                    value,
-                    &data,
-                    &operation,
-                    &sim_result,
-                );
-                // Best-effort write - don't fail the simulation if we can't write debug output
-                let _ = debug_output.write_to_dir(dir);
-            }
-        }
-
-        Ok(sim_result)
+        let mut db = self.fork_for(from).await?;
+        self.run_call(&mut db, from, to, value, data, operation, false)
     }
 
     /// Estimates gas for a Safe internal call
@@ -596,74 +489,96 @@ where
         Ok(U256::from(gas_with_buffer))
     }
 
-}
+    /// Creates the fork and applies the caller balance override, if any.
+    async fn fork_for(&self, from: Address) -> Result<CacheDB<SharedBackend>> {
+        let mut db = self.create_fork_db().await?;
+        // Use load_account to preserve existing account info (code, nonce, code_hash)
+        if let Some(balance) = self.caller_balance {
+            let existing_account = db
+                .load_account(from)
+                .map_err(|e| Error::ForkDb(format!("Failed to load caller account: {:?}", e)))?;
+            existing_account.info.balance = balance;
+        }
+        Ok(db)
+    }
 
-/// Converts a revm execution result into a [`SimulationResult`].
-pub(crate) fn process_result<H>(
-        result: revm::context::result::ExecResultAndState<revm::context::result::ExecutionResult<H>>,
-    ) -> SimulationResult
-    where
-        H: std::fmt::Debug,
-    {
-        use revm::context::result::{ExecutionResult, Output};
+    /// Runs one gas-price-zero call against `db`.
+    ///
+    /// DelegateCall operations are executed as a direct call from `from`; this
+    /// is a simplification, since a real Safe would delegatecall the target.
+    fn run_call(
+        &self,
+        db: &mut CacheDB<SharedBackend>,
+        from: Address,
+        to: Address,
+        value: U256,
+        data: Bytes,
+        operation: Operation,
+        commit: bool,
+    ) -> Result<SimulationResult> {
+        // Fetch the caller's actual nonce from the forked database
+        let caller_nonce = db
+            .basic(from)
+            .map_err(|e| Error::ForkDb(format!("Failed to fetch caller info: {:?}", e)))?
+            .map_or(0, |info| info.nonce);
 
-        // Build state diff from the execution state
-        let state_diff = build_state_diff(&result.state);
+        let tx = TxEnv {
+            caller: from,
+            gas_limit: self.tx_gas_limit,
+            gas_price: 0,
+            kind: TxKind::Call(to),
+            value,
+            data: data.clone(),
+            nonce: caller_nonce,
+            chain_id: Some(self.chain_id),
+            ..Default::default()
+        };
 
-        match result.result {
-            ExecutionResult::Success {
-                gas,
-                output,
-                logs,
-                ..
-            } => {
-                let gas_used = gas.tx_gas_used();
-                let return_data = match output {
-                    Output::Call(data) => Bytes::from(data.to_vec()),
-                    Output::Create(_, _) => Bytes::new(),
-                };
-
-                let logs = logs
-                    .into_iter()
-                    .filter_map(|log| {
-                        Log::new(log.address, log.topics().to_vec(), log.data.data.clone())
-                    })
-                    .collect();
-
-                SimulationResult {
-                    success: true,
-                    gas_used,
-                    return_data,
-                    logs,
-                    revert_reason: None,
-                    state_diff,
-                    traces: None,
-                }
-            }
-            ExecutionResult::Revert { gas, output, .. } => {
-                let gas_used = gas.tx_gas_used();
-                let revert_reason = decode_revert_reason(&output);
-                SimulationResult {
-                    success: false,
-                    gas_used,
-                    return_data: Bytes::from(output.to_vec()),
-                    logs: vec![],
-                    revert_reason: Some(revert_reason),
-                    state_diff,
-                    traces: None,
-                }
-            }
-            ExecutionResult::Halt { gas, reason, .. } => SimulationResult {
-                success: false,
-                gas_used: gas.tx_gas_used(),
-                return_data: Bytes::new(),
-                logs: vec![],
-                revert_reason: Some(format!("Halted: {:?}", reason)),
-                state_diff,
-                traces: None,
+        let settings = EvmSettings {
+            chain_id: self.chain_id,
+            spec: self.spec,
+            // Gas price is zero for these simulations
+            checks: TxChecks {
+                base_fee: false,
+                nonce: true,
+                balance: true,
             },
+            tx_gas_cap: None,
+            block_env: self.block_env.clone(),
+            zero_basefee: true,
+        };
+        let result = evm::execute(db, &settings, tx, self.tracing, commit)?;
+
+        if !result.success {
+            self.write_debug_output(to, value, &data, operation, &result);
+        }
+        Ok(result)
+    }
+
+    /// Writes debug output for a failed simulation if a directory is configured.
+    fn write_debug_output(
+        &self,
+        to: Address,
+        value: U256,
+        data: &Bytes,
+        operation: Operation,
+        result: &SimulationResult,
+    ) {
+        if let (Some(dir), Some(account_address)) = (&self.debug_output_dir, self.debug_account_address) {
+            let debug_output = SimulationDebugOutput::new(
+                self.chain_id,
+                account_address,
+                to,
+                value,
+                data,
+                &operation,
+                result,
+            );
+            // Best-effort write - don't fail the simulation if we can't write debug output
+            let _ = debug_output.write_to_dir(dir);
         }
     }
+}
 
 /// Decodes `Error(string)` and `Panic(uint256)` revert payloads; falls back to hex.
 pub fn decode_revert_reason(output: &[u8]) -> String {
