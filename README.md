@@ -25,10 +25,10 @@ Built for single-owner (1/1) Safes with a focus on simplicity, safety, and devel
 
 ### CLI
 
-The `safe` CLI is not published to crates.io. Install it from the repository:
+The `safe-rs-cli` crate installs the `safe` binary:
 
 ```bash
-cargo install --git https://github.com/tynes/safe-rs --tag v0.11.0 --locked safe
+cargo install safe-rs-cli --locked
 ```
 
 Or from a local clone:
@@ -41,7 +41,7 @@ cargo install --path cli --locked
 
 ```toml
 [dependencies]
-safe-rs = "0.11"
+safe-rs = "0.12"
 ```
 
 ## Quick Start

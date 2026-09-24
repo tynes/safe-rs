@@ -4689,8 +4689,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
-name = "safe"
-version = "0.1.0"
+name = "safe-rs"
+version = "0.12.0"
+dependencies = [
+ "alloy",
+ "alloy-primitives",
+ "alloy-sol-types",
+ "chrono",
+ "foundry-fork-db",
+ "reqwest 0.12.28",
+ "revm",
+ "revm-inspectors",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "safe-rs-cli"
+version = "0.12.0"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
@@ -4705,26 +4725,6 @@ dependencies = [
  "safe-rs",
  "serde",
  "serde_json",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "safe-rs"
-version = "0.11.0"
-dependencies = [
- "alloy",
- "alloy-primitives",
- "alloy-sol-types",
- "chrono",
- "foundry-fork-db",
- "reqwest 0.12.28",
- "revm",
- "revm-inspectors",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
  "tokio",
  "url",
 ]

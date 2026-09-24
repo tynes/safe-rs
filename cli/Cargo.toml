@@ -1,16 +1,20 @@
 [package]
-name = "safe"
-version = "0.1.0"
+name = "safe-rs-cli"
+version = "0.12.0"
 edition = "2021"
 description = "Cast-like CLI for Safe transactions"
 license = "MIT"
+repository = "https://github.com/tynes/safe-rs"
+readme = "../README.md"
+keywords = ["ethereum", "safe", "multisig", "smart-account", "cli"]
+categories = ["command-line-utilities", "cryptography"]
 
 [[bin]]
 name = "safe"
 path = "src/main.rs"
 
 [dependencies]
-safe-rs = { path = ".." }
+safe-rs = { path = "..", version = "0.12" }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 alloy = { version = "2.5", features = ["full", "signer-local"] }
