@@ -15,7 +15,7 @@ mod common;
 use std::time::Duration;
 
 use alloy::eips::eip1559::BaseFeeParams;
-use alloy::eips::{BlockId, RpcBlockHash};
+use alloy::eips::BlockId;
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::Provider;
@@ -25,7 +25,7 @@ use safe_rs::inspect::{enumerate_modules, read_safe_state, ReadSafeStateOptions}
 use safe_rs::{
     broadcast_raw, decode_safe_outcome, wait_for_receipt, Account, BroadcastOutcome, Call,
     CallBuilder, Error, ForkSession, ISafe, ParentHeader, ReceiptWait, SafeExecutionOutcome,
-    SafeTxGasPolicy, SimBlockEnv, SimTx, SpecId, TxChecks, WalletBuilder, WalletConfig,
+    SafeTxGasPolicy, SimTx, SpecId, TxChecks, WalletBuilder, WalletConfig,
 };
 
 /// Gas limit used for outer transactions in these tests (fixed so that failing
@@ -33,35 +33,24 @@ use safe_rs::{
 const OUTER_GAS: u64 = 600_000;
 
 fn logs(receipt: &alloy::network::AnyTransactionReceipt) -> Vec<alloy::primitives::Log> {
-    safe_rs::submit::receipt_logs(receipt)
+    safe_rs::receipt_logs(receipt)
 }
 
 async fn session_at_latest(h: &LocalHarness) -> ForkSession {
-    let parent = ParentHeader::fetch(&h.provider, BlockId::latest())
-        .await
-        .unwrap();
-    let env = SimBlockEnv::next_after(&parent, 12, BaseFeeParams::ethereum());
-    ForkSession::new(
+    ForkSession::fork_next_block(
         h.provider.clone(),
         h.chain_id,
-        BlockId::Hash(RpcBlockHash::from_hash(parent.hash, Some(true))),
-        env,
+        BlockId::latest(),
+        12,
+        BaseFeeParams::ethereum(),
         SpecId::OSAKA,
     )
+    .await
+    .unwrap()
 }
 
-fn strict_tx(h: &LocalHarness, outer: &safe_rs::SignedOuterTx) -> SimTx {
-    SimTx {
-        from: h.owner.address(),
-        to: outer.params.to,
-        value: outer.params.value,
-        input: outer.params.input.clone(),
-        gas_limit: outer.params.gas_limit,
-        max_fee_per_gas: outer.params.max_fee_per_gas,
-        max_priority_fee_per_gas: Some(outer.params.max_priority_fee_per_gas),
-        nonce: Some(outer.params.nonce),
-        checks: TxChecks::STRICT,
-    }
+fn strict_tx(outer: &safe_rs::SignedOuterTx) -> SimTx {
+    SimTx::from_outer(&outer.params, TxChecks::STRICT)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -238,7 +227,7 @@ async fn strict_session_simulates_exact_signed_outer_tx() {
         .await;
     let outer = h.sign_exec(&prepared, OUTER_GAS).await;
     let mut session = session_at_latest(&h).await;
-    let simulated = session.transact_commit(strict_tx(&h, &outer)).unwrap();
+    let simulated = session.transact_commit(strict_tx(&outer)).unwrap();
     assert!(simulated.success);
     let receipt = h.send(&outer).await;
     let mined_logs = logs(&receipt);
@@ -265,7 +254,7 @@ async fn zero_safe_tx_gas_inner_failure_reverts_gs013() {
     let outer = h.sign_exec(&prepared, OUTER_GAS).await;
 
     let mut session = session_at_latest(&h).await.with_tracing(true);
-    let simulated = session.transact(strict_tx(&h, &outer)).unwrap();
+    let simulated = session.transact(strict_tx(&outer)).unwrap();
     assert!(
         !simulated.success,
         "a failing inner call must fail the simulation"

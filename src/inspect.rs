@@ -12,6 +12,7 @@ use alloy::providers::Provider;
 
 use crate::contracts::ISafe;
 use crate::error::{Error, Result};
+use crate::safe::SAFE_SINGLETON_SLOT;
 
 /// Storage slot holding the transaction guard (`keccak256("guard_manager.guard.address")`).
 pub const GUARD_STORAGE_SLOT: B256 =
@@ -85,6 +86,14 @@ impl SafeState {
     }
 }
 
+/// Maps a failed safety-critical read of `what` to [`Error::IncompleteRead`].
+fn incomplete<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Error {
+    move |e| Error::IncompleteRead {
+        what,
+        reason: e.to_string(),
+    }
+}
+
 fn word_to_address(word: U256) -> Address {
     Address::from_slice(&word.to_be_bytes::<32>()[12..])
 }
@@ -100,10 +109,7 @@ async fn storage_address<P: Provider<N>, N: Network>(
         .get_storage_at(address, slot)
         .block_id(block)
         .await
-        .map_err(|e| Error::IncompleteRead {
-            what,
-            reason: e.to_string(),
-        })?;
+        .map_err(incomplete(what))?;
     Ok(word_to_address(word))
 }
 
@@ -127,10 +133,7 @@ pub async fn enumerate_modules<P: Provider<N>, N: Network>(
             .block(block)
             .call()
             .await
-            .map_err(|e| Error::IncompleteRead {
-                what: "modules",
-                reason: e.to_string(),
-            })?;
+            .map_err(incomplete("modules"))?;
         modules.extend(page.array.iter().copied());
         if page.next == SENTINEL || page.next == Address::ZERO || page.array.is_empty() {
             return Ok(ModuleList {
@@ -160,16 +163,13 @@ pub async fn read_safe_state<P: Provider<N>, N: Network>(
         .get_code_at(safe)
         .block_id(block)
         .await
-        .map_err(|e| Error::IncompleteRead {
-            what: "code",
-            reason: e.to_string(),
-        })?;
+        .map_err(incomplete("code"))?;
     if code.is_empty() {
         return Err(Error::SafeNotDeployed(safe));
     }
     let code_hash = keccak256(&code);
 
-    let singleton = storage_address(provider, safe, U256::ZERO, block, "singleton").await?;
+    let singleton = storage_address(provider, safe, SAFE_SINGLETON_SLOT, block, "singleton").await?;
     let guard = storage_address(provider, safe, GUARD_STORAGE_SLOT.into(), block, "guard").await?;
     let fallback_handler = storage_address(
         provider,
@@ -186,28 +186,19 @@ pub async fn read_safe_state<P: Provider<N>, N: Network>(
         .block(block)
         .call()
         .await
-        .map_err(|e| Error::IncompleteRead {
-            what: "owners",
-            reason: e.to_string(),
-        })?;
+        .map_err(incomplete("owners"))?;
     let threshold = contract
         .getThreshold()
         .block(block)
         .call()
         .await
-        .map_err(|e| Error::IncompleteRead {
-            what: "threshold",
-            reason: e.to_string(),
-        })?;
+        .map_err(incomplete("threshold"))?;
     let nonce = contract
         .nonce()
         .block(block)
         .call()
         .await
-        .map_err(|e| Error::IncompleteRead {
-            what: "nonce",
-            reason: e.to_string(),
-        })?;
+        .map_err(incomplete("nonce"))?;
     let version = contract.VERSION().block(block).call().await.ok();
     let modules = enumerate_modules(
         provider,
@@ -242,7 +233,7 @@ pub async fn is_safe_with<P: Provider<N>, N: Network>(
     let singleton = storage_address(
         provider,
         address,
-        U256::ZERO,
+        SAFE_SINGLETON_SLOT,
         BlockId::latest(),
         "singleton",
     )

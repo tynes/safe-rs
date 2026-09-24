@@ -7,10 +7,12 @@
 //! bytes later if needed.
 
 use alloy::consensus::{SignableTransaction, TxEip1559, TxEnvelope};
+use alloy::eips::eip1559::Eip1559Estimation;
 use alloy::eips::eip2718::{Decodable2718, Encodable2718};
 use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
 use alloy::signers::Signer;
 
+use crate::envelope::SignedSafeTx;
 use crate::error::{Error, Result};
 
 /// Fields of an EIP-1559 outer transaction.
@@ -37,6 +39,28 @@ pub struct OuterTxParams {
 }
 
 impl OuterTxParams {
+    /// The outer transaction that submits `signed` through `execTransaction` on
+    /// its Safe, on the Safe transaction's chain, with no value.
+    pub fn exec_transaction(
+        signed: &SignedSafeTx,
+        from: Address,
+        nonce: u64,
+        gas_limit: u64,
+        fees: Eip1559Estimation,
+    ) -> Self {
+        Self {
+            chain_id: signed.prepared.chain_id,
+            from,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: fees.max_fee_per_gas,
+            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+            to: signed.prepared.safe,
+            value: U256::ZERO,
+            input: signed.exec_calldata(),
+        }
+    }
+
     fn to_tx(&self) -> TxEip1559 {
         TxEip1559 {
             chain_id: self.chain_id,
@@ -171,6 +195,35 @@ mod tests {
             sign_outer_tx(&signer, params(other)).await,
             Err(Error::SignatureMismatch { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn exec_transaction_targets_the_safe_with_exec_calldata() {
+        use crate::envelope::{decode_exec_calldata, PreparedSafeTx, SafeTxGasPolicy};
+        use crate::types::Call;
+
+        let owner = PrivateKeySigner::random();
+        let safe = address!("0x1000000000000000000000000000000000000001");
+        let prepared = PreparedSafeTx::single_call(
+            10,
+            safe,
+            &Call::call(safe, Bytes::new()),
+            U256::from(3),
+            SafeTxGasPolicy::Zero,
+        )
+        .unwrap();
+        let signed = prepared.sign(&owner).await.unwrap();
+        let fees = Eip1559Estimation {
+            max_fee_per_gas: 7,
+            max_priority_fee_per_gas: 2,
+        };
+        let outer = OuterTxParams::exec_transaction(&signed, owner.address(), 5, 100_000, fees);
+        assert_eq!(outer.chain_id, 10);
+        assert_eq!(outer.to, safe);
+        assert_eq!(outer.value, U256::ZERO);
+        assert_eq!((outer.max_fee_per_gas, outer.max_priority_fee_per_gas), (7, 2));
+        let decoded = decode_exec_calldata(&outer.input).unwrap();
+        assert_eq!(decoded.into_params(U256::from(3)), prepared.params);
     }
 
     #[test]

@@ -4,10 +4,13 @@
 //! using CREATE2. The Safe proxy factory deploys proxies at deterministic addresses
 //! based on the singleton address, initializer data, and salt nonce.
 
+use alloy::network::Network;
 use alloy::primitives::{keccak256, Address, Bytes, U256};
+use alloy::providers::Provider;
 use alloy::sol_types::SolCall;
 
 use crate::contracts::{ISafeProxyFactory, ISafeSetup};
+use crate::error::{Error, Result};
 
 /// Encodes the Safe.setup() call for proxy initialization
 ///
@@ -101,6 +104,21 @@ pub fn encode_create_proxy_with_nonce(singleton: Address, initializer: Bytes, sa
         }
         .abi_encode(),
     )
+}
+
+/// Reads the proxy creation code (`proxyCreationCode()`) from a Safe proxy factory.
+pub async fn fetch_proxy_creation_code<P: Provider<N>, N: Network>(
+    provider: &P,
+    factory: Address,
+) -> Result<Bytes> {
+    ISafeProxyFactory::new(factory, provider)
+        .proxyCreationCode()
+        .call()
+        .await
+        .map_err(|e| Error::Fetch {
+            what: "proxy creation code",
+            reason: e.to_string(),
+        })
 }
 
 /// Predicts a Safe address and returns it with the initializer used.

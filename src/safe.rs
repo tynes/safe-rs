@@ -13,6 +13,7 @@ use crate::chain::{ChainAddresses, ChainConfig};
 use crate::contracts::ISafe;
 use crate::envelope::{batch_params, BatchTarget, PreparedSafeTx, SafeTxGasPolicy};
 use crate::error::{Error, Result};
+use crate::inspect::is_safe_with;
 use crate::simulation::{ForkSimulator, SimulationResult};
 use crate::submit::{decode_safe_outcome, receipt_logs};
 use crate::types::{Call, CallBuilder, Operation};
@@ -38,23 +39,11 @@ pub async fn is_safe<P: Provider<N>, N: Network>(
     provider: &P,
     address: Address,
 ) -> Result<bool> {
-    // Read the Safe singleton slot (slot 0)
-    let storage_value = provider
-        .get_storage_at(address, SAFE_SINGLETON_SLOT)
-        .await
-        .map_err(|e| Error::Fetch {
-            what: "singleton slot",
-            reason: e.to_string(),
-        })?;
-
-    // Parse storage value as an address (last 20 bytes of the 32-byte slot)
-    let impl_address = Address::from_slice(&storage_value.to_be_bytes::<32>()[12..]);
-
-    // Check against known Safe singletons
-    let v1_4_1 = ChainAddresses::v1_4_1();
-    let v1_3_0 = ChainAddresses::v1_3_0();
-
-    Ok(impl_address == v1_4_1.safe_singleton || impl_address == v1_3_0.safe_singleton)
+    let known = [
+        ChainAddresses::v1_4_1().safe_singleton,
+        ChainAddresses::v1_3_0().safe_singleton,
+    ];
+    is_safe_with(provider, address, &known).await
 }
 
 /// Result of executing a Safe transaction

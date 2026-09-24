@@ -72,7 +72,8 @@ pub use account::Account;
 pub use chain::{ChainAddresses, ChainConfig};
 pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
 pub use create2::{
-    compute_create2_address, encode_create_proxy_with_nonce, encode_setup_call, predict_safe_address,
+    compute_create2_address, encode_create_proxy_with_nonce, encode_setup_call,
+    fetch_proxy_creation_code, predict_safe_address,
 };
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
@@ -82,18 +83,18 @@ pub use envelope::{
     batch_params, decode_exec_calldata, BatchTarget, DecodedExecTransaction, PreparedSafeTx,
     SafeTxGasPolicy, SignedSafeTx,
 };
-pub use inspect::{read_safe_state, ModuleList, ReadSafeStateOptions, SafeState};
+pub use inspect::{is_safe_with, read_safe_state, ModuleList, ReadSafeStateOptions, SafeState};
 pub use outer::{decode_signed_outer_tx, sign_outer_tx, OuterTxParams, SignedOuterTx};
 pub use simulation::{
     AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator, ParentHeader, SimBlockEnv,
     SimTx, SimulationResult, SpecId, TxChecks,
 };
 pub use submit::{
-    broadcast_raw, decode_safe_outcome, wait_for_receipt, BroadcastOutcome, ReceiptWait,
-    RejectClass, SafeExecutionOutcome,
+    broadcast_raw, decode_safe_outcome, receipt_logs, safe_outcome_for_receipt, wait_for_receipt,
+    BroadcastOutcome, ReceiptWait, RejectClass, SafeExecutionOutcome,
 };
 pub use types::{BatchResult, BatchSimulationResult, Call, CallBuilder, Operation, SafeCall, TypedCall};
-pub use wallet::{Wallet, WalletBuilder, WalletConfig};
+pub use wallet::{SafeDeployment, Wallet, WalletBuilder, WalletConfig};
 
 /// Type alias for a Safe wallet
 pub type SafeWallet<P> = Wallet<Safe<P>>;

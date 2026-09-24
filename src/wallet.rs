@@ -34,14 +34,14 @@
 //! ```
 
 use alloy::network::{AnyNetwork, EthereumWallet};
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::{Address, Bytes, TxHash, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use url::Url;
 
 use crate::account::Account;
 use crate::chain::{ChainAddresses, ChainConfig};
-use crate::create2::{compute_create2_address, encode_setup_call};
+use crate::create2::{fetch_proxy_creation_code, predict_safe_address};
 use crate::eoa::Eoa;
 use crate::error::{Error, Result};
 use crate::inspect::is_safe_with;
@@ -118,8 +118,9 @@ impl WalletConfig {
         self.addresses.clone().unwrap_or_else(ChainAddresses::v1_4_1)
     }
 
-    /// Builds the owners array (signer + additional owners)
-    fn build_owners(&self, signer_address: Address) -> Vec<Address> {
+    /// The Safe owners: the signer followed by the additional owners, without
+    /// duplicates.
+    pub fn owners(&self, signer_address: Address) -> Vec<Address> {
         let mut owners = vec![signer_address];
         for owner in &self.additional_owners {
             if !owners.contains(owner) {
@@ -129,11 +130,32 @@ impl WalletConfig {
         owners
     }
 
+    /// Checks that the threshold is between 1 and the number of owners.
+    pub fn validate(&self, signer_address: Address) -> Result<()> {
+        let owner_count = self.owners(signer_address).len();
+        if self.threshold == 0 || self.threshold as usize > owner_count {
+            return Err(Error::InvalidConfig(format!(
+                "Invalid threshold: {} (must be 1-{})",
+                self.threshold, owner_count
+            )));
+        }
+        Ok(())
+    }
+
     /// Gets the fallback handler, defaulting to the handler in `addresses`
-    fn get_fallback_handler(&self) -> Address {
+    pub fn fallback_handler(&self) -> Address {
         self.fallback_handler
             .unwrap_or_else(|| self.addresses().fallback_handler)
     }
+}
+
+/// Result of [`WalletBuilder::deploy_detailed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafeDeployment {
+    /// The Safe address
+    pub address: Address,
+    /// The deployment transaction, or `None` if the Safe was already deployed
+    pub tx_hash: Option<TxHash>,
 }
 
 // =============================================================================
@@ -273,39 +295,22 @@ where
     /// let address = builder.compute_address(&config).await?;
     /// ```
     pub async fn compute_address(&self, config: &WalletConfig) -> Result<Address> {
+        Ok(self.predict(config).await?.0)
+    }
+
+    /// Predicts the Safe address for `config` and returns it with the initializer.
+    async fn predict(&self, config: &WalletConfig) -> Result<(Address, Bytes)> {
         let addresses = config.addresses();
-        let signer_address = self.signer.address();
-
-        // Build owners array
-        let owners = config.build_owners(signer_address);
-
-        // Get fallback handler
-        let fallback_handler = config.get_fallback_handler();
-
-        // Encode initializer
-        let initializer = encode_setup_call(&owners, config.threshold, fallback_handler);
-
-        // Get proxy creation code
-        let factory = ISafeProxyFactory::new(addresses.proxy_factory, &self.provider);
-        let creation_code = factory
-            .proxyCreationCode()
-            .call()
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "proxy creation code",
-                reason: e.to_string(),
-            })?;
-
-        // Compute deterministic address
-        let safe_address = compute_create2_address(
+        let creation_code = fetch_proxy_creation_code(&self.provider, addresses.proxy_factory).await?;
+        Ok(predict_safe_address(
             addresses.proxy_factory,
             addresses.safe_singleton,
-            &initializer,
+            &config.owners(self.signer.address()),
+            config.threshold,
+            config.fallback_handler(),
             config.salt_nonce,
             &creation_code,
-        );
-
-        Ok(safe_address)
+        ))
     }
 
     /// Deploys a Safe with the given configuration. Idempotent.
@@ -328,50 +333,22 @@ where
     /// let wallet = builder.connect(address).await?;
     /// ```
     pub async fn deploy(&self, rpc_url: Url, config: WalletConfig) -> Result<Address> {
+        Ok(self.deploy_detailed(rpc_url, config).await?.address)
+    }
+
+    /// Like [`WalletBuilder::deploy`], and also reports the deployment
+    /// transaction hash (`None` when the Safe was already deployed).
+    pub async fn deploy_detailed(&self, rpc_url: Url, config: WalletConfig) -> Result<SafeDeployment> {
+        config.validate(self.signer.address())?;
         let addresses = config.addresses();
-        let signer_address = self.signer.address();
-
-        // Build owners array
-        let owners = config.build_owners(signer_address);
-
-        // Validate threshold
-        if config.threshold == 0 || config.threshold as usize > owners.len() {
-            return Err(Error::InvalidConfig(format!(
-                "Invalid threshold: {} (must be 1-{})",
-                config.threshold,
-                owners.len()
-            )));
-        }
-
-        // Get fallback handler
-        let fallback_handler = config.get_fallback_handler();
-
-        // Encode initializer
-        let initializer = encode_setup_call(&owners, config.threshold, fallback_handler);
-
-        // Get proxy creation code
-        let factory = ISafeProxyFactory::new(addresses.proxy_factory, &self.provider);
-        let creation_code = factory
-            .proxyCreationCode()
-            .call()
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "proxy creation code",
-                reason: e.to_string(),
-            })?;
-
-        // Compute deterministic address
-        let safe_address = compute_create2_address(
-            addresses.proxy_factory,
-            addresses.safe_singleton,
-            &initializer,
-            config.salt_nonce,
-            &creation_code,
-        );
+        let (safe_address, initializer) = self.predict(&config).await?;
 
         // Check if Safe is already deployed
         if is_safe_with(&self.provider, safe_address, &[addresses.safe_singleton]).await? {
-            return Ok(safe_address);
+            return Ok(SafeDeployment {
+                address: safe_address,
+                tx_hash: None,
+            });
         }
 
         // Deploy the Safe
@@ -390,7 +367,7 @@ where
                 reason: format!("Failed to send deployment transaction: {}", e),
             })?;
 
-        let _receipt = pending_tx.get_receipt().await.map_err(|e| Error::ExecutionFailed {
+        let receipt = pending_tx.get_receipt().await.map_err(|e| Error::ExecutionFailed {
             reason: format!("Failed to get deployment receipt: {}", e),
         })?;
 
@@ -401,7 +378,10 @@ where
             });
         }
 
-        Ok(safe_address)
+        Ok(SafeDeployment {
+            address: safe_address,
+            tx_hash: Some(receipt.transaction_hash),
+        })
     }
 }
 
@@ -605,7 +585,7 @@ mod tests {
         let owner3 = address!("3333333333333333333333333333333333333333");
 
         let config = WalletConfig::new().with_additional_owners(vec![owner2, owner3]);
-        let owners = config.build_owners(signer);
+        let owners = config.owners(signer);
 
         assert_eq!(owners.len(), 3);
         assert_eq!(owners[0], signer);
@@ -620,7 +600,7 @@ mod tests {
         let signer = address!("1111111111111111111111111111111111111111");
         // Include signer in additional owners (should not duplicate)
         let config = WalletConfig::new().with_additional_owners(vec![signer]);
-        let owners = config.build_owners(signer);
+        let owners = config.owners(signer);
 
         assert_eq!(owners.len(), 1);
         assert_eq!(owners[0], signer);
@@ -629,7 +609,7 @@ mod tests {
     #[test]
     fn test_wallet_config_get_fallback_handler_default() {
         let config = WalletConfig::default();
-        let handler = config.get_fallback_handler();
+        let handler = config.fallback_handler();
         assert_eq!(handler, ChainAddresses::v1_4_1().fallback_handler);
     }
 
@@ -639,7 +619,7 @@ mod tests {
 
         let custom_handler = address!("dead000000000000000000000000000000000000");
         let config = WalletConfig::new().with_fallback_handler(custom_handler);
-        let handler = config.get_fallback_handler();
+        let handler = config.fallback_handler();
         assert_eq!(handler, custom_handler);
     }
 }

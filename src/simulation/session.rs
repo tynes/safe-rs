@@ -25,7 +25,8 @@ use revm::Database;
 pub use revm::primitives::hardfork::SpecId;
 
 use crate::error::{Error, Result};
-use crate::simulation::evm::{self, EvmSettings};
+use crate::outer::OuterTxParams;
+use crate::simulation::evm::{self, canonical_hash, EvmSettings};
 use crate::simulation::SimulationResult;
 
 /// Gas limit for read-only [`ForkSession::call`]s: the Osaka per-transaction cap (EIP-7825).
@@ -80,6 +81,11 @@ impl ParentHeader {
             mix_hash: header.mix_hash.unwrap_or_default(),
             beneficiary: header.beneficiary,
         })
+    }
+
+    /// A block id pinning this header's hash (required to be canonical).
+    pub fn block_id(&self) -> BlockId {
+        canonical_hash(self.hash)
     }
 }
 
@@ -207,6 +213,22 @@ impl SimTx {
             checks: TxChecks::RELAXED,
         }
     }
+
+    /// The simulation of an outer transaction exactly as signed (sender, nonce,
+    /// gas limit and EIP-1559 fees), with the given validity checks.
+    pub fn from_outer(outer: &OuterTxParams, checks: TxChecks) -> Self {
+        Self {
+            from: outer.from,
+            to: outer.to,
+            value: outer.value,
+            input: outer.input.clone(),
+            gas_limit: outer.gas_limit,
+            max_fee_per_gas: outer.max_fee_per_gas,
+            max_priority_fee_per_gas: Some(outer.max_priority_fee_per_gas),
+            nonce: Some(outer.nonce),
+            checks,
+        }
+    }
 }
 
 /// A stateful simulation over a forked, pinned chain state.
@@ -248,6 +270,25 @@ impl ForkSession {
             tx_gas_cap: None,
             tracing: false,
         }
+    }
+
+    /// Creates a session forked at `parent` (pinned by its hash) that executes in
+    /// the block after it, `block_time_secs` later, with the protocol base fee
+    /// derived from `base_fee_params`.
+    pub async fn fork_next_block<P>(
+        provider: P,
+        chain_id: u64,
+        parent: BlockId,
+        block_time_secs: u64,
+        base_fee_params: BaseFeeParams,
+        spec: SpecId,
+    ) -> Result<Self>
+    where
+        P: Provider<AnyNetwork> + Clone + 'static,
+    {
+        let parent = ParentHeader::fetch(&provider, parent).await?;
+        let env = SimBlockEnv::next_after(&parent, block_time_secs, base_fee_params);
+        Ok(Self::new(provider, chain_id, parent.block_id(), env, spec))
     }
 
     /// Rejects transactions whose gas limit exceeds `cap` (EIP-7825 on Osaka).
@@ -405,6 +446,27 @@ mod tests {
         // gas used equals the target, so the base fee is unchanged
         assert_eq!(env.basefee, 1_000_000_000);
         assert_eq!(env.prevrandao, B256::repeat_byte(7));
+    }
+
+    #[test]
+    fn sim_tx_from_outer_copies_the_signed_fields() {
+        let outer = OuterTxParams {
+            chain_id: 1,
+            from: Address::repeat_byte(1),
+            nonce: 9,
+            gas_limit: 50_000,
+            max_fee_per_gas: 30,
+            max_priority_fee_per_gas: 2,
+            to: Address::repeat_byte(2),
+            value: U256::from(4),
+            input: Bytes::from(vec![1, 2]),
+        };
+        let tx = SimTx::from_outer(&outer, TxChecks::STRICT);
+        assert_eq!((tx.from, tx.to, tx.value), (outer.from, outer.to, outer.value));
+        assert_eq!(tx.input, outer.input);
+        assert_eq!((tx.gas_limit, tx.nonce), (50_000, Some(9)));
+        assert_eq!((tx.max_fee_per_gas, tx.max_priority_fee_per_gas), (30, Some(2)));
+        assert_eq!(tx.checks, TxChecks::STRICT);
     }
 
     #[test]

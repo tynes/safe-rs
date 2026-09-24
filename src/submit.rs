@@ -226,8 +226,11 @@ pub fn receipt_logs(receipt: &AnyTransactionReceipt) -> Vec<Log> {
         .collect()
 }
 
-/// Fetches a receipt and classifies the Safe outcome.
-pub async fn safe_outcome_for_receipt(
+/// Classifies the Safe outcome of a mined outer transaction.
+///
+/// Returns [`Error::ExecutionFailed`] if the outer transaction itself reverted
+/// (for example with `GS013`); otherwise the outcome decoded from its logs.
+pub fn safe_outcome_for_receipt(
     receipt: &AnyTransactionReceipt,
     safe: Address,
     safe_tx_hash: B256,

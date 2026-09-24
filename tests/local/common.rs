@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use alloy::eips::eip1559::Eip1559Estimation;
 use alloy::eips::BlockId;
 use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::node_bindings::{Anvil, AnvilInstance};
@@ -15,8 +16,8 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use safe_rs::{
     broadcast_raw, sign_outer_tx, wait_for_receipt, BroadcastOutcome, Call, ChainAddresses,
-    ChainConfig, ISafe, ISafeProxyFactory, OuterTxParams, PreparedSafeTx, ReceiptWait, Safe,
-    SafeTxGasPolicy, SignedOuterTx,
+    ChainConfig, ISafe, OuterTxParams, PreparedSafeTx, ReceiptWait, Safe, SafeTxGasPolicy,
+    SignedOuterTx,
 };
 
 /// Anvil's default deterministic CREATE2 deployer (Arachnid).
@@ -177,12 +178,10 @@ impl LocalHarness {
         threshold: u64,
         salt_nonce: u64,
     ) -> Address {
-        let factory = ISafeProxyFactory::new(self.addresses.proxy_factory, &self.provider);
-        let creation_code = factory
-            .proxyCreationCode()
-            .call()
-            .await
-            .expect("creation code");
+        let creation_code =
+            safe_rs::fetch_proxy_creation_code(&self.provider, self.addresses.proxy_factory)
+                .await
+                .expect("creation code");
         let (predicted, initializer) = safe_rs::predict_safe_address(
             self.addresses.proxy_factory,
             self.addresses.safe_singleton,
@@ -266,22 +265,15 @@ impl LocalHarness {
             .header
             .base_fee_per_gas
             .unwrap_or(1);
-        sign_outer_tx(
-            &self.owner,
-            OuterTxParams {
-                chain_id: self.chain_id,
-                from: self.owner.address(),
-                nonce,
-                gas_limit,
-                max_fee_per_gas: u128::from(base_fee) * 2 + 1_000_000_000,
-                max_priority_fee_per_gas: 1_000_000_000,
-                to: prepared.safe,
-                value: U256::ZERO,
-                input: signed.exec_calldata(),
-            },
-        )
-        .await
-        .expect("sign outer")
+        let fees = Eip1559Estimation {
+            max_fee_per_gas: u128::from(base_fee) * 2 + 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+        };
+        let params =
+            OuterTxParams::exec_transaction(&signed, self.owner.address(), nonce, gas_limit, fees);
+        sign_outer_tx(&self.owner, params)
+            .await
+            .expect("sign outer")
     }
 
     /// Broadcasts a signed outer transaction and waits for its receipt.
