@@ -73,10 +73,47 @@ sol! {
         /// Returns the chain ID
         function getChainId() external view returns (uint256);
 
+        /// Returns the Safe version string (e.g. "1.4.1")
+        function VERSION() external view returns (string memory);
+
+        /// Returns a page of enabled modules starting after `start`
+        function getModulesPaginated(address start, uint256 pageSize)
+            external
+            view
+            returns (address[] memory array, address next);
+
+        /// Returns whether a module is enabled
+        function isModuleEnabled(address module) external view returns (bool);
+
+        /// Reads raw storage words from the Safe (StorageAccessible)
+        function getStorageAt(uint256 offset, uint256 length) external view returns (bytes memory);
+
+        /// Self-authorized configuration calls (only callable by the Safe itself)
+        function enableModule(address module) external;
+        function disableModule(address prevModule, address module) external;
+        function setGuard(address guard) external;
+        function setFallbackHandler(address handler) external;
+        function addOwnerWithThreshold(address owner, uint256 _threshold) external;
+        function swapOwner(address prevOwner, address oldOwner, address newOwner) external;
+        function changeThreshold(uint256 _threshold) external;
+
+        /// Approves a hash for pre-validated signatures (msg.sender must be an owner)
+        function approveHash(bytes32 hashToApprove) external;
+
         /// Events
         event ExecutionSuccess(bytes32 indexed txHash, uint256 payment);
         event ExecutionFailure(bytes32 indexed txHash, uint256 payment);
         event SafeReceived(address indexed sender, uint256 value);
+        event SafeSetup(
+            address indexed initiator,
+            address[] owners,
+            uint256 threshold,
+            address initializer,
+            address fallbackHandler
+        );
+        event EnabledModule(address indexed module);
+        event ChangedGuard(address indexed guard);
+        event ChangedFallbackHandler(address indexed handler);
     }
 
     /// MultiSend interface for batching multiple calls

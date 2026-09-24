@@ -104,7 +104,7 @@ fn test_simulation_debug_output_delegatecall_operation() {
 
     let result = SimulationResult {
         success: true,
-        gas_used: 100000,
+        gas_used: 100_000,
         return_data: Bytes::new(),
         logs: vec![],
         revert_reason: None,

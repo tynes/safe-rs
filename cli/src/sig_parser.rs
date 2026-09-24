@@ -546,7 +546,7 @@ mod tests {
     fn test_parse_value_string_empty() {
         let sol_type: DynSolType = "string".parse().unwrap();
         let result = parse_value(&sol_type, "").unwrap();
-        assert_eq!(result, DynSolValue::String("".to_string()));
+        assert_eq!(result, DynSolValue::String(String::new()));
     }
 
     #[test]

@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "safe-rs"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2021"
 description = "Rust library for Safe v1.4.1 smart account interaction"
 license = "MIT"
@@ -13,13 +13,13 @@ keywords = ["ethereum", "safe", "multisig", "smart-account"]
 categories = ["cryptography", "web-programming"]
 
 [dependencies]
-alloy = { version = "1.4", features = ["full", "signer-local", "rpc-types-trace"] }
-alloy-primitives = "1.4"
-alloy-sol-types = "1.4"
+alloy = { version = "2.5", features = ["full", "signer-local", "rpc-types-trace"] }
+alloy-primitives = "1.6"
+alloy-sol-types = "1.6"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-foundry-fork-db = "0.22"
-revm = { version = "34", default-features = false, features = ["std", "optional_eip3607"] }
-revm-inspectors = { version = "0.34", default-features = false, features = ["std"] }
+foundry-fork-db = "0.27"
+revm = { version = "41", default-features = false, features = ["std", "optional_eip3607", "optional_no_base_fee", "optional_balance_check"] }
+revm-inspectors = { version = "0.41", default-features = false, features = ["std"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
@@ -28,7 +28,7 @@ url = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros"] }
-alloy = { version = "1.4", features = ["full", "signer-local", "rpc-types-trace", "node-bindings"] }
+alloy = { version = "2.5", features = ["full", "signer-local", "rpc-types-trace", "node-bindings"] }
 serde_json = "1"
 reqwest = "0.12"
 tempfile = "3"

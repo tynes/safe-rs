@@ -17,7 +17,7 @@ Built for single-owner (1/1) Safes with a focus on simplicity, safety, and devel
 - **Type-safe contract calls** — First-class support for alloy's `sol!` macro
 - **Multi-chain support** — Pre-configured for Ethereum, Arbitrum, Optimism, Base, Polygon, and more
 - **Deterministic deployment** — Deploy new Safes with predictable addresses via CREATE2
-- **Gas estimation** — Single calls get an automatic safeTxGas with safety buffer; MultiSend batches use `safeTxGas = 0` and defer to the outer transaction's estimate
+- **Fail-closed execution** — `safeTxGas` defaults to 0, so a failing inner call reverts the whole transaction instead of consuming the Safe nonce; `execute()` signs exactly the Safe transaction that `simulate()` ran
 - **Revert decoding** — Human-readable error messages from failed simulations
 - **EOA fallback mode** — Same builder API for executing as individual transactions from an EOA
 
@@ -84,7 +84,7 @@ println!("Transaction: {:?}", result.transaction_hash);
 
 ### `safe send`
 
-Execute transactions through a Safe. Always simulates first, then prompts for confirmation.
+Execute transactions through a Safe. `send` freezes the Safe transaction (nonce, `safeTxGas = 0`), signs it, and simulates the exact outer `execTransaction` it will broadcast in the next block with all validity checks (nonce, fees, balance). It then prompts for confirmation, signs the outer transaction locally, broadcasts the raw bytes and waits for the Safe's `ExecutionSuccess` event. A failed simulation stops before any prompt and exits non-zero.
 
 **Single call:**
 ```bash
@@ -105,38 +105,69 @@ safe send \
 safe send --bundle transactions.json --safe 0xYourSafe --rpc-url $ETH_RPC_URL
 ```
 
+**Sign now, broadcast later:**
+```bash
+# Write the signed transaction to stdout without broadcasting it
+safe send --bundle transactions.json --call-only --no-submit --safe 0xYourSafe > tx.json
+
+# Or keep a copy of the exact bytes while submitting
+safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYourSafe
+```
+
 **Options:**
 | Flag | Description |
 |------|-------------|
-| `--simulate-only` | Simulate without executing |
+| `--simulate-only` | Simulate without signing or broadcasting |
+| `--skip-simulation` | Skip simulation (outer gas from `eth_estimateGas`) |
 | `--call-only` | Use MultiSendCallOnly (no delegatecall) |
+| `--nonce <n>` | Safe nonce to sign for; fails if the on-chain nonce differs |
+| `--safe-tx-gas <n>` | Explicit `safeTxGas` (default 0; non-zero lets a failed inner call consume the nonce) |
+| `--gas-limit <n>` | Outer gas limit (default: simulated gas + 20%) |
+| `--max-fee-per-gas <wei>` / `--max-priority-fee-per-gas <wei>` | Override the node's fee estimate |
+| `--raw-out <path\|->` | Write the signed transaction as JSON before broadcasting (`-` = stdout; progress then goes to stderr) |
+| `--no-submit` | Sign but don't broadcast (implies `--raw-out -` unless set) |
+| `--timeout <secs>` | How long to wait for the receipt (default 120) |
+| `--trace` | Print call traces of the simulation |
+| `--block <n\|hash\|tag>` | Simulate on top of this block (default: latest) |
+| `--spec <cancun\|prague\|osaka>` | EVM spec for simulation (default: osaka) |
+| `--multi-send <addr>` / `--multi-send-call-only <addr>` | Non-canonical MultiSend deployments |
 | `--no-confirm` | Skip confirmation prompt |
 | `--json` | Output as JSON |
 | `-i, --interactive` | Prompt for private key |
 
+The `--raw-out` document contains `chain_id`, `safe`, `safe_nonce`, `safe_tx_hash`, the Safe transaction fields (`safe_tx`), the owner `signer` and `signature`, the outer transaction fields (`outer`), the EIP-2718 `raw` bytes and their `tx_hash`. `raw` can be rebroadcast as is with `cast publish`.
+
+A broadcast the node rejects, a broadcast with an unclear result, a receipt that doesn't arrive in time, and a Safe transaction without `ExecutionSuccess` all exit non-zero with the transaction hash.
+
 ### `safe call`
 
-Simulate a transaction without executing. Useful for testing and gas estimation.
+Simulate a call made by the Safe without executing it. It runs in the block after `--block` (default: latest), with that block's timestamp and base fee. It is useful for testing and gas estimation.
 
 ```bash
-safe call <to> <signature> [args...] --safe <address> --rpc-url <url>
+safe call <to> <signature> [args...] --safe <address> --rpc-url <url> [--block <n>] [--trace]
 ```
 
 ### `safe info`
 
-Query Safe state.
+Query Safe state. Every value is read at the same block (`--block`, default: latest).
 
 ```bash
-safe info --safe 0xYourSafe --rpc-url $ETH_RPC_URL
+safe info --safe 0xYourSafe --rpc-url $ETH_RPC_URL [--block <n|hash|tag>]
 ```
 
 Output:
 ```
 Safe: 0xYourSafe
+Block: 21000000 (0x...)
+Version: 1.4.1
+Singleton: 0x41675C099F32341bf84BFc5382aF534df5C7461a
 Nonce: 42
 Threshold: 1
 Owners:
-  - 0xOwner1
+  1: 0xOwner1
+Modules: none
+Guard: none
+Fallback Handler: 0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99
 ```
 
 ### `safe create`
@@ -159,6 +190,8 @@ safe create \
 | `--threshold <n>` | Required signatures (default: 1) |
 | `--salt-nonce <n>` | Salt for deterministic address |
 | `--compute-only` | Show address without deploying |
+| `--fallback-handler <address>` | Custom fallback handler |
+| `--singleton <address>` / `--factory <address>` | Non-canonical Safe deployment |
 
 ### Wallet Options
 
@@ -235,8 +268,28 @@ After simulation, you can execute:
 
 ```rust
 let result = simulated.execute().await?;
-println!("Transaction hash: {:?}", result.transaction_hash);
+println!("Transaction hash: {:?}", result.tx_hash);
 ```
+
+`execute()` signs exactly the Safe transaction that `simulate()` ran. It fails with `Error::NonceMismatch` if the Safe nonce moved in the meantime. `safeTxGas` is 0 unless set with `with_safe_tx_gas()`, so a failing inner call reverts (`GS013`) instead of being mined as `ExecutionFailure`.
+
+### Frozen Transactions
+
+To review, simulate, sign and broadcast the same transaction as separate steps, freeze it with `prepare()`:
+
+```rust
+use safe_rs::{broadcast_raw, sign_outer_tx, OuterTxParams};
+
+let prepared = safe.batch().call_only().add_typed(token, call).prepare().await?;
+let signed = prepared.sign(&owner).await?;
+let fees = provider.estimate_eip1559_fees().await?;
+let params = OuterTxParams::exec_transaction(&signed, owner.address(), eoa_nonce, gas_limit, fees);
+let outer = sign_outer_tx(&owner, params).await?;
+// persist outer.raw / outer.tx_hash, then:
+let outcome = broadcast_raw(&provider, &outer.raw, outer.tx_hash).await;
+```
+
+`ForkSession` simulates `SimTx::from_outer(&outer.params, TxChecks::STRICT)` in the next block before you broadcast. `read_safe_state` returns a block-pinned snapshot of owners, threshold, nonce, modules, guard and fallback handler.
 
 ### Simulation-Only Mode
 
@@ -289,6 +342,8 @@ for tx in &result.results {
 }
 ```
 
+EOA simulation runs the calls in order on one fork, so each call sees the effects of the calls before it (for example an `approve` followed by a `transferFrom`).
+
 **Key differences from Safe mode:**
 
 | Aspect | Safe Mode | EOA Mode |
@@ -339,7 +394,8 @@ Fields:
 - `to` — Target address (required)
 - `value` — Wei to send (optional, default: "0")
 - `data` — Calldata hex (optional, default: "0x")
-- `operation` — 0 for Call, 1 for DelegateCall (optional, default: 0)
+- `operation` — 0 for Call, 1 for DelegateCall (optional, default: 0). With `--call-only`, a DelegateCall entry is rejected.
+- `value` accepts decimal or `0x`-prefixed hex
 
 ## Supported Chains
 

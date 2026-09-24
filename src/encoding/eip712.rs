@@ -6,7 +6,7 @@ use crate::contracts::{DOMAIN_SEPARATOR_TYPEHASH, SAFE_TX_TYPEHASH};
 use crate::types::Operation;
 
 /// Safe transaction parameters for hashing
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafeTxParams {
     /// Target address
     pub to: Address,
@@ -187,7 +187,7 @@ mod tests {
             value: U256::from(1000),
             data: Bytes::from(vec![0x01, 0x02, 0x03]),
             operation: Operation::Call,
-            safe_tx_gas: U256::from(100000),
+            safe_tx_gas: U256::from(100_000),
             base_gas: U256::from(21000),
             gas_price: U256::ZERO,
             gas_token: Address::ZERO,

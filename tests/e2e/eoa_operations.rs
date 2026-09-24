@@ -321,7 +321,7 @@ async fn test_eoa_single_erc20_transfer() {
         .expect("Failed to deploy MockERC20");
 
     // Mint tokens to EOA
-    let mint_amount = U256::from(1000_000_000_000_000_000_000u128); // 1000 tokens
+    let mint_amount = U256::from(1_000_000_000_000_000_000_000_u128); // 1000 tokens
     harness
         .mint_erc20(token_address, eoa.address(), mint_amount)
         .await
@@ -795,14 +795,19 @@ async fn test_eoa_simulate_failure_returns_revert_reason() {
         amount: U256::from(1000), // EOA has no tokens, should revert
     };
 
-    let result = eoa
+    // simulate() stores a failed result rather than erroring;
+    // simulation_success() is what reports the revert.
+    let builder = eoa
         .batch()
         .add_typed(token_address, failing_transfer_call)
         .simulate()
-        .await;
+        .await
+        .expect("Simulation should run");
+    let results = builder.simulation_results().expect("Results should be stored");
+    assert!(!results[0].success);
+    assert!(results[0].revert_reason.is_some());
 
-    assert!(result.is_err());
-    match result {
+    match builder.simulation_success() {
         Err(Error::SimulationReverted { reason }) => {
             assert!(!reason.is_empty(), "Should include revert reason");
         }
@@ -1022,7 +1027,7 @@ async fn test_eoa_mixed_eth_and_erc20_batch() {
         .await
         .expect("Failed to deploy MockERC20");
 
-    let token_mint_amount = U256::from(1000_000_000_000_000_000_000u128); // 1000 tokens
+    let token_mint_amount = U256::from(1_000_000_000_000_000_000_000_u128); // 1000 tokens
     harness
         .mint_erc20(token_address, eoa.address(), token_mint_amount)
         .await

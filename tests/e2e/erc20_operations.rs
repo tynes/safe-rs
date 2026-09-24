@@ -27,7 +27,7 @@ async fn test_deploy_mock_erc20() {
         .expect("Failed to deploy MockERC20");
 
     // Mint tokens to Safe
-    let mint_amount = U256::from(1_000_000_000_000_000_000_000u128); // 1000 tokens
+    let mint_amount = U256::from(1_000_000_000_000_000_000_000_u128); // 1000 tokens
     harness
         .mint_erc20(token_address, safe_address, mint_amount)
         .await
@@ -66,7 +66,7 @@ async fn test_erc20_transfer_via_safe() {
         .await
         .expect("Failed to deploy MockERC20");
 
-    let mint_amount = U256::from(1000_000_000_000_000_000_000u128); // 1000 tokens
+    let mint_amount = U256::from(1_000_000_000_000_000_000_000_u128); // 1000 tokens
     harness
         .mint_erc20(token_address, safe_address, mint_amount)
         .await
@@ -201,7 +201,7 @@ async fn test_batch_erc20_operations() {
         .await
         .expect("Failed to deploy MockERC20");
 
-    let mint_amount = U256::from(1000_000_000_000_000_000_000u128); // 1000 tokens
+    let mint_amount = U256::from(1_000_000_000_000_000_000_000_u128); // 1000 tokens
     harness
         .mint_erc20(token_address, safe_address, mint_amount)
         .await
@@ -300,7 +300,7 @@ async fn test_batch_execute_without_simulate() {
         .deploy_mock_erc20()
         .await
         .expect("Failed to deploy MockERC20");
-    let mint_amount = U256::from(1000_000_000_000_000_000_000u128);
+    let mint_amount = U256::from(1_000_000_000_000_000_000_000_u128);
     harness
         .mint_erc20(token_address, safe_address, mint_amount)
         .await

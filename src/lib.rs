@@ -55,11 +55,15 @@ pub mod chain;
 pub mod contracts;
 pub mod create2;
 pub mod encoding;
+pub mod envelope;
 pub mod eoa;
 pub mod error;
+pub mod inspect;
+pub mod outer;
 pub mod safe;
 pub mod signing;
 pub mod simulation;
+pub mod submit;
 pub mod types;
 pub mod wallet;
 
@@ -67,14 +71,30 @@ pub mod wallet;
 pub use account::Account;
 pub use chain::{ChainAddresses, ChainConfig};
 pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
-pub use create2::{compute_create2_address, encode_setup_call};
+pub use create2::{
+    compute_create2_address, encode_create_proxy_with_nonce, encode_setup_call,
+    fetch_proxy_creation_code, predict_safe_address,
+};
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
-pub use safe::{is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
-pub use simulation::{AccountState, CallTraceArena, DiffMode, ForkSimulator, SimulationResult};
+pub use safe::{is_gs013_revert, is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
+pub use envelope::{
+    batch_params, decode_exec_calldata, BatchTarget, DecodedExecTransaction, PreparedSafeTx,
+    SafeTxGasPolicy, SignedSafeTx,
+};
+pub use inspect::{is_safe_with, read_safe_state, ModuleList, ReadSafeStateOptions, SafeState};
+pub use outer::{decode_signed_outer_tx, sign_outer_tx, OuterTxParams, SignedOuterTx};
+pub use simulation::{
+    AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator, ParentHeader, SimBlockEnv,
+    SimTx, SimulationResult, SpecId, TxChecks,
+};
+pub use submit::{
+    broadcast_raw, decode_safe_outcome, receipt_logs, safe_outcome_for_receipt, wait_for_receipt,
+    BroadcastOutcome, ReceiptWait, RejectClass, SafeExecutionOutcome,
+};
 pub use types::{BatchResult, BatchSimulationResult, Call, CallBuilder, Operation, SafeCall, TypedCall};
-pub use wallet::{Wallet, WalletBuilder, WalletConfig};
+pub use wallet::{SafeDeployment, Wallet, WalletBuilder, WalletConfig};
 
 /// Type alias for a Safe wallet
 pub type SafeWallet<P> = Wallet<Safe<P>>;

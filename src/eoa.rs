@@ -158,6 +158,7 @@ where
     ///
     /// # Panics
     /// Panics if called before adding any calls to the batch.
+    #[allow(clippy::expect_used, reason = "documented panic: misuse of the builder API")]
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
         let last_call = self.calls.last_mut()
             .expect("with_gas_limit called before adding any calls");
@@ -165,7 +166,7 @@ where
         self
     }
 
-    /// Simulates all calls and stores the results
+    /// Simulates all calls in order on one fork and stores the results
     ///
     /// This method does not return an error if the simulation reverts. Instead,
     /// the result (success or failure) is stored internally. Use `simulation_success()`
@@ -187,21 +188,8 @@ where
             simulator = simulator.with_debug_output_dir(dir.clone(), self.eoa.address());
         }
 
-        let mut simulation_results = Vec::with_capacity(self.calls.len());
-
-        for call in self.calls.iter() {
-            let result = simulator
-                .simulate_call(
-                    self.eoa.address(),
-                    call.to,
-                    call.value,
-                    call.data.clone(),
-                    Operation::Call,
-                )
-                .await?;
-
-            simulation_results.push(result);
-        }
+        // One fork for the whole batch: each call sees the effects of the ones before it.
+        let simulation_results = simulator.simulate_calls(self.eoa.address(), &self.calls).await?;
 
         self.aggregated_result = Some(Self::aggregate_results(&simulation_results));
         self.simulation_results = Some(simulation_results);

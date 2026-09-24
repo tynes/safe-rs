@@ -18,8 +18,7 @@ pub struct BundleTransaction {
 }
 
 /// Loads a bundle file and converts to Vec<Call>
-pub fn load_bundle(path: &str) -> Result<Vec<Call>> {
-    let path = Path::new(path);
+pub fn load_bundle(path: &Path) -> Result<Vec<Call>> {
     if !path.exists() {
         return Err(eyre!("Bundle file not found: {}", path.display()));
     }
@@ -42,44 +41,25 @@ fn convert_transaction(tx: BundleTransaction) -> Result<Call> {
         .parse()
         .map_err(|e| eyre!("Invalid address '{}': {}", tx.to, e))?;
 
-    let value = if tx.value.is_empty() || tx.value == "0" {
-        U256::ZERO
-    } else {
-        parse_value(&tx.value)?
+    // Decimal or 0x-prefixed hex; empty means zero
+    let value = match tx.value.trim() {
+        "" => U256::ZERO,
+        value => value
+            .parse()
+            .map_err(|e| eyre!("Invalid value '{}': {}", value, e))?,
     };
 
-    let data = if tx.data.is_empty() || tx.data == "0x" {
-        Bytes::new()
-    } else {
-        parse_hex_data(&tx.data)?
-    };
+    // Hex with or without 0x; empty means no calldata
+    let data: Bytes = tx
+        .data
+        .trim()
+        .parse()
+        .map_err(|e| eyre!("Invalid hex data: {}", e))?;
 
     let operation = Operation::from_u8(tx.operation)
         .ok_or_else(|| eyre!("Invalid operation: {}", tx.operation))?;
 
-    Ok(Call {
-        to,
-        value,
-        data,
-        operation,
-        gas_limit: None,
-    })
-}
-
-fn parse_value(s: &str) -> Result<U256> {
-    let s = s.trim();
-    if s.starts_with("0x") || s.starts_with("0X") {
-        U256::from_str_radix(&s[2..], 16).map_err(|e| eyre!("Invalid hex value: {}", e))
-    } else {
-        s.parse::<U256>().map_err(|e| eyre!("Invalid value: {}", e))
-    }
-}
-
-fn parse_hex_data(s: &str) -> Result<Bytes> {
-    let s = s.trim();
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s).map_err(|e| eyre!("Invalid hex data: {}", e))?;
-    Ok(Bytes::from(bytes))
+    Ok(Call::new(to, value, data).with_operation(operation))
 }
 
 #[cfg(test)]
@@ -107,6 +87,33 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].value, U256::from(1000));
         assert_eq!(calls[1].data, Bytes::new());
+    }
+
+    #[test]
+    fn test_parse_bundle_hex_values_and_operations() {
+        let json = r#"[
+            {
+                "to": "0x1234567890123456789012345678901234567890",
+                "value": "0x3e8",
+                "data": "a9059cbb",
+                "operation": 1
+            }
+        ]"#;
+
+        let calls = parse_bundle(json).unwrap();
+        assert_eq!(calls[0].value, U256::from(1000));
+        assert_eq!(calls[0].data, Bytes::from(vec![0xa9, 0x05, 0x9c, 0xbb]));
+        assert_eq!(calls[0].operation, Operation::DelegateCall);
+    }
+
+    #[test]
+    fn test_parse_bundle_rejects_bad_input() {
+        let bad_value = r#"[{"to": "0x1234567890123456789012345678901234567890", "value": "ten"}]"#;
+        assert!(parse_bundle(bad_value).is_err());
+        let bad_data = r#"[{"to": "0x1234567890123456789012345678901234567890", "data": "0xzz"}]"#;
+        assert!(parse_bundle(bad_data).is_err());
+        let bad_op = r#"[{"to": "0x1234567890123456789012345678901234567890", "operation": 2}]"#;
+        assert!(parse_bundle(bad_op).is_err());
     }
 
     #[test]

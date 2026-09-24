@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Send(args) => commands::send::run(args, cli.json).await,
+        Commands::Send(args) => commands::send::run(*args, cli.json).await,
         Commands::Call(args) => commands::call::run(args, cli.json).await,
         Commands::Info(args) => commands::info::run(args, cli.json).await,
         Commands::Create(args) => commands::create::run(args, cli.json).await,

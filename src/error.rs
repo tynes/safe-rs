@@ -109,6 +109,33 @@ pub enum Error {
     /// Simulation was not performed
     #[error("Simulation has not been performed - call simulate() first")]
     SimulationNotPerformed,
+
+    /// A DelegateCall entry was found where only CALL is allowed
+    #[error("DelegateCall is not allowed (call index {index})")]
+    DelegateCallNotAllowed { index: usize },
+
+    /// The Safe's on-chain nonce differs from the expected nonce
+    #[error("Safe nonce mismatch: expected {expected}, found {actual}")]
+    NonceMismatch {
+        expected: alloy::primitives::U256,
+        actual: alloy::primitives::U256,
+    },
+
+    /// A signature does not recover to the expected owner
+    #[error("Signature mismatch: expected signer {expected}, recovered {recovered}")]
+    SignatureMismatch { expected: Address, recovered: Address },
+
+    /// A safety-critical read could not be completed
+    #[error("Incomplete read of {what}: {reason}")]
+    IncompleteRead { what: &'static str, reason: String },
+
+    /// The requested EVM specification is not supported by the simulator
+    #[error("Unsupported EVM specification: {0}")]
+    UnsupportedSpec(String),
+
+    /// The transaction gas limit exceeds the configured per-transaction cap
+    #[error("Transaction gas limit {gas_limit} exceeds cap {cap}")]
+    GasLimitAboveCap { gas_limit: u64, cap: u64 },
 }
 
 impl From<alloy::transports::RpcError<alloy::transports::TransportErrorKind>> for Error {

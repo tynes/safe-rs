@@ -13,10 +13,10 @@ path = "src/main.rs"
 safe-rs = { path = ".." }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
-alloy = { version = "1.4", features = ["full", "signer-local"] }
-alloy-primitives = "1.4"
-alloy-dyn-abi = "1.4"
-alloy-sol-types = "1.4"
+alloy = { version = "2.5", features = ["full", "signer-local"] }
+alloy-primitives = "1.6"
+alloy-dyn-abi = "1.6"
+alloy-sol-types = "1.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 eyre = "0.6"
@@ -24,6 +24,7 @@ color-eyre = "0.6"
 dialoguer = "0.11"
 hex = "0.4"
 rpassword = "7"
+url = "2"
 
 [lints]
 workspace = true
