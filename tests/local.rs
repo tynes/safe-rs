@@ -24,7 +24,7 @@ use common::{enable_module_call, reverter_initcode, set_guard_call, LocalHarness
 use safe_rs::inspect::{enumerate_modules, read_safe_state, ReadSafeStateOptions};
 use safe_rs::{
     broadcast_raw, decode_safe_outcome, wait_for_receipt, Account, BroadcastOutcome, Call,
-    CallBuilder, Error, ForkSession, ISafe, ParentHeader, ReceiptWait, Safe, SafeExecutionOutcome,
+    CallBuilder, Error, ForkSession, ISafe, ParentHeader, ReceiptWait, SafeExecutionOutcome,
     SafeTxGasPolicy, SimBlockEnv, SimTx, SpecId, TxChecks, WalletBuilder, WalletConfig,
 };
 
@@ -315,17 +315,7 @@ async fn builder_reports_failures_that_used_to_look_successful() {
     let h = LocalHarness::new().await;
     let safe_address = h.deploy_safe(7).await;
     let reverter = h.create2(reverter_initcode()).await;
-    let wallet_provider = alloy::providers::ProviderBuilder::new()
-        .network::<alloy::network::AnyNetwork>()
-        .wallet(alloy::network::EthereumWallet::from(h.owner.clone()))
-        .connect_http(h.url())
-        .erased();
-    let safe = Safe::new(
-        wallet_provider,
-        h.owner.clone(),
-        safe_address,
-        safe_rs::ChainConfig::with_addresses(h.chain_id, h.addresses.clone()),
-    );
+    let safe = h.safe_client(safe_address);
 
     // Batch simulation of a failing call now fails (it used to report success).
     let builder = safe
@@ -615,4 +605,96 @@ async fn halted_frames_are_named_in_revert_reasons() {
     assert!(!result.success);
     let reason = result.revert_reason.unwrap_or_default();
     assert!(reason.contains("OutOfGas"), "{reason}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn builder_executes_exactly_the_simulated_safe_tx() {
+    let h = LocalHarness::new().await;
+    let safe_address = h.deploy_safe(9).await;
+    h.fund(safe_address, U256::from(1_000)).await;
+    let safe = h.safe_client(safe_address);
+    let recipient = Address::repeat_byte(0x43);
+
+    let builder = safe
+        .batch()
+        .call_only()
+        .add(Call::new(recipient, U256::from(10), Bytes::new()))
+        .add(Call::new(recipient, U256::from(5), Bytes::new()));
+    let prepared = builder.prepare().await.unwrap();
+    assert!(prepared.is_fail_closed());
+    let builder = builder
+        .simulate()
+        .await
+        .unwrap()
+        .simulation_success()
+        .unwrap();
+    let result = builder.execute().await.unwrap();
+    assert!(result.success);
+
+    // The mined Safe transaction is the prepared (and simulated) one, safeTxGas 0.
+    let receipt = h
+        .provider
+        .get_transaction_receipt(result.tx_hash)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(decode_safe_outcome(&logs(&receipt), safe_address, prepared.safe_tx_hash).is_success());
+    assert_eq!(
+        h.provider.get_balance(recipient).await.unwrap(),
+        U256::from(15)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn builder_execute_after_simulate_stays_fail_closed() {
+    let h = LocalHarness::new().await;
+    let safe_address = h.deploy_safe(10).await;
+    let reverter = h.create2(reverter_initcode()).await;
+    let safe = h.safe_client(safe_address);
+
+    // A failing inner call after simulate() used to be signed with
+    // safeTxGas = gas_used * 1.1 and mined as ExecutionFailure. It now reverts
+    // before broadcast and the nonce is not consumed.
+    let builder = safe
+        .batch()
+        .add(Call::call(reverter, Bytes::new()))
+        .simulate()
+        .await
+        .unwrap();
+    assert!(!builder.simulation_result().unwrap().success);
+    let err = builder.execute().await;
+    assert!(
+        matches!(err, Err(Error::InnerTransactionReverted { .. })),
+        "{err:?}"
+    );
+    assert_eq!(h.safe_nonce(safe_address).await, U256::ZERO);
+
+    // Calls added after simulate() are refused rather than executed unsimulated.
+    let err = safe
+        .batch()
+        .add(Call::call(safe_address, Bytes::new()))
+        .simulate()
+        .await
+        .unwrap()
+        .add(Call::call(safe_address, Bytes::new()))
+        .execute()
+        .await;
+    assert!(matches!(err, Err(Error::InvalidConfig(_))), "{err:?}");
+
+    // A simulated transaction whose nonce was used in the meantime is refused.
+    let stale = safe
+        .batch()
+        .add(Call::call(safe_address, Bytes::new()))
+        .simulate()
+        .await
+        .unwrap();
+    safe.batch()
+        .add(Call::call(safe_address, Bytes::new()))
+        .execute()
+        .await
+        .unwrap();
+    assert!(matches!(
+        stale.execute().await,
+        Err(Error::NonceMismatch { .. })
+    ));
 }

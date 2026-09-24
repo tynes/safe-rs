@@ -79,7 +79,8 @@ pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
 pub use safe::{is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
 pub use envelope::{
-    decode_exec_calldata, DecodedExecTransaction, PreparedSafeTx, SafeTxGasPolicy, SignedSafeTx,
+    batch_params, decode_exec_calldata, BatchTarget, DecodedExecTransaction, PreparedSafeTx,
+    SafeTxGasPolicy, SignedSafeTx,
 };
 pub use inspect::{read_safe_state, ModuleList, ReadSafeStateOptions, SafeState};
 pub use outer::{decode_signed_outer_tx, sign_outer_tx, OuterTxParams, SignedOuterTx};

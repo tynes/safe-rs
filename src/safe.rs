@@ -3,42 +3,24 @@
 use std::path::{Path, PathBuf};
 
 use alloy::network::primitives::ReceiptResponse;
-use alloy::network::{AnyNetwork, Network};
+use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, TxHash, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
-use alloy::sol_types::SolCall;
 
 use crate::account::Account;
 use crate::chain::{ChainAddresses, ChainConfig};
-use crate::contracts::{IMultiSend, IMultiSendCallOnly, ISafe};
-use crate::encoding::{compute_safe_transaction_hash, encode_multisend_data, SafeTxParams};
+use crate::contracts::ISafe;
+use crate::envelope::{batch_params, BatchTarget, PreparedSafeTx, SafeTxGasPolicy};
 use crate::error::{Error, Result};
-use crate::signing::sign_hash;
 use crate::simulation::{ForkSimulator, SimulationResult};
+use crate::submit::{decode_safe_outcome, receipt_logs};
 use crate::types::{Call, CallBuilder, Operation};
 
 /// Safe proxy singleton storage slot (slot 0)
 /// Safe proxies store the implementation/singleton address at storage slot 0,
 /// as the first declared variable in the proxy contract.
 pub const SAFE_SINGLETON_SLOT: U256 = U256::ZERO;
-
-/// Gas price used for every `execTransaction` built by this crate: zero, i.e. the
-/// Safe pays no gas refund and the executing EOA bears the whole cost.
-///
-/// This is load-bearing, not cosmetic. `Safe.execTransaction` forwards
-///
-/// ```solidity
-/// success = execute(to, value, data, operation, gasPrice == 0 ? (gasleft() - 2500) : safeTxGas);
-/// ```
-///
-/// so while `gasPrice == 0` the inner call gets all remaining gas and `safeTxGas`
-/// only feeds the GS010 pre-check and the GS013 branch. That is what makes
-/// `safe_tx_gas = 0` viable for MultiSend delegatecall batches (see
-/// `SafeBuilder::execute`). Supporting refunds (a non-zero gas price, `gas_token`
-/// or `refund_receiver`) means `safeTxGas` starts gating the inner call, so every
-/// site that leaves `safe_tx_gas` at zero must be revisited at the same time.
-const NO_REFUND_GAS_PRICE: U256 = U256::ZERO;
 
 /// Checks if an address is a Safe contract by reading the singleton storage slot
 /// and matching against known Safe singleton addresses.
@@ -224,8 +206,10 @@ pub struct SafeBuilder<'a, P> {
     safe: &'a Safe<P>,
     calls: Vec<Call>,
     use_call_only: bool,
-    safe_tx_gas: Option<U256>,
+    gas: SafeTxGasPolicy,
     nonce: Option<U256>,
+    /// The Safe transaction `simulate()` ran, which `execute()` must match
+    simulated: Option<PreparedSafeTx>,
     simulation_result: Option<SimulationResult>,
 }
 
@@ -238,8 +222,9 @@ where
             safe,
             calls: Vec::new(),
             use_call_only: false,
-            safe_tx_gas: None,
+            gas: SafeTxGasPolicy::Zero,
             nonce: None,
+            simulated: None,
             simulation_result: None,
         }
     }
@@ -253,11 +238,11 @@ where
         self
     }
 
-    /// Resolves the nonce to sign for: the fixed one (checked against the chain)
+    /// Resolves the nonce to sign for: `expected` (checked against the chain)
     /// or the current on-chain nonce.
-    async fn resolve_nonce(&self) -> Result<U256> {
+    async fn resolve_nonce(&self, expected: Option<U256>) -> Result<U256> {
         let current = self.safe.nonce().await?;
-        match self.nonce {
+        match expected {
             Some(expected) if expected != current => Err(Error::NonceMismatch {
                 expected,
                 actual: current,
@@ -276,50 +261,114 @@ where
         self
     }
 
-    /// Manually sets the safeTxGas instead of auto-estimating
+    /// Sets an explicit `safeTxGas` instead of the fail-closed default of 0.
+    ///
+    /// With a non-zero value a failing inner call does not revert: the Safe emits
+    /// `ExecutionFailure` and consumes the nonce (see [`SafeTxGasPolicy`]).
     pub fn with_safe_tx_gas(mut self, gas: U256) -> Self {
-        self.safe_tx_gas = Some(gas);
+        self.gas = SafeTxGasPolicy::Explicit(gas);
         self
     }
 
     /// Sets the top-level `safe_tx_gas` for the entire Safe transaction.
     ///
     /// This is equivalent to `with_safe_tx_gas(U256::from(gas_limit))`.
-    pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
-        self.safe_tx_gas = Some(U256::from(gas_limit));
-        self
+    pub fn with_gas_limit(self, gas_limit: u64) -> Self {
+        self.with_safe_tx_gas(U256::from(gas_limit))
+    }
+
+    fn batch_target(&self) -> BatchTarget {
+        let addresses = self.safe.addresses();
+        if self.use_call_only {
+            BatchTarget::CallOnly(addresses.multi_send_call_only)
+        } else {
+            BatchTarget::MultiSend(addresses.multi_send)
+        }
+    }
+
+    /// Freezes the batch into the Safe transaction that `simulate()` and
+    /// `execute()` sign.
+    ///
+    /// The nonce is the one set with [`SafeBuilder::with_nonce`] (checked against
+    /// the chain) or the current on-chain nonce. `safeTxGas` is the explicit value
+    /// or 0, and no gas refund is paid.
+    pub async fn prepare(&self) -> Result<PreparedSafeTx> {
+        self.prepare_at(self.nonce).await
+    }
+
+    async fn prepare_at(&self, nonce: Option<U256>) -> Result<PreparedSafeTx> {
+        let params = batch_params(&self.calls, self.batch_target())?;
+        let nonce = self.resolve_nonce(nonce).await?;
+        Ok(PreparedSafeTx::from_params(
+            self.safe.config.chain_id,
+            self.safe.address,
+            params.with_safe_tx_gas(self.gas.value()).with_nonce(nonce),
+        ))
+    }
+
+    /// A simulator for this Safe's chain, without debug output.
+    fn simulator(&self) -> ForkSimulator<P> {
+        ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id)
     }
 
     /// Simulates the multicall and stores the result
     ///
+    /// The simulation is the real path: the owner calling `Safe.execTransaction`
+    /// with a signed Safe transaction. That checks the signature, nonce and Safe
+    /// configuration, and gives DelegateCall targets (like MultiSend) their
+    /// delegatecall context.
+    ///
     /// This method does not return an error if the simulation reverts. Instead,
     /// the result (success or failure) is stored internally. Use `simulation_success()`
-    /// to check if the simulation succeeded before calling `execute()`.
-    ///
-    /// After simulation, you can inspect the results via `simulation_result()`
-    /// and then call `execute()` which will use the simulation gas.
+    /// to check if the simulation succeeded before calling `execute()`, which
+    /// executes exactly the simulated Safe transaction.
     pub async fn simulate(mut self) -> Result<Self> {
-        if self.calls.is_empty() {
-            return Err(Error::NoCalls);
-        }
+        let prepared = self.prepare().await?;
+        let signed = prepared.sign(&self.safe.signer).await?;
+        let exec_data = signed.exec_calldata();
+        let owner = self.safe.signer.address();
 
-        let (to, value, data, operation) = self.build_call_params()?;
-
-        let mut simulator = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id);
-
-        // Configure debug output if the Safe has a debug output directory
+        let mut simulator = self.simulator();
         if let Some(dir) = &self.safe.debug_output_dir {
             simulator = simulator.with_debug_output_dir(dir.clone(), self.safe.address);
         }
-
-        // Always simulate the real path: the owner calling Safe.execTransaction.
-        // This checks the signature, nonce and Safe configuration, and gives
-        // DelegateCall targets (like MultiSend) their delegatecall context.
-        let result = self
-            .simulate_via_exec_transaction(&simulator, to, value, data, operation)
+        let mut result = simulator
+            .simulate_call(
+                owner,
+                self.safe.address,
+                U256::ZERO,
+                exec_data.clone(),
+                Operation::Call,
+            )
             .await?;
 
+        // A non-zero safeTxGas makes the Safe emit ExecutionFailure instead of
+        // reverting; treat that as a failed simulation too.
+        result.require_safe_success(self.safe.address, prepared.safe_tx_hash);
+
+        // GS013 hides the inner revert reason; replay with tracing to recover it.
+        if !result.success
+            && result
+                .revert_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("GS013"))
+        {
+            let traced = self
+                .simulator()
+                .with_tracing(true)
+                .simulate_call(owner, self.safe.address, U256::ZERO, exec_data, Operation::Call)
+                .await?;
+            if let Some(inner) = traced
+                .traces
+                .as_ref()
+                .and_then(crate::simulation::innermost_revert_reason)
+            {
+                result.revert_reason = Some(format!("GS013: inner call reverted: {inner}"));
+            }
+        }
+
         // Store the result regardless of success/failure
+        self.simulated = Some(prepared);
         self.simulation_result = Some(result);
         Ok(self)
     }
@@ -351,124 +400,6 @@ where
         }
     }
 
-    /// Simulates by calling Safe.execTransaction
-    ///
-    /// This is needed for DelegateCall operations because the target contract
-    /// (like MultiSend) expects to be called via delegatecall.
-    async fn simulate_via_exec_transaction(
-        &self,
-        simulator: &ForkSimulator<P>,
-        to: Address,
-        value: U256,
-        data: Bytes,
-        operation: Operation,
-    ) -> Result<SimulationResult> {
-        let nonce = self.resolve_nonce().await?;
-
-        // Simulate with the explicit safeTxGas if one was set, otherwise with 0.
-        // With safeTxGas == 0 and gasPrice == 0 a failing inner call reverts the
-        // whole execTransaction (GS013), so a failed batch cannot look successful.
-        // A non-zero value would let the Safe swallow the failure and emit
-        // ExecutionFailure instead of reverting.
-        let safe_tx_gas = self.safe_tx_gas.unwrap_or(U256::ZERO);
-
-        // No gas refunds: the executing EOA pays. Same invariant as
-        // `SafeBuilder::execute` - keep both sites in sync if refunds are added.
-        let gas_price = NO_REFUND_GAS_PRICE;
-
-        // Build SafeTxParams
-        let params = SafeTxParams {
-            to,
-            value,
-            data: data.clone(),
-            operation,
-            safe_tx_gas,
-            base_gas: U256::ZERO,
-            gas_price,
-            gas_token: Address::ZERO,
-            refund_receiver: Address::ZERO,
-            nonce,
-        };
-
-        // Compute transaction hash
-        let tx_hash = compute_safe_transaction_hash(
-            self.safe.config.chain_id,
-            self.safe.address,
-            &params,
-        );
-
-        // Sign the hash
-        let signature = sign_hash(&self.safe.signer, tx_hash).await?;
-
-        // Build the execTransaction call
-        let exec_call = ISafe::execTransactionCall {
-            to: params.to,
-            value: params.value,
-            data: params.data,
-            operation: params.operation.as_u8(),
-            safeTxGas: params.safe_tx_gas,
-            baseGas: params.base_gas,
-            gasPrice: params.gas_price,
-            gasToken: params.gas_token,
-            refundReceiver: params.refund_receiver,
-            signatures: signature,
-        };
-
-        let exec_data = Bytes::from(exec_call.abi_encode());
-
-        // Simulate the execTransaction call
-        let mut result = simulator
-            .simulate_call(
-                self.safe.signer.address(), // EOA calls Safe
-                self.safe.address,           // Safe address
-                U256::ZERO,                  // No ETH value for outer call
-                exec_data.clone(),
-                Operation::Call,             // Regular call to Safe
-            )
-            .await?;
-
-        // A non-zero safeTxGas makes the Safe emit ExecutionFailure instead of
-        // reverting; treat that as a failed simulation too.
-        if result.success {
-            let outcome =
-                crate::submit::decode_safe_outcome(&result.logs, self.safe.address, tx_hash);
-            if !outcome.is_success() {
-                result.success = false;
-                result.revert_reason = Some(format!(
-                    "Safe did not report ExecutionSuccess for {tx_hash} ({outcome:?})"
-                ));
-            }
-        }
-
-        // GS013 hides the inner revert reason; replay with tracing to recover it.
-        if !result.success
-            && result
-                .revert_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("GS013"))
-        {
-            let traced = ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id)
-                .with_tracing(true)
-                .simulate_call(
-                    self.safe.signer.address(),
-                    self.safe.address,
-                    U256::ZERO,
-                    exec_data,
-                    Operation::Call,
-                )
-                .await?;
-            if let Some(inner) = traced
-                .traces
-                .as_ref()
-                .and_then(crate::simulation::innermost_revert_reason)
-            {
-                result.revert_reason = Some(format!("GS013: inner call reverted: {inner}"));
-            }
-        }
-
-        Ok(result)
-    }
-
     /// Returns the simulation result if simulation was performed
     pub fn simulation_result(&self) -> Option<&SimulationResult> {
         self.simulation_result.as_ref()
@@ -476,158 +407,56 @@ where
 
     /// Executes the multicall transaction
     ///
-    /// # How `safeTxGas` is chosen
+    /// The Safe transaction is the one [`SafeBuilder::prepare`] builds. After
+    /// `simulate()` it is exactly the simulated transaction: the same fields and
+    /// the same nonce. If the on-chain nonce moved since the simulation this fails
+    /// with [`Error::NonceMismatch`], and if calls were added after the simulation
+    /// it fails with [`Error::InvalidConfig`].
     ///
-    /// The first rule that applies wins:
+    /// # `safeTxGas`
     ///
-    /// 1. **Explicit** — `with_safe_tx_gas()` or `with_gas_limit()` was called:
-    ///    that value is used verbatim, no estimation happens.
-    /// 2. **Simulated** — `simulate()` was performed: the simulated `gas_used`
-    ///    plus a 10% buffer.
-    /// 3. **`DelegateCall` batch** — the transaction is a `DelegateCall` into
-    ///    `MultiSend`, which is how any batch of more than one call is sent: `0`.
-    ///    A raw `eth_estimateGas` on the inner `(to, data)` would model a direct
-    ///    `CALL` into the `MultiSend` singleton and revert its
-    ///    `address(this) != _self` guard, so the estimate is skipped entirely.
-    ///    The outer `execTransaction` send still does its own,
-    ///    operation-correct estimate.
-    /// 4. **Single plain `Call`** — `eth_estimateGas` on the inner call plus a
-    ///    10% buffer.
-    ///
-    /// # Why `0` is safe
-    ///
-    /// The Safe forwards `gasPrice == 0 ? gasleft() - 2500 : safeTxGas` to the
-    /// inner call, and this library always submits with `gasPrice == 0`. So
-    /// `safeTxGas` never caps the inner call's gas; it only feeds the `GS010`
-    /// pre-check (trivially satisfied at `0`) and the `GS013`
-    /// "internal transaction must succeed" branch.
+    /// `safeTxGas` is the explicit value from `with_safe_tx_gas()` /
+    /// `with_gas_limit()`, or `0`. It is never estimated. With `gasPrice == 0`
+    /// (this library never pays refunds) the Safe forwards all remaining gas to
+    /// the inner call, so `safeTxGas` does not cap it; the outer `execTransaction`
+    /// gas is estimated by the provider when sending.
     ///
     /// # Consequence for failing transactions
     ///
-    /// That `GS013` branch is user-visible: with `safeTxGas == 0` and
-    /// `gasPrice == 0`, a failing inner transaction reverts the whole outer
-    /// `execTransaction` call rather than mining a successful receipt carrying
-    /// an `ExecutionFailure` event. The on-chain revert does not carry the inner
-    /// reason, so use `simulate()` to find out why a transaction fails.
+    /// With `safeTxGas == 0` a failing inner transaction reverts the whole outer
+    /// `execTransaction` with `GS013` rather than mining a successful receipt
+    /// carrying an `ExecutionFailure` event. This usually surfaces before
+    /// broadcast, as [`Error::InnerTransactionReverted`], when the provider
+    /// estimates gas. The on-chain revert does not carry the inner reason, so use
+    /// `simulate()` to find out why a transaction fails.
+    ///
+    /// `success` in the result requires both a successful receipt and the Safe's
+    /// `ExecutionSuccess` event for this Safe transaction.
     pub async fn execute(self) -> Result<ExecutionResult> {
-        if self.calls.is_empty() {
-            return Err(Error::NoCalls);
+        let expected_nonce = self
+            .nonce
+            .or_else(|| self.simulated.as_ref().map(|p| p.params.nonce));
+        let prepared = self.prepare_at(expected_nonce).await?;
+        if let Some(simulated) = &self.simulated {
+            if simulated != &prepared {
+                return Err(Error::InvalidConfig(
+                    "the batch changed after simulate(); simulate it again".to_string(),
+                ));
+            }
         }
 
-        let (to, value, data, operation) = self.build_call_params()?;
+        let signed = prepared.sign(&self.safe.signer).await?;
+        let tx = <AnyNetwork as Network>::TransactionRequest::default()
+            .with_from(self.safe.signer.address())
+            .with_to(self.safe.address)
+            .with_input(signed.exec_calldata());
 
-        let nonce = self.resolve_nonce().await?;
-
-        // No gas refunds: the executing EOA pays. This is what makes
-        // `safe_tx_gas = 0` safe below - see the delegatecall arm.
-        let gas_price = NO_REFUND_GAS_PRICE;
-
-        // Determine safe_tx_gas: explicit > simulation > estimate
-        let safe_tx_gas = match (&self.simulation_result, self.safe_tx_gas) {
-            (_, Some(gas)) => gas, // User provided explicit gas
-            (Some(sim), None) => {
-                // Use simulation result + 10% buffer
-                let gas_used = sim.gas_used;
-                U256::from(gas_used + gas_used / 10)
-            }
-            // A raw `eth_estimateGas` against the inner `(to, data)` only models the
-            // call correctly for a plain Call. For a DelegateCall (MultiSend batch)
-            // it models a direct CALL into the MultiSend singleton, which reverts its
-            // `address(this) != _self` guard ("MultiSend should only be called via
-            // delegatecall"). The inner safe_tx_gas may be 0 (forward all available
-            // gas); the outer execTransaction send does its own operation-correct
-            // eth_estimateGas. So skip the broken estimate.
-            //
-            // "Forward all available gas" holds only while `gas_price == 0`: the
-            // Safe passes `gasleft() - 2500` to the inner call when the gas price
-            // is zero, and exactly `safeTxGas` otherwise. See NO_REFUND_GAS_PRICE.
-            (None, None) if operation == Operation::DelegateCall => {
-                debug_assert!(
-                    gas_price.is_zero(),
-                    "safe_tx_gas = 0 only forwards all available gas while gas_price == 0; \
-                     with a non-zero gas_price the Safe would forward zero gas to the inner call"
-                );
-                U256::ZERO
-            }
-            (None, None) => {
-                // Estimate gas via RPC (valid for a plain Call to `to`).
-                use alloy::network::TransactionBuilder;
-                let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
-                    .with_from(self.safe.address)
-                    .with_to(to)
-                    .with_value(value)
-                    .with_input(data.clone());
-
-                let estimated = self
-                    .safe
-                    .provider
-                    .estimate_gas(tx_request)
-                    .await
-                    .map_err(|e| Error::Provider(format!("gas estimation failed: {}", e)))?;
-
-                // Add 10% buffer
-                U256::from(estimated + estimated / 10)
-            }
-        };
-
-        // Build SafeTxParams
-        let params = SafeTxParams {
-            to,
-            value,
-            data: data.clone(),
-            operation,
-            safe_tx_gas,
-            base_gas: U256::ZERO,
-            gas_price,
-            gas_token: Address::ZERO,
-            refund_receiver: Address::ZERO,
-            nonce,
-        };
-
-        // Compute transaction hash
-        let tx_hash = compute_safe_transaction_hash(
-            self.safe.config.chain_id,
-            self.safe.address,
-            &params,
-        );
-
-        // Sign the hash
-        let signature = sign_hash(&self.safe.signer, tx_hash).await?;
-
-        // Build the execTransaction call
-        let exec_call = ISafe::execTransactionCall {
-            to: params.to,
-            value: params.value,
-            data: params.data,
-            operation: params.operation.as_u8(),
-            safeTxGas: params.safe_tx_gas,
-            baseGas: params.base_gas,
-            gasPrice: params.gas_price,
-            gasToken: params.gas_token,
-            refundReceiver: params.refund_receiver,
-            signatures: signature,
-        };
-
-        // Execute the transaction through the provider
-        let safe_contract = ISafe::new(self.safe.address, &self.safe.provider);
-
-        let builder = safe_contract.execTransaction(
-            exec_call.to,
-            exec_call.value,
-            exec_call.data,
-            exec_call.operation,
-            exec_call.safeTxGas,
-            exec_call.baseGas,
-            exec_call.gasPrice,
-            exec_call.gasToken,
-            exec_call.refundReceiver,
-            exec_call.signatures,
-        );
-
-        // The GS013 revert normally surfaces here: alloy pre-estimates gas on
-        // `send()`, so the failing `execTransaction` is caught before broadcast.
-        let pending_tx = builder
-            .send()
+        // The GS013 revert normally surfaces here: the provider estimates gas on
+        // send, so the failing `execTransaction` is caught before broadcast.
+        let pending_tx = self
+            .safe
+            .provider
+            .send_transaction(tx)
             .await
             .map_err(|e| map_execution_error(e.to_string()))?;
 
@@ -636,59 +465,19 @@ where
             .await
             .map_err(|e| map_execution_error(e.to_string()))?;
 
-        // Success requires both a successful receipt and the Safe's own
-        // ExecutionSuccess event for this Safe transaction hash. With a non-zero
-        // safeTxGas a failed inner call is mined successfully but emits
-        // ExecutionFailure.
-        let logs = crate::submit::receipt_logs(&receipt);
-        let outcome = crate::submit::decode_safe_outcome(&logs, self.safe.address, tx_hash);
+        // With a non-zero safeTxGas a failed inner call is mined successfully but
+        // emits ExecutionFailure, so the receipt status alone is not enough.
+        let outcome = decode_safe_outcome(
+            &receipt_logs(&receipt),
+            self.safe.address,
+            prepared.safe_tx_hash,
+        );
         let success = receipt.status() && outcome.is_success();
 
         Ok(ExecutionResult {
             tx_hash: receipt.transaction_hash,
             success,
         })
-    }
-
-    fn build_call_params(&self) -> Result<(Address, U256, Bytes, Operation)> {
-        if self.use_call_only {
-            if let Some(index) = self
-                .calls
-                .iter()
-                .position(|call| call.operation != Operation::Call)
-            {
-                return Err(Error::DelegateCallNotAllowed { index });
-            }
-        }
-        if self.calls.len() == 1 {
-            // Single call - execute directly, honoring the call's own operation
-            let call = &self.calls[0];
-            Ok((call.to, call.value, call.data.clone(), call.operation))
-        } else {
-            // Multiple calls - use MultiSend
-            let multisend_data = encode_multisend_data(&self.calls);
-
-            let (multisend_address, calldata) = if self.use_call_only {
-                let call = IMultiSendCallOnly::multiSendCall {
-                    transactions: multisend_data,
-                };
-                (
-                    self.safe.addresses().multi_send_call_only,
-                    Bytes::from(call.abi_encode()),
-                )
-            } else {
-                let call = IMultiSend::multiSendCall {
-                    transactions: multisend_data,
-                };
-                (
-                    self.safe.addresses().multi_send,
-                    Bytes::from(call.abi_encode()),
-                )
-            };
-
-            // MultiSend is called with zero value; individual call values are encoded in the data
-            Ok((multisend_address, U256::ZERO, calldata, Operation::DelegateCall))
-        }
     }
 }
 
@@ -832,17 +621,6 @@ mod tests {
     #[test]
     fn test_safe_singleton_slot_is_zero() {
         assert_eq!(SAFE_SINGLETON_SLOT, U256::ZERO);
-    }
-
-    #[test]
-    fn no_refund_gas_price_is_zero() {
-        // `SafeBuilder::execute` sends DelegateCall (MultiSend) batches with
-        // safe_tx_gas = 0, which forwards all remaining gas only while the Safe
-        // sees gasPrice == 0. A non-zero gas price makes safeTxGas gate the inner
-        // call, so a zero safe_tx_gas would forward zero gas and every batch would
-        // emit ExecutionFailure. If this assertion has to change, the safe_tx_gas
-        // arms in `execute()` must change with it.
-        assert!(NO_REFUND_GAS_PRICE.is_zero());
     }
 
     #[test]

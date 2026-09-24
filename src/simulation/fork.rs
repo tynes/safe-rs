@@ -65,6 +65,26 @@ impl SimulationResult {
         }
     }
 
+    /// Marks a successful `execTransaction` simulation as failed unless `safe`
+    /// emitted exactly one `ExecutionSuccess` for `safe_tx_hash`.
+    ///
+    /// With a non-zero `safeTxGas` the Safe emits `ExecutionFailure` instead of
+    /// reverting when the inner call fails, so a successful top-level call is not
+    /// enough to know the Safe transaction succeeded.
+    pub fn require_safe_success(&mut self, safe: Address, safe_tx_hash: B256) {
+        if !self.success {
+            return;
+        }
+        let outcome = crate::submit::decode_safe_outcome(&self.logs, safe, safe_tx_hash);
+        if !outcome.is_success() {
+            self.success = false;
+            self.revert_reason = Some(format!(
+                "Safe did not report ExecutionSuccess for {safe_tx_hash} ({})",
+                outcome.label()
+            ));
+        }
+    }
+
     /// Format traces as human-readable text (cast run style)
     ///
     /// Returns `None` if tracing was not enabled for this simulation.

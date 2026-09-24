@@ -13,13 +13,27 @@ use alloy::primitives::{Address, Bytes, Signature, B256, U256};
 use alloy::signers::Signer;
 use alloy::sol_types::SolCall;
 
-use crate::contracts::{IMultiSendCallOnly, ISafe};
+use crate::contracts::{IMultiSend, IMultiSendCallOnly, ISafe};
 use crate::encoding::{compute_safe_transaction_hash, encode_multisend_data, SafeTxParams};
 use crate::error::{Error, Result};
 use crate::signing::{encode_pre_validated_signature, sign_hash};
 use crate::types::{Call, Operation};
 
 /// How `safeTxGas` is set on a prepared Safe transaction.
+///
+/// Every transaction this crate prepares uses `gasPrice = 0`: the Safe pays no
+/// refund and the executing EOA bears the whole cost. That is load-bearing.
+/// `Safe.execTransaction` forwards
+///
+/// ```solidity
+/// execute(to, value, data, operation, gasPrice == 0 ? (gasleft() - 2500) : safeTxGas);
+/// ```
+///
+/// so with `gasPrice == 0` the inner call gets all remaining gas, and
+/// `safeTxGas` only feeds the `GS010` pre-check and the `GS013` branch.
+/// Supporting refunds (a non-zero gas price, gas token or refund receiver) would
+/// make `safeTxGas` gate the inner call, and [`SafeTxGasPolicy::Zero`] would then
+/// forward no gas at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SafeTxGasPolicy {
     /// `safeTxGas = 0` with `gasPrice = 0`.
@@ -37,12 +51,64 @@ pub enum SafeTxGasPolicy {
 }
 
 impl SafeTxGasPolicy {
-    fn value(self) -> U256 {
+    /// The `safeTxGas` value this policy signs.
+    pub fn value(self) -> U256 {
         match self {
             Self::Zero => U256::ZERO,
             Self::Explicit(gas) => gas,
         }
     }
+}
+
+/// The contract a batch of two or more calls is sent through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchTarget {
+    /// `MultiSendCallOnly` at this address. Every entry must be a CALL, so the
+    /// only DELEGATECALL emitted is the outer one into this contract.
+    CallOnly(Address),
+    /// `MultiSend` at this address. Entries may be DELEGATECALLs, and a single
+    /// call keeps its own operation.
+    MultiSend(Address),
+}
+
+/// Encodes `calls` as the fields of one Safe transaction.
+///
+/// One call is executed directly. Two or more calls are packed into
+/// `multiSend` and executed through a single DELEGATECALL to the batch target,
+/// with value zero (each entry carries its own value). Gas, refund and nonce
+/// fields are left at zero.
+///
+/// With [`BatchTarget::CallOnly`], any DelegateCall entry is rejected with
+/// [`Error::DelegateCallNotAllowed`].
+pub fn batch_params(calls: &[Call], target: BatchTarget) -> Result<SafeTxParams> {
+    if calls.is_empty() {
+        return Err(Error::NoCalls);
+    }
+    if let BatchTarget::CallOnly(_) = target {
+        if let Some(index) = calls.iter().position(|c| c.operation != Operation::Call) {
+            return Err(Error::DelegateCallNotAllowed { index });
+        }
+    }
+    if let [call] = calls {
+        return Ok(SafeTxParams::new(
+            call.to,
+            call.value,
+            call.data.clone(),
+            call.operation,
+        ));
+    }
+    let transactions = encode_multisend_data(calls);
+    let (to, data) = match target {
+        BatchTarget::CallOnly(address) => (
+            address,
+            IMultiSendCallOnly::multiSendCall { transactions }.abi_encode(),
+        ),
+        BatchTarget::MultiSend(address) => (
+            address,
+            IMultiSend::multiSendCall { transactions }.abi_encode(),
+        ),
+    };
+    Ok(SafeTxParams::new(to, U256::ZERO, data, Operation::DelegateCall))
 }
 
 /// A Safe transaction whose every field, including the nonce, is fixed.
@@ -87,18 +153,9 @@ impl PreparedSafeTx {
         if call.operation != Operation::Call {
             return Err(Error::DelegateCallNotAllowed { index: 0 });
         }
-        let params = SafeTxParams {
-            to: call.to,
-            value: call.value,
-            data: call.data.clone(),
-            operation: Operation::Call,
-            safe_tx_gas: gas.value(),
-            base_gas: U256::ZERO,
-            gas_price: U256::ZERO,
-            gas_token: Address::ZERO,
-            refund_receiver: Address::ZERO,
-            nonce,
-        };
+        let params = SafeTxParams::new(call.to, call.value, call.data.clone(), Operation::Call)
+            .with_safe_tx_gas(gas.value())
+            .with_nonce(nonce);
         Ok(Self::from_params(chain_id, safe, params))
     }
 
@@ -116,31 +173,31 @@ impl PreparedSafeTx {
         nonce: U256,
         gas: SafeTxGasPolicy,
     ) -> Result<Self> {
-        if calls.is_empty() {
-            return Err(Error::NoCalls);
-        }
-        if let Some(index) = calls.iter().position(|c| c.operation != Operation::Call) {
-            return Err(Error::DelegateCallNotAllowed { index });
-        }
-        if let [call] = calls {
-            return Self::single_call(chain_id, safe, call, nonce, gas);
-        }
-        let data = IMultiSendCallOnly::multiSendCall {
-            transactions: encode_multisend_data(calls),
-        }
-        .abi_encode();
-        let params = SafeTxParams {
-            to: multi_send_call_only,
-            value: U256::ZERO,
-            data: Bytes::from(data),
-            operation: Operation::DelegateCall,
-            safe_tx_gas: gas.value(),
-            base_gas: U256::ZERO,
-            gas_price: U256::ZERO,
-            gas_token: Address::ZERO,
-            refund_receiver: Address::ZERO,
+        Self::batch(
+            chain_id,
+            safe,
+            calls,
+            BatchTarget::CallOnly(multi_send_call_only),
             nonce,
-        };
+            gas,
+        )
+    }
+
+    /// Prepares a batch sent through `target` (see [`batch_params`]).
+    ///
+    /// Prefer [`BatchTarget::CallOnly`]: a `MultiSend` batch may execute
+    /// arbitrary DELEGATECALLs in the Safe's context.
+    pub fn batch(
+        chain_id: u64,
+        safe: Address,
+        calls: &[Call],
+        target: BatchTarget,
+        nonce: U256,
+        gas: SafeTxGasPolicy,
+    ) -> Result<Self> {
+        let params = batch_params(calls, target)?
+            .with_safe_tx_gas(gas.value())
+            .with_nonce(nonce);
         Ok(Self::from_params(chain_id, safe, params))
     }
 
@@ -386,6 +443,28 @@ mod tests {
         assert_eq!(p.params.operation, Operation::DelegateCall);
         assert_eq!(p.params.to, MSCO);
         assert_eq!(p.params.value, U256::ZERO);
+    }
+
+    #[test]
+    fn multisend_target_allows_delegatecall() {
+        const MS: Address = address!("0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526");
+        let dc = Call::delegate_call(SAFE, Bytes::new());
+        let single = batch_params(std::slice::from_ref(&dc), BatchTarget::MultiSend(MS)).unwrap();
+        assert_eq!(single.operation, Operation::DelegateCall);
+        assert_eq!(single.to, SAFE);
+
+        let batch = batch_params(&[call(SAFE), dc], BatchTarget::MultiSend(MS)).unwrap();
+        assert_eq!(batch.operation, Operation::DelegateCall);
+        assert_eq!(batch.to, MS);
+        assert!(IMultiSend::multiSendCall::abi_decode(&batch.data).is_ok());
+    }
+
+    #[test]
+    fn call_only_target_uses_multisend_call_only() {
+        let batch =
+            batch_params(&[call(SAFE), call(MSCO)], BatchTarget::CallOnly(MSCO)).unwrap();
+        assert!(IMultiSendCallOnly::multiSendCall::abi_decode(&batch.data).is_ok());
+        assert!(batch.safe_tx_gas.is_zero() && batch.nonce.is_zero());
     }
 
     #[test]

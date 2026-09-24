@@ -14,8 +14,9 @@ use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use safe_rs::{
-    broadcast_raw, sign_outer_tx, wait_for_receipt, BroadcastOutcome, Call, ChainAddresses, ISafe,
-    ISafeProxyFactory, OuterTxParams, PreparedSafeTx, ReceiptWait, SafeTxGasPolicy, SignedOuterTx,
+    broadcast_raw, sign_outer_tx, wait_for_receipt, BroadcastOutcome, Call, ChainAddresses,
+    ChainConfig, ISafe, ISafeProxyFactory, OuterTxParams, PreparedSafeTx, ReceiptWait, Safe,
+    SafeTxGasPolicy, SignedOuterTx,
 };
 
 /// Anvil's default deterministic CREATE2 deployer (Arachnid).
@@ -119,6 +120,21 @@ impl LocalHarness {
         harness.safe_l2 = safe_l2;
         harness.guard = guard;
         harness
+    }
+
+    /// A `Safe` client for `safe`, signing and sending as the owner.
+    pub fn safe_client(&self, safe: Address) -> Safe<DynProvider<AnyNetwork>> {
+        let wallet_provider = ProviderBuilder::new()
+            .network::<AnyNetwork>()
+            .wallet(EthereumWallet::from(self.owner.clone()))
+            .connect_http(self.url())
+            .erased();
+        Safe::new(
+            wallet_provider,
+            self.owner.clone(),
+            safe,
+            ChainConfig::with_addresses(self.chain_id, self.addresses.clone()),
+        )
     }
 
     pub fn url(&self) -> url::Url {
