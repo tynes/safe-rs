@@ -33,7 +33,7 @@ cargo install safe-rs
 
 ```toml
 [dependencies]
-safe-rs = "0.1"
+safe-rs = "0.11"
 ```
 
 ## Quick Start
