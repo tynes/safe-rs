@@ -571,6 +571,15 @@ async fn a_signed_but_unsent_transaction_is_tracked_until_it_lands() {
     );
     assert!(reserved.get("pending_tx").is_none());
 
+    // As JSON the dry run names the swap too.
+    let dry_json = send(&["--simulate-only", "--json"]).json();
+    assert_eq!(dry_json["success"], true);
+    assert_eq!(dry_json["rotation"]["old_owner"]["index"], 1);
+    assert_eq!(dry_json["rotation"]["new_owner"]["index"], next);
+    assert_eq!(address(&dry_json["rotation"]["planned_sweep"]["to"]), {
+        key(u32::try_from(next).unwrap())
+    });
+
     // Signing without sending writes the transaction out and records the key as used.
     let raw_out = dir.path().join("signed.json");
     let unsent = send(&["--no-submit", "--raw-out", raw_out.to_str().unwrap()]);

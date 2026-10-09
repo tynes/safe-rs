@@ -79,6 +79,21 @@ pub fn print_warnings(warnings: &[String]) {
     }
 }
 
+/// The `--simulate-only` report: the simulation plus the owner swap it
+/// includes, so JSON consumers see everything the transaction would do.
+#[derive(serde::Serialize)]
+struct RotationSimulation {
+    #[serde(flatten)]
+    simulation: SimulationOutput,
+    rotation: RotationPlanOutput,
+}
+
+impl Report for RotationSimulation {
+    fn human(&self) -> String {
+        self.simulation.human()
+    }
+}
+
 fn emit(report: &impl Report, json: bool, console: Console) {
     if json {
         report.print(true);
@@ -182,7 +197,11 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         traces: run.trace.then(|| tx.simulation.format_traces()).flatten(),
     };
     if run.simulate_only {
-        emit(&simulation, run.json, console);
+        let report = RotationSimulation {
+            simulation,
+            rotation: RotationPlanOutput::new(&tx),
+        };
+        emit(&report, run.json, console);
         return Ok(());
     }
     console.line(simulation.human());

@@ -791,3 +791,123 @@ async fn keys_that_never_paid_gas_are_only_found_in_the_logs() {
     assert_eq!(by_logs.used, vec![1, 2, 3]);
     assert_eq!(rotating.binding().unwrap().history.len(), 2);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_payer_may_not_be_the_next_owner() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 116, &state).await;
+    h.fund(key(2), eth(1)).await;
+
+    // Paying with key 2 would publish it before it ever owns the Safe.
+    let mut paid = config(&h);
+    paid.payer = Some(wallet().owner(2).unwrap());
+    let mut rotating = open_with(&h, safe, &state, paid).await;
+    let refused = rotating.prepare(&[], ExecOptions::default()).await;
+    let Err(Error::Rotation(message)) = refused else {
+        panic!("expected a refusal, got {refused:?}")
+    };
+    assert!(message.contains("next owner"), "{message}");
+    assert_eq!(rotating.binding().unwrap().exposed, None);
+    assert_eq!(eoa_nonce(&h, key(2)).await, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_explicit_reserve_stays_on_the_retired_key() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 117, &state).await;
+    let reserve = U256::from(123_456_789u64);
+    let mut reserving = config(&h);
+    reserving.sweep_reserve = Some(reserve);
+
+    let mut rotating = open_with(&h, safe, &state, reserving).await;
+    let outcome = rotating.rotate().await.unwrap();
+    assert_eq!(outcome.status, RotationStatus::Rotated);
+    assert_eq!(balance(&h, key(1)).await, reserve);
+    assert_eq!(balance(&h, key(2)).await, outcome.sweep.unwrap().amount);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_priced_out_by_a_fee_rise_is_replaced_at_the_same_nonce() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 118, &state).await;
+    let mut short = config(&h);
+    short.timeout = Duration::from_millis(300);
+    short.sweep = false;
+
+    // Rotate without sweeping, then leave a signed sweep stuck in the mempool.
+    let mut rotating = open_with(&h, safe, &state, short.clone()).await;
+    rotating.rotate().await.unwrap();
+    h.provider.anvil_set_auto_mine(false).await.unwrap();
+    assert!(matches!(
+        rotating.sweep_retired().await,
+        Err(Error::Unconfirmed { .. })
+    ));
+    let first = rotating
+        .binding()
+        .unwrap()
+        .sweep_due
+        .clone()
+        .unwrap()
+        .signed
+        .unwrap();
+    drop(rotating);
+
+    // The base fee jumps far above what that transfer offers.
+    let base_fee = h
+        .provider
+        .get_block(alloy::eips::BlockId::latest())
+        .await
+        .unwrap()
+        .unwrap()
+        .header
+        .base_fee_per_gas
+        .unwrap();
+    h.provider
+        .anvil_set_next_block_base_fee_per_gas(u128::from(base_fee) * 50)
+        .await
+        .unwrap();
+    h.provider.anvil_mine(Some(1), None).await.unwrap();
+    assert_eq!(
+        eoa_nonce(&h, key(1)).await,
+        1,
+        "the first transfer is not mined"
+    );
+
+    // The retry signs a replacement: same nonce, higher fee, lower amount.
+    let mut rotating = open_with(&h, safe, &state, short).await;
+    assert!(matches!(
+        rotating.sweep().await,
+        Err(Error::Unconfirmed { .. })
+    ));
+    let second = rotating
+        .binding()
+        .unwrap()
+        .sweep_due
+        .clone()
+        .unwrap()
+        .signed
+        .unwrap();
+    assert_ne!(second.tx_hash, first.tx_hash);
+    assert_eq!(second.nonce, first.nonce);
+    assert!(second.amount < first.amount);
+    drop(rotating);
+
+    h.provider.anvil_mine(Some(1), None).await.unwrap();
+    h.provider.anvil_set_auto_mine(true).await.unwrap();
+    let mut rotating = open(&h, safe, &state).await;
+    let swept = rotating.sweep().await.unwrap().expect("mined");
+    assert_eq!(swept.tx_hash, second.tx_hash);
+    assert_eq!(balance(&h, key(1)).await, U256::ZERO);
+    assert_eq!(balance(&h, key(2)).await, second.amount);
+    assert_eq!(
+        eoa_nonce(&h, key(1)).await,
+        2,
+        "exactly one transfer landed"
+    );
+}
