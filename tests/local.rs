@@ -19,6 +19,7 @@ use alloy::eips::BlockId;
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::Provider;
+use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolValue;
 use common::{
     enable_module_call, one_shot_initcode, reverter_initcode, set_guard_call, LocalHarness,
@@ -26,9 +27,10 @@ use common::{
 use safe_rs::inspect::{enumerate_modules, read_safe_state, ReadSafeStateOptions};
 use safe_rs::rotation::{check_post_state, plan_rotation};
 use safe_rs::{
-    broadcast_raw, decode_safe_outcome, wait_for_receipt, Account, BroadcastOutcome, Call,
-    CallBuilder, ChainConfig, Eoa, Error, ForkSession, ISafe, ParentHeader, ReceiptWait,
-    SafeExecutionOutcome, SafeTxGasPolicy, SimTx, SpecId, TxChecks, WalletBuilder, WalletConfig,
+    broadcast_raw, decode_safe_outcome, sign_outer_tx, simulate_exec, submit_and_wait,
+    wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainConfig, Eoa, Error,
+    ForkSession, ISafe, OuterTxParams, ParentHeader, ReceiptWait, SafeExecutionOutcome,
+    SafeTxGasPolicy, SimTx, SpecId, Submission, TxChecks, WalletBuilder, WalletConfig,
 };
 
 /// Gas limit used for outer transactions in these tests (fixed so that failing
@@ -839,4 +841,82 @@ async fn post_state_check_catches_a_batch_target_without_code() {
         check_post_state(&mut post, &plan),
         Err(Error::Rotation(_))
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_separate_payer_sends_what_the_owner_signed() {
+    let h = LocalHarness::new().await;
+    let safe = h.deploy_safe(43).await;
+    let payer = PrivateKeySigner::random();
+    h.fund(payer.address(), U256::from(10).pow(U256::from(18)))
+        .await;
+
+    let prepared = h
+        .prepare(
+            safe,
+            &[Call::call(safe, Bytes::new())],
+            SafeTxGasPolicy::Zero,
+        )
+        .await;
+    let signed = prepared.sign(&h.owner).await.unwrap();
+    let fees = h.fees().await;
+
+    let session = session_at_latest(&h).await;
+    let simulated = simulate_exec(&session, &signed, payer.address(), fees, None).unwrap();
+    assert!(
+        simulated.result.success,
+        "{:?}",
+        simulated.result.revert_reason
+    );
+    assert!(simulated.post.is_some());
+    assert_eq!(simulated.payer_nonce, 0);
+
+    let outer = sign_outer_tx(
+        &payer,
+        OuterTxParams::exec_transaction(
+            &signed,
+            payer.address(),
+            simulated.payer_nonce,
+            simulated.gas_limit,
+            fees,
+        ),
+    )
+    .await
+    .unwrap();
+    let submission = submit_and_wait(
+        &h.provider,
+        &outer,
+        Duration::from_secs(10),
+        Duration::from_millis(50),
+    )
+    .await
+    .unwrap();
+    let Submission::Mined(receipt) = submission else {
+        panic!("expected a receipt, got {submission:?}")
+    };
+    assert_eq!(receipt.from, payer.address());
+    assert!(decode_safe_outcome(&logs(&receipt), safe, prepared.safe_tx_hash).is_success());
+    assert_eq!(
+        h.provider
+            .get_transaction_count(h.owner.address())
+            .await
+            .unwrap(),
+        0,
+        "the owner key never sent a transaction"
+    );
+
+    // A payer that cannot afford the transaction fails the strict simulation.
+    let poor = PrivateKeySigner::random();
+    let next = h
+        .prepare(
+            safe,
+            &[Call::call(safe, Bytes::new())],
+            SafeTxGasPolicy::Zero,
+        )
+        .await
+        .sign(&h.owner)
+        .await
+        .unwrap();
+    let session = session_at_latest(&h).await;
+    assert!(simulate_exec(&session, &next, poor.address(), fees, None).is_err());
 }

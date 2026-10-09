@@ -219,6 +219,9 @@ pub struct SendArgs {
 
     #[command(flatten)]
     pub wallet: WalletArgs,
+
+    #[command(flatten)]
+    pub payer: PayerArgs,
 }
 
 #[derive(Parser, Clone)]
@@ -341,6 +344,15 @@ impl WalletArgs {
     pub fn is_set(&self) -> bool {
         self.interactive || self.keystore.is_some() || self.private_key.is_some()
     }
+}
+
+/// The account that sends the outer transaction and pays for gas.
+#[derive(Args, Clone)]
+pub struct PayerArgs {
+    /// Private key that sends the outer transaction and pays for gas, instead
+    /// of the owner key
+    #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY")]
+    pub payer_private_key: Option<String>,
 }
 
 #[cfg(test)]

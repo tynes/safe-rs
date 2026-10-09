@@ -6,20 +6,20 @@ use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
 use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::{
-    broadcast_raw, is_gs013_revert, safe_outcome_for_receipt, sign_outer_tx, wait_for_receipt,
-    Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig, OuterTxParams,
-    ReceiptWait, Safe, SignedSafeTx, SimTx, SimulationResult, TxChecks,
+    broadcast_raw, is_gs013_revert, safe_outcome_for_receipt, sign_outer_tx, simulate_exec,
+    wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig,
+    ExecSimulation, OuterTxParams, ReceiptWait, Safe, SignedSafeTx,
 };
 
 use crate::bundle::load_bundle;
 use crate::cli::SendArgs;
-use crate::commands::{fork_session, http_provider, max_tx_gas, HttpProvider};
+use crate::commands::{fork_session, http_provider, HttpProvider};
 use crate::output::{
     calls_summary, confirm_prompt, Console, ExecutionOutput, Report, SignedTxOutput,
     SimulationOutput,
 };
 use crate::sig_parser::{encode_function_call, parse_call_spec};
-use crate::wallet::create_signer;
+use crate::wallet::{create_payer, create_signer};
 
 /// How often to poll for the receipt after broadcasting.
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -46,8 +46,11 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         .or_else(|| args.no_submit.then(|| "-".to_string()));
     let console = Console::new(json, raw_out.as_deref() == Some("-"));
 
+    // The owner signs the Safe transaction; the payer sends the outer
+    // transaction. They are the same key unless a payer was given.
     let signer = create_signer(&args.wallet)?;
-    let from = signer.address();
+    let payer = create_payer(&args.payer)?.unwrap_or_else(|| signer.clone());
+    let from = payer.address();
     let provider = http_provider(&args.rpc.rpc_url);
     let chain_id = provider.get_chain_id().await?;
     let safe_address = args.safe.safe;
@@ -76,7 +79,10 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     let signed = prepared.sign(&signer).await?;
 
     console.line(format!("Safe: {}", safe_address));
-    console.line(format!("Signer: {}", from));
+    console.line(format!("Signer: {}", signer.address()));
+    if from != signer.address() {
+        console.line(format!("Payer: {from}"));
+    }
     console.line(format!("Nonce: {}", prepared.params.nonce));
     console.line(format!("Safe Tx Hash: {}", prepared.safe_tx_hash));
     console.line("");
@@ -117,11 +123,11 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         if args.simulate_only {
             return Ok(());
         }
-        (simulated.eoa_nonce, simulated.gas_limit)
+        (simulated.payer_nonce, simulated.gas_limit)
     };
 
     let outer = sign_outer_tx(
-        &signer,
+        &payer,
         OuterTxParams::exec_transaction(&signed, from, eoa_nonce, gas_limit, fees),
     )
     .await?;
@@ -199,18 +205,8 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// The strict simulation of the outer transaction that would be signed.
-struct Simulated {
-    result: SimulationResult,
-    eoa_nonce: u64,
-    gas_limit: u64,
-}
-
 /// Simulates the exact outer `execTransaction` the CLI would sign, in the block
 /// after `--block`, with all validity checks (nonce, fees, balance).
-///
-/// Without `--gas-limit`, gas is first measured at the largest allowed limit
-/// (without requiring the sender to afford it) and the limit is that plus 20%.
 ///
 /// Calls are always traced so that a `GS013` failure reports the inner revert
 /// reason; the traces are only printed with `--trace`.
@@ -221,34 +217,9 @@ async fn simulate(
     signed: &SignedSafeTx,
     from: Address,
     fees: Eip1559Estimation,
-) -> Result<Simulated> {
-    let mut session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
-    let eoa_nonce = session.nonce(from)?;
-    let outer =
-        |gas_limit| OuterTxParams::exec_transaction(signed, from, eoa_nonce, gas_limit, fees);
-
-    let gas_limit = if let Some(gas) = args.gas_limit {
-        gas
-    } else {
-        let max = max_tx_gas(&session);
-        let measured = session.transact(SimTx::from_outer(&outer(max), TxChecks::MEASURE))?;
-        if !measured.success {
-            return Ok(Simulated {
-                result: measured,
-                eoa_nonce,
-                gas_limit: max,
-            });
-        }
-        (measured.gas_used + measured.gas_used / 5).min(max)
-    };
-
-    let mut result = session.transact(SimTx::from_outer(&outer(gas_limit), TxChecks::STRICT))?;
-    result.require_safe_success(signed.prepared.safe, signed.prepared.safe_tx_hash);
-    Ok(Simulated {
-        result,
-        eoa_nonce,
-        gas_limit,
-    })
+) -> Result<ExecSimulation> {
+    let session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
+    Ok(simulate_exec(&session, signed, from, fees, args.gas_limit)?)
 }
 
 /// EIP-1559 fees for the outer transaction: the node estimate, with any

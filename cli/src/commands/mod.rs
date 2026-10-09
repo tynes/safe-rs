@@ -50,13 +50,3 @@ pub async fn fork_session(
     }
     Ok(session)
 }
-
-/// The largest gas limit the session accepts: the per-transaction cap from
-/// Osaka on, the block gas limit before.
-pub fn max_tx_gas(session: &ForkSession) -> u64 {
-    if session.spec().is_enabled_in(SpecId::OSAKA) {
-        READ_CALL_GAS
-    } else {
-        session.block_env().gas_limit
-    }
-}

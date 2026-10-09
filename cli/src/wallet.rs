@@ -1,7 +1,7 @@
 use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{eyre, Result};
 
-use crate::cli::WalletArgs;
+use crate::cli::{PayerArgs, WalletArgs};
 
 pub fn create_signer(args: &WalletArgs) -> Result<PrivateKeySigner> {
     // Priority: interactive > keystore > private_key
@@ -17,6 +17,14 @@ pub fn create_signer(args: &WalletArgs) -> Result<PrivateKeySigner> {
             "No wallet specified. Use --private-key or --interactive"
         ))
     }
+}
+
+/// The separate gas payer, if one was given.
+pub fn create_payer(args: &PayerArgs) -> Result<Option<PrivateKeySigner>> {
+    args.payer_private_key
+        .as_deref()
+        .map(parse_private_key)
+        .transpose()
 }
 
 fn parse_private_key(key: &str) -> Result<PrivateKeySigner> {

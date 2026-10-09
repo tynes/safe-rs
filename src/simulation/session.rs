@@ -323,6 +323,16 @@ impl ForkSession {
         self.chain_id
     }
 
+    /// The largest gas limit a transaction may carry in this session: the
+    /// per-transaction cap (EIP-7825) from Osaka on, the block gas limit before.
+    pub fn max_tx_gas(&self) -> u64 {
+        if self.spec.is_enabled_in(SpecId::OSAKA) {
+            READ_CALL_GAS
+        } else {
+            self.env.gas_limit
+        }
+    }
+
     /// A copy of the session's current state; later transactions on either copy
     /// do not affect the other.
     pub fn checkpoint(&self) -> Self {
