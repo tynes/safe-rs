@@ -59,7 +59,11 @@ pub mod envelope;
 pub mod eoa;
 pub mod error;
 pub mod exec;
+#[cfg(feature = "hd-wallet")]
+pub mod hd;
 pub mod inspect;
+#[cfg(feature = "hd-wallet")]
+pub mod keystore;
 pub mod outer;
 pub mod rotation;
 pub mod safe;
@@ -81,6 +85,8 @@ pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
 pub use exec::{simulate_exec, submit_and_wait, ExecSimulation, Submission};
+#[cfg(feature = "hd-wallet")]
+pub use hd::HdWallet;
 pub use safe::{is_gs013_revert, is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
 pub use envelope::{
     batch_params, decode_exec_calldata, BatchTarget, DecodedExecTransaction, PreparedSafeTx,

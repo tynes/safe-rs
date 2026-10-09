@@ -153,6 +153,10 @@ pub enum Error {
     #[error("Keystore error: {0}")]
     Keystore(String),
 
+    /// A recovery phrase is invalid. The message never contains the phrase.
+    #[error("Recovery phrase error: {0}")]
+    Mnemonic(String),
+
     /// The keystore MAC did not match: the password is wrong or the file is corrupt
     #[error("Wrong keystore password (or corrupt keystore)")]
     WrongPassword,

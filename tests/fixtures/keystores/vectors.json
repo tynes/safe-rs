@@ -1,0 +1,23 @@
+[
+  {
+    "name": "ethers1",
+    "password": "password",
+    "address": "0x012363d61bdc53d0290a0f25e9c89f8257550fb8",
+    "privateKey": "0x4c94faa2c558a998d10ee8b2b9b8eb1fbcb8a6ac5fd085c6f95535604fc1bffb",
+    "mnemonic": "service basket parent alcohol fault similar survey twelve hockey cloud walk panel"
+  },
+  {
+    "name": "ethers2",
+    "password": "password",
+    "address": "0x15db397ed5f682acb22b0afc6c8de4cdfbda7cbc",
+    "privateKey": "0xcdf3c34a2ea0ff181f462856168f5851e68c37b583eb158403e43aeab4964fee",
+    "mnemonic": "debris glass rich exotic window other film slow expose flight either wealth"
+  },
+  {
+    "name": "life",
+    "password": "foo",
+    "address": "0x17c5185167401ed00cf5f5b2fc97d9bbfdb7d025",
+    "privateKey": "0x4242424242424242424242424242424242424242424242424242424242424242",
+    "mnemonic": null
+  }
+]

@@ -98,11 +98,10 @@ impl StateFile {
 
         let state = match fs::read_to_string(&path) {
             Ok(json) => {
-                let state: RotationState =
-                    serde_json::from_str(&json).map_err(|e| Error::Io {
-                        path: path.display().to_string(),
-                        reason: format!("not a rotation state file: {e}"),
-                    })?;
+                let state: RotationState = serde_json::from_str(&json).map_err(|e| Error::Io {
+                    path: path.display().to_string(),
+                    reason: format!("not a rotation state file: {e}"),
+                })?;
                 if state.version != STATE_VERSION {
                     return Err(Error::Rotation(format!(
                         "{} has state version {}, this build reads version {STATE_VERSION}",
@@ -119,9 +118,7 @@ impl StateFile {
                 }
                 state
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                RotationState::new(wallet_id, 1)
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => RotationState::new(wallet_id, 1),
             Err(e) => return Err(io_error(&path)(e)),
         };
 
@@ -142,8 +139,8 @@ impl StateFile {
     /// Call this before acting on a change: an index must be on disk before
     /// its key is used, and an exposure before the signature leaves the process.
     pub fn save(&self) -> Result<()> {
-        let json = serde_json::to_vec_pretty(&self.state)
-            .map_err(|e| Error::Encoding(e.to_string()))?;
+        let json =
+            serde_json::to_vec_pretty(&self.state).map_err(|e| Error::Encoding(e.to_string()))?;
         write_private(&self.path, &json)
     }
 }

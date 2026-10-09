@@ -56,9 +56,7 @@ impl OwnerSwap {
             )));
         }
         if owners.contains(&new_owner) {
-            return Err(Error::Rotation(format!(
-                "{new_owner} is already an owner"
-            )));
+            return Err(Error::Rotation(format!("{new_owner} is already an owner")));
         }
         Ok(Self {
             prev_owner: prev_owner(owners, old_owner)?,
@@ -338,8 +336,14 @@ mod tests {
 
     #[test]
     fn rotation_only_is_a_direct_self_call() {
-        let plan = plan_rotation(&state(&[addr(0xA)]), 1, MSCO, &[], &[(addr(0xA), addr(0xB))])
-            .unwrap();
+        let plan = plan_rotation(
+            &state(&[addr(0xA)]),
+            1,
+            MSCO,
+            &[],
+            &[(addr(0xA), addr(0xB))],
+        )
+        .unwrap();
         let params = &plan.prepared.params;
         assert_eq!(params.to, SAFE);
         assert_eq!(params.operation, Operation::Call);

@@ -200,12 +200,16 @@ impl Binding {
     fn successor_of(&self, index: u32) -> Option<Reserved> {
         self.history.iter().rev().find_map(|retired| {
             match (retired.owner.index(), retired.replaced_by) {
-                (Some(owner), OwnerRef::Derived { index: next, address }) if owner == index => {
-                    Some(Reserved {
+                (
+                    Some(owner),
+                    OwnerRef::Derived {
                         index: next,
                         address,
-                    })
-                }
+                    },
+                ) if owner == index => Some(Reserved {
+                    index: next,
+                    address,
+                }),
                 _ => None,
             }
         })
@@ -624,18 +628,14 @@ mod tests {
     #[test]
     fn no_sweep_is_scheduled_when_disabled() {
         let mut state = reserved_state();
-        state
-            .observe(KEY, &[addr(2)], None, lookup, false)
-            .unwrap();
+        state.observe(KEY, &[addr(2)], None, lookup, false).unwrap();
         assert_eq!(state.binding(KEY).unwrap().sweep_due, None);
     }
 
     #[test]
     fn an_unexpected_wallet_key_is_adopted_and_flagged() {
         let mut state = reserved_state();
-        let seen = state
-            .observe(KEY, &[addr(9)], None, lookup, true)
-            .unwrap();
+        let seen = state.observe(KEY, &[addr(9)], None, lookup, true).unwrap();
         assert_eq!(seen, Observation::Adopted { index: 9 });
         let binding = state.binding(KEY).unwrap();
         assert_eq!(binding.current, derived(9));
@@ -673,9 +673,7 @@ mod tests {
         let mut state = reserved_state();
         let before = state.clone();
         let stranger = Address::repeat_byte(0xEE);
-        let seen = state
-            .observe(KEY, &[stranger], None, lookup, true)
-            .unwrap();
+        let seen = state.observe(KEY, &[stranger], None, lookup, true).unwrap();
         assert_eq!(seen, Observation::Lost);
         assert_eq!(state, before);
     }
@@ -683,9 +681,7 @@ mod tests {
     #[test]
     fn a_finished_sweep_is_recorded_on_the_retired_owner() {
         let mut state = reserved_state();
-        state
-            .observe(KEY, &[addr(2)], None, lookup, true)
-            .unwrap();
+        state.observe(KEY, &[addr(2)], None, lookup, true).unwrap();
         let signed = SignedSweep {
             tx_hash: B256::repeat_byte(7),
             nonce: 1,
@@ -694,7 +690,13 @@ mod tests {
         };
         state.set_signed_sweep(KEY, signed.clone()).unwrap();
         assert_eq!(
-            state.binding(KEY).unwrap().sweep_due.as_ref().unwrap().signed,
+            state
+                .binding(KEY)
+                .unwrap()
+                .sweep_due
+                .as_ref()
+                .unwrap()
+                .signed,
             Some(signed)
         );
 
@@ -728,9 +730,7 @@ mod tests {
 
         let next = state.allocate(derive).unwrap();
         state.reserve(KEY, next).unwrap();
-        state
-            .observe(KEY, &[addr(2)], None, lookup, false)
-            .unwrap();
+        state.observe(KEY, &[addr(2)], None, lookup, false).unwrap();
 
         let warnings = state.cross_check();
         assert_eq!(warnings.len(), 1);
@@ -745,7 +745,9 @@ mod tests {
     fn state_round_trips_through_json() {
         let mut state = reserved_state();
         state.arm(KEY, pending()).unwrap();
-        state.bind(OTHER, OwnerRef::External { address: addr(40) }).unwrap();
+        state
+            .bind(OTHER, OwnerRef::External { address: addr(40) })
+            .unwrap();
         let json = serde_json::to_string_pretty(&state).unwrap();
         assert!(!json.contains("xpub"));
         let back: RotationState = serde_json::from_str(&json).unwrap();
