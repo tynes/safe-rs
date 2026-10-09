@@ -16,6 +16,7 @@
 //! 5. *Broadcast*, wait, and reconcile again from the receipt's block.
 //! 6. *Sweep* the old owner's ETH to the new owner.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -36,10 +37,11 @@ use crate::inspect::{read_safe_state, ReadSafeStateOptions};
 use crate::outer::{
     decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
 };
+use crate::rotation::history::{owner_history, OwnerEventKind};
 use crate::rotation::plan::{check_post_state, plan_rotation, RotationPlan};
 use crate::rotation::state::{
-    binding_key, Binding, Exposure, Observation, OwnerRef, PendingTx, Reserved, RotationState,
-    SignedSweep, Swept,
+    binding_key, Binding, Exposure, Observation, OwnerRef, PendingTx, Reserved, Retired,
+    RotationState, SignedSweep, Swept,
 };
 use crate::rotation::store::StateFile;
 use crate::simulation::session::READ_CALL_GAS;
@@ -204,6 +206,20 @@ pub struct RotationOutcome {
     pub status: RotationStatus,
     /// The sweep that followed, if ETH was moved
     pub sweep: Option<SweepOutcome>,
+}
+
+/// What [`RotatingSafe::sync`] found on chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncReport {
+    /// The owner the wallet signs with
+    pub current: OwnerRef,
+    /// Wallet indices found in use: owners in the Safe's history, and keys
+    /// that sent a transaction on this chain
+    pub used: Vec<u32>,
+    /// Owner events read (zero without a history scan)
+    pub events: usize,
+    /// The next index that will be handed out
+    pub next_index: u32,
 }
 
 fn provider_error(e: impl std::fmt::Display) -> Error {
@@ -905,6 +921,122 @@ where
         )?;
         self.store.save()?;
         self.broadcast_sweep(outer, amount, to).await
+    }
+
+    /// Rebuilds what the state knows about used keys from the chain.
+    ///
+    /// Two sources are read, and every wallet index either one shows is
+    /// treated as used:
+    ///
+    /// - With `from_block`, the Safe's owner events from that block on. This
+    ///   also restores the Safe's rotation history. Start at or before the
+    ///   Safe's deployment to see every owner it ever had; `chunk` is the
+    ///   block span of one `eth_getLogs` request.
+    /// - The account nonce of each wallet address: a key that paid for gas
+    ///   has a non-zero nonce on this chain, whichever Safe it owned.
+    ///
+    /// The counter then leaves [`REBUILD_MARGIN`] indices unused. Neither
+    /// source shows keys used only on another chain, or only with a separate
+    /// payer on a Safe that is not scanned here: run this for every Safe and
+    /// chain the phrase was used with.
+    pub async fn sync(&mut self, from_block: Option<u64>, chunk: u64) -> Result<SyncReport> {
+        let limit = self.config.scan_limit;
+        let mut index_of = HashMap::new();
+        let mut address_of = BTreeMap::new();
+        for index in 1..=limit {
+            let address = self.wallet.owner_address(index)?;
+            index_of.insert(address, index);
+            address_of.insert(index, address);
+        }
+        let owner_ref = |address: Address| match index_of.get(&address) {
+            Some(index) => OwnerRef::Derived {
+                index: *index,
+                address,
+            },
+            None => OwnerRef::External { address },
+        };
+
+        let binding = self.binding()?;
+        let mut used: BTreeSet<u32> = binding.current.index().into_iter().collect();
+        used.extend(binding.history.iter().filter_map(|r| r.owner.index()));
+
+        let mut events = 0;
+        if let Some(from_block) = from_block {
+            let head = self
+                .provider
+                .get_block_number()
+                .await
+                .map_err(provider_error)?;
+            let history = owner_history(&self.provider, self.safe, from_block, head, chunk).await?;
+            events = history.len();
+            used.extend(history.iter().filter_map(|e| index_of.get(&e.owner)));
+
+            // A swap is one removal and one addition in the same transaction.
+            let mut retired = Vec::new();
+            for (position, removed) in history.iter().enumerate() {
+                if removed.kind != OwnerEventKind::Removed {
+                    continue;
+                }
+                let added = history[position + 1..]
+                    .iter()
+                    .take_while(|next| next.tx_hash == removed.tx_hash)
+                    .find(|next| next.kind == OwnerEventKind::Added);
+                if let Some(added) = added {
+                    let owner = owner_ref(removed.owner);
+                    let swept = self
+                        .binding()?
+                        .history
+                        .iter()
+                        .find(|known| known.owner == owner)
+                        .and_then(|known| known.swept);
+                    retired.push(Retired {
+                        owner,
+                        replaced_by: owner_ref(added.owner),
+                        observed_block: removed.block,
+                        swept,
+                    });
+                }
+            }
+            if !retired.is_empty() {
+                self.store.state.set_history(&self.key, retired)?;
+            }
+        }
+
+        // Keys that sent a transaction here, up to a gap past the last one known.
+        let mut last = used
+            .iter()
+            .next_back()
+            .copied()
+            .unwrap_or(0)
+            .max(self.store.state.next_index.saturating_sub(1));
+        let mut index = 1;
+        while index <= limit && index <= last.saturating_add(REBUILD_MARGIN) {
+            if let Some(address) = address_of.get(&index) {
+                let nonce = self
+                    .provider
+                    .get_transaction_count(*address)
+                    .await
+                    .map_err(provider_error)?;
+                if nonce > 0 {
+                    used.insert(index);
+                    last = last.max(index);
+                }
+            }
+            index += 1;
+        }
+
+        if let Some(highest) = used.iter().next_back() {
+            self.store
+                .state
+                .note_used(highest.saturating_add(REBUILD_MARGIN));
+        }
+        self.store.save()?;
+        Ok(SyncReport {
+            current: self.binding()?.current,
+            used: used.into_iter().collect(),
+            events,
+            next_index: self.store.state.next_index,
+        })
     }
 
     /// Sweeps the most recently retired owner even if no sweep was scheduled,

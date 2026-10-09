@@ -148,6 +148,20 @@ impl HdWallet {
         Ok(Self { parent, funding })
     }
 
+    /// Opens a mnemonic keystore (see [`crate::keystore`]) with its password.
+    ///
+    /// Fails with [`Error::Keystore`] if the keystore holds a single key and
+    /// no phrase.
+    pub fn from_keystore_json(json: &str, password: &[u8]) -> Result<Self> {
+        let decrypted = crate::keystore::decrypt_keystore(json, password)?;
+        let Some(mnemonic) = decrypted.mnemonic else {
+            return Err(Error::Keystore(
+                "this keystore holds a single key, not a recovery phrase".to_string(),
+            ));
+        };
+        Self::from_phrase(&mnemonic.phrase)
+    }
+
     fn child(parent: &MnemonicKey, index: u32) -> Result<PrivateKeySigner> {
         if index >= MAX_INDEX {
             return Err(Error::Mnemonic(format!(

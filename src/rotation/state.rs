@@ -457,6 +457,15 @@ impl RotationState {
         Ok(())
     }
 
+    /// Replaces the recorded history of `key`, for a rebuild from chain.
+    pub fn set_history(&mut self, key: &str, history: Vec<Retired>) -> Result<()> {
+        for index in history.iter().filter_map(|retired| retired.owner.index()) {
+            self.note_used(index);
+        }
+        self.binding_mut(key)?.history = history;
+        Ok(())
+    }
+
     /// Records how the Safe of `key` was created.
     pub fn set_creation(&mut self, key: &str, creation: CreationParams) -> Result<()> {
         self.binding_mut(key)?.creation = Some(creation);

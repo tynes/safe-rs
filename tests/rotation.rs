@@ -63,6 +63,12 @@ async fn setup(h: &LocalHarness, salt: u64, state: &Path) -> Address {
     let safe = h.deploy_safe_with(&[owner], 1, salt).await;
     h.fund(owner, eth(1)).await;
     h.fund(safe, U256::from(1_000)).await;
+    track(h, safe, state);
+    safe
+}
+
+/// Records in `state` that `safe` is owned by wallet key 1.
+fn track(h: &LocalHarness, safe: Address, state: &Path) {
     let mut store = StateFile::open(state, wallet().id()).unwrap();
     store
         .state
@@ -70,12 +76,11 @@ async fn setup(h: &LocalHarness, salt: u64, state: &Path) -> Address {
             &binding_key(h.chain_id, safe),
             OwnerRef::Derived {
                 index: 1,
-                address: owner,
+                address: key(1),
             },
         )
         .unwrap();
     store.save().unwrap();
-    safe
 }
 
 async fn open_with(
@@ -694,4 +699,72 @@ async fn a_failing_simulation_signs_nothing_off() {
     let outcome = rotating.rotate().await.unwrap();
     assert_eq!(outcome.status, RotationStatus::Rotated);
     assert_eq!(h.owners(safe).await, vec![reserved.address]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_finds_used_keys_by_nonce_and_restores_history_from_logs() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 114, &state).await;
+
+    let mut rotating = open(&h, safe, &state).await;
+    for _ in 0..3 {
+        rotating.rotate().await.unwrap();
+    }
+    let known = rotating.binding().unwrap().history.clone();
+    drop(rotating);
+    std::fs::remove_file(&state).unwrap();
+
+    let mut rotating = open(&h, safe, &state).await;
+    assert!(rotating.binding().unwrap().history.is_empty());
+
+    // Keys that paid for gas are found by their account nonce alone.
+    let report = rotating.sync(None, 1_000).await.unwrap();
+    assert_eq!(report.used, vec![1, 2, 3, 4]);
+    assert_eq!(report.events, 0);
+    assert_eq!(report.current.index(), Some(4));
+    assert!(report.next_index > 4 + safe_rs::rotation::REBUILD_MARGIN);
+    assert!(rotating.binding().unwrap().history.is_empty());
+
+    // The Safe's logs restore the history too; small chunks span several requests.
+    let report = rotating.sync(Some(0), 5).await.unwrap();
+    assert_eq!(report.used, vec![1, 2, 3, 4]);
+    assert_eq!(report.events, 7, "setup plus three swaps");
+    let history = &rotating.binding().unwrap().history;
+    assert_eq!(history.len(), 3);
+    for (rebuilt, original) in history.iter().zip(&known) {
+        assert_eq!(rebuilt.owner, original.owner);
+        assert_eq!(rebuilt.replaced_by, original.replaced_by);
+        assert_eq!(rebuilt.observed_block, original.observed_block);
+    }
+    // Syncing again changes nothing.
+    let next = report.next_index;
+    assert_eq!(rotating.sync(Some(0), 5).await.unwrap().next_index, next);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_that_never_paid_gas_are_only_found_in_the_logs() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = h.deploy_safe_with(&[key(1)], 1, 115).await;
+    track(&h, safe, &state);
+    let payer = alloy::signers::local::PrivateKeySigner::random();
+    h.fund(payer.address(), eth(1)).await;
+    let mut paid = config(&h);
+    paid.payer = Some(payer);
+
+    let mut rotating = open_with(&h, safe, &state, paid.clone()).await;
+    rotating.rotate().await.unwrap();
+    rotating.rotate().await.unwrap();
+    drop(rotating);
+    std::fs::remove_file(&state).unwrap();
+
+    let mut rotating = open_with(&h, safe, &state, paid).await;
+    let by_nonce = rotating.sync(None, 1_000).await.unwrap();
+    assert_eq!(by_nonce.used, vec![3], "only the current owner is visible");
+    let by_logs = rotating.sync(Some(0), 1_000).await.unwrap();
+    assert_eq!(by_logs.used, vec![1, 2, 3]);
+    assert_eq!(rotating.binding().unwrap().history.len(), 2);
 }
