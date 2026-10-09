@@ -141,6 +141,13 @@ pub enum Error {
     #[error("Owner rotation error: {0}")]
     Rotation(String),
 
+    /// A transaction was broadcast (or may have been) but is not confirmed
+    #[error("Transaction {tx_hash} is not confirmed: {reason}")]
+    Unconfirmed {
+        tx_hash: alloy::primitives::B256,
+        reason: String,
+    },
+
     /// The rotation state file is held by another process
     #[error("Rotation state {0} is locked by another process")]
     StateLocked(String),

@@ -165,6 +165,15 @@ sol! {
         event ProxyCreation(address indexed proxy, address singleton);
     }
 
+    /// OP-stack gas price oracle predeploy, for fees charged outside gas
+    #[sol(rpc)]
+    interface IGasPriceOracle {
+        /// L1 data fee for an unsigned RLP-encoded transaction
+        function getL1Fee(bytes memory _data) external view returns (uint256);
+        /// Operator fee for a given gas usage (zero before Isthmus)
+        function getOperatorFee(uint256 _gasUsed) external view returns (uint256);
+    }
+
     /// Safe setup interface for initialization
     #[sol(rpc)]
     interface ISafeSetup {

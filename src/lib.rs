@@ -93,7 +93,9 @@ pub use envelope::{
     SafeTxGasPolicy, SignedSafeTx,
 };
 pub use inspect::{is_safe_with, read_safe_state, ModuleList, ReadSafeStateOptions, SafeState};
-pub use outer::{decode_signed_outer_tx, sign_outer_tx, OuterTxParams, SignedOuterTx};
+pub use outer::{
+    decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
+};
 pub use rotation::{OwnerSwap, RotationPlan};
 pub use simulation::{
     AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator, ParentHeader, SimBlockEnv,

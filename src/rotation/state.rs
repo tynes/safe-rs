@@ -294,6 +294,12 @@ impl RotationState {
         self.next_index = self.next_index.max(index.saturating_add(1));
     }
 
+    /// Leaves `margin` indices unused, for when the counter was rebuilt from
+    /// sources that cannot show every index that was handed out.
+    pub fn skip_ahead(&mut self, margin: u32) {
+        self.next_index = self.next_index.saturating_add(margin).min(MAX_INDEX);
+    }
+
     /// Hands out the next never-used index.
     ///
     /// The counter is advanced before the address is returned and never moves
@@ -433,15 +439,28 @@ impl RotationState {
         Ok(observation)
     }
 
-    /// Stores the signed sweep before it is first broadcast.
-    pub fn set_signed_sweep(&mut self, key: &str, signed: SignedSweep) -> Result<()> {
+    /// Stores the signed sweep before it is first broadcast, or forgets it
+    /// (`None`) when the node turned it down and another one has to be signed.
+    pub fn set_signed_sweep(&mut self, key: &str, signed: Option<SignedSweep>) -> Result<()> {
         match &mut self.binding_mut(key)?.sweep_due {
             Some(due) => {
-                due.signed = Some(signed);
+                due.signed = signed;
                 Ok(())
             }
             None => Err(Error::Rotation(format!("{key} has no sweep due"))),
         }
+    }
+
+    /// Schedules a sweep of `from`'s ETH to the current owner of `key`.
+    pub fn schedule_sweep(&mut self, key: &str, from: OwnerRef) -> Result<()> {
+        self.binding_mut(key)?.sweep_due = Some(SweepDue { from, signed: None });
+        Ok(())
+    }
+
+    /// Records how the Safe of `key` was created.
+    pub fn set_creation(&mut self, key: &str, creation: CreationParams) -> Result<()> {
+        self.binding_mut(key)?.creation = Some(creation);
+        Ok(())
     }
 
     /// Clears a due sweep, recording `swept` on the retired owner if ETH moved.
@@ -688,7 +707,7 @@ mod tests {
             amount: U256::from(99),
             raw: Bytes::from_static(&[0x02]),
         };
-        state.set_signed_sweep(KEY, signed.clone()).unwrap();
+        state.set_signed_sweep(KEY, Some(signed.clone())).unwrap();
         assert_eq!(
             state
                 .binding(KEY)
@@ -708,17 +727,7 @@ mod tests {
         let binding = state.binding(KEY).unwrap();
         assert_eq!(binding.sweep_due, None);
         assert_eq!(binding.history[0].swept, Some(swept));
-        assert!(state
-            .set_signed_sweep(
-                KEY,
-                SignedSweep {
-                    tx_hash: B256::ZERO,
-                    nonce: 0,
-                    amount: U256::ZERO,
-                    raw: Bytes::new()
-                }
-            )
-            .is_err());
+        assert!(state.set_signed_sweep(KEY, None).is_err(), "nothing is due");
     }
 
     #[test]

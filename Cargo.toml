@@ -45,6 +45,11 @@ tempfile = "3"
 [lints]
 workspace = true
 
+[[test]]
+name = "rotation"
+path = "tests/rotation.rs"
+required-features = ["hd-wallet"]
+
 [[example]]
 name = "simple_transfer"
 path = "examples/simple_transfer.rs"
