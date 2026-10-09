@@ -347,13 +347,11 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
     let mut config = rotation_config(None, SpecId::OSAKA, 12, DEPLOY_TIMEOUT);
     config.sweep_reserve = args.sweep.sweep_reserve;
     let mut rotating = RotatingSafe::open_with(provider, safe, wallet, store, config).await?;
-    let swept = match rotating.sweep().await {
-        Ok(swept) => swept.map(SweepOutput::from),
-        Err(e) => {
-            warnings.push(format!("a sweep is still owed: {e}"));
-            None
-        }
-    };
+    let report = rotating.sweep_all().await?;
+    for (from, error) in &report.failed {
+        warnings.push(format!("a sweep from {from} is still owed: {error}"));
+    }
+    let swept = report.swept.first().copied().map(SweepOutput::from);
     warnings.extend(rotating.take_warnings());
     if !json {
         print_warnings(&warnings);

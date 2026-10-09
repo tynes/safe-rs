@@ -457,7 +457,7 @@ pub enum WalletCommand {
     /// Rebuild the record of used keys for a Safe from the chain
     Sync(WalletSyncArgs),
 
-    /// Move the ETH left on a Safe's last retired owner key to its current owner
+    /// Move the ETH left on a Safe's retired owner keys to its current owner
     Sweep(WalletSweepArgs),
 }
 

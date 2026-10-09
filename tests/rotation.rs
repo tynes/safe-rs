@@ -160,7 +160,7 @@ async fn every_transaction_moves_ownership_and_gas_to_the_next_key() {
     assert_eq!(binding.exposed, None);
     assert_eq!(binding.reserved, None);
     assert_eq!(binding.pending, None);
-    assert_eq!(binding.sweep_due, None);
+    assert!(binding.sweep_due.is_empty());
     assert_eq!(binding.history.len(), 5);
     assert!(binding
         .history
@@ -335,7 +335,7 @@ async fn a_rotation_completed_while_away_is_picked_up_on_reopen() {
     assert_eq!(binding.current.index(), Some(2));
     assert_eq!(binding.pending, None);
     assert_eq!(binding.exposed, None);
-    assert!(binding.sweep_due.is_some(), "opening only reads");
+    assert_eq!(binding.sweep_due.len(), 1, "opening only reads");
     assert!(balance(&h, key(1)).await > U256::ZERO);
 
     // The next transaction carries out the owed sweep before anything else.
@@ -396,7 +396,7 @@ async fn a_crash_after_broadcast_is_reconciled_from_the_chain() {
     assert_eq!(binding.pending, None);
     assert_eq!(binding.exposed, None);
     assert_eq!(h.owners(safe).await, vec![key(2)]);
-    let swept = rotating.sweep().await.unwrap().expect("the owed sweep");
+    let swept = rotating.sweep().await.unwrap()[0];
     assert_eq!((swept.from, swept.to), (key(1), key(2)));
     assert_eq!(balance(&h, key(1)).await, U256::ZERO);
     assert_eq!(balance(&h, Address::repeat_byte(0x42)).await, U256::from(1));
@@ -435,9 +435,9 @@ async fn a_sweep_interrupted_after_broadcast_lands_exactly_once() {
         matches!(unconfirmed, Err(Error::Unconfirmed { .. })),
         "{unconfirmed:?}"
     );
-    let due = rotating.binding().unwrap().sweep_due.clone().expect("owed");
-    let stored = due
+    let stored = rotating.binding().unwrap().sweep_due[0]
         .signed
+        .clone()
         .expect("the signed transfer is saved before broadcast");
     drop(rotating);
 
@@ -447,23 +447,19 @@ async fn a_sweep_interrupted_after_broadcast_lands_exactly_once() {
         rotating.sweep().await,
         Err(Error::Unconfirmed { tx_hash, .. }) if tx_hash == stored.tx_hash
     ));
-    let again = rotating
-        .binding()
-        .unwrap()
-        .sweep_due
-        .clone()
-        .expect("still owed");
-    assert_eq!(again.signed, Some(stored.clone()));
+    let again = rotating.binding().unwrap().sweep_due.clone();
+    assert_eq!(again.len(), 1, "still owed, and only once");
+    assert_eq!(again[0].signed, Some(stored.clone()));
     drop(rotating);
 
     h.provider.anvil_mine(Some(1), None).await.unwrap();
     h.provider.anvil_set_auto_mine(true).await.unwrap();
     let mut rotating = open(&h, safe, &state).await;
-    let swept = rotating.sweep().await.unwrap().expect("found mined");
+    let swept = rotating.sweep().await.unwrap()[0];
     assert_eq!(swept.tx_hash, stored.tx_hash);
     assert_eq!(swept.amount, stored.amount);
     let binding = rotating.binding().unwrap();
-    assert_eq!(binding.sweep_due, None);
+    assert!(binding.sweep_due.is_empty());
     assert_eq!(
         binding.history[0].swept.expect("recorded").tx_hash,
         stored.tx_hash
@@ -492,7 +488,7 @@ async fn without_sweep_the_next_owner_has_no_gas_until_swept() {
     assert_eq!(outcome.sweep, None);
     assert!(balance(&h, key(1)).await > U256::ZERO, "the ETH stayed put");
     assert_eq!(balance(&h, key(2)).await, U256::ZERO);
-    assert_eq!(rotating.binding().unwrap().sweep_due, None);
+    assert!(rotating.binding().unwrap().sweep_due.is_empty());
 
     // The new owner cannot pay: the failure is found before anything is signed off.
     let unfunded = rotating.prepare(&[], ExecOptions::default()).await;
@@ -503,7 +499,7 @@ async fn without_sweep_the_next_owner_has_no_gas_until_swept() {
     assert_eq!(rotating.binding().unwrap().exposed, None);
 
     // Sweeping on request moves the retired key's ETH after all.
-    let swept = rotating.sweep_retired().await.unwrap().expect("a sweep");
+    let swept = rotating.sweep_retired().await.unwrap()[0];
     assert_eq!((swept.from, swept.to), (key(1), key(2)));
     assert_eq!(balance(&h, key(1)).await, U256::ZERO);
     assert_eq!(
@@ -529,7 +525,7 @@ async fn a_separate_payer_keeps_owner_keys_off_chain() {
         assert_eq!(outcome.status, RotationStatus::Rotated);
         assert_eq!(sender_of(&h, outcome.tx_hash).await, payer.address());
         assert_eq!(outcome.sweep, None, "owner keys hold nothing to sweep");
-        assert_eq!(rotating.binding().unwrap().sweep_due, None);
+        assert!(rotating.binding().unwrap().sweep_due.is_empty());
         assert_eq!(rotating.binding().unwrap().history.len(), round as usize);
     }
     for retired in &rotating.binding().unwrap().history {
@@ -605,16 +601,26 @@ async fn an_owed_sweep_that_cannot_run_is_a_warning_not_a_failure() {
     drop(store);
 
     let mut rotating = open(&h, safe, &state).await;
-    assert!(
-        rotating.binding().unwrap().sweep_due.is_some(),
-        "still owed"
-    );
+    assert_eq!(rotating.binding().unwrap().sweep_due.len(), 1, "owed");
     assert!(matches!(rotating.sweep().await, Err(Error::Rotation(_))));
 
     let outcome = rotating.rotate().await.unwrap();
     assert_eq!(outcome.status, RotationStatus::Rotated);
-    assert_eq!(rotating.warnings().len(), 1, "{:?}", rotating.warnings());
-    assert!(rotating.warnings()[0].contains("still owed"));
+    // This rotation's own sweep went through...
+    assert_eq!(outcome.sweep.expect("swept").from, key(1));
+    assert_eq!(balance(&h, key(1)).await, U256::ZERO);
+    // ...and the one that cannot run is still on record, not overwritten.
+    let due = &rotating.binding().unwrap().sweep_due;
+    assert_eq!(due.len(), 1, "{due:?}");
+    assert_eq!(due[0].from.address(), stranger);
+    assert!(
+        rotating.warnings().iter().all(
+            |warning| warning.contains("still owed") && warning.contains(&stranger.to_string())
+        ),
+        "{:?}",
+        rotating.warnings()
+    );
+    assert!(!rotating.warnings().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -848,13 +854,9 @@ async fn a_sweep_priced_out_by_a_fee_rise_is_replaced_at_the_same_nonce() {
         rotating.sweep_retired().await,
         Err(Error::Unconfirmed { .. })
     ));
-    let first = rotating
-        .binding()
-        .unwrap()
-        .sweep_due
-        .clone()
-        .unwrap()
+    let first = rotating.binding().unwrap().sweep_due[0]
         .signed
+        .clone()
         .unwrap();
     drop(rotating);
 
@@ -885,13 +887,9 @@ async fn a_sweep_priced_out_by_a_fee_rise_is_replaced_at_the_same_nonce() {
         rotating.sweep().await,
         Err(Error::Unconfirmed { .. })
     ));
-    let second = rotating
-        .binding()
-        .unwrap()
-        .sweep_due
-        .clone()
-        .unwrap()
+    let second = rotating.binding().unwrap().sweep_due[0]
         .signed
+        .clone()
         .unwrap();
     assert_ne!(second.tx_hash, first.tx_hash);
     assert_eq!(second.nonce, first.nonce);
@@ -901,7 +899,7 @@ async fn a_sweep_priced_out_by_a_fee_rise_is_replaced_at_the_same_nonce() {
     h.provider.anvil_mine(Some(1), None).await.unwrap();
     h.provider.anvil_set_auto_mine(true).await.unwrap();
     let mut rotating = open(&h, safe, &state).await;
-    let swept = rotating.sweep().await.unwrap().expect("mined");
+    let swept = rotating.sweep().await.unwrap()[0];
     assert_eq!(swept.tx_hash, second.tx_hash);
     assert_eq!(balance(&h, key(1)).await, U256::ZERO);
     assert_eq!(balance(&h, key(2)).await, second.amount);
@@ -910,4 +908,54 @@ async fn a_sweep_priced_out_by_a_fee_rise_is_replaced_at_the_same_nonce() {
         2,
         "exactly one transfer landed"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_retired_key_that_holds_eth_is_swept_on_request() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 119, &state).await;
+
+    // Two rotations with sweeping off: each new owner is funded by hand, and
+    // each retired key keeps what it had left.
+    let mut no_sweep = config(&h);
+    no_sweep.sweep = false;
+    let mut rotating = open_with(&h, safe, &state, no_sweep).await;
+    rotating.rotate().await.unwrap();
+    h.fund(key(2), eth(1)).await;
+    rotating.rotate().await.unwrap();
+    assert!(rotating.binding().unwrap().sweep_due.is_empty());
+    let on_one = balance(&h, key(1)).await;
+    let on_two = balance(&h, key(2)).await;
+    assert!(on_one > U256::ZERO && on_two > U256::ZERO);
+    assert_eq!(balance(&h, key(3)).await, U256::ZERO);
+    drop(rotating);
+
+    // On request, not just the last retired key but every one is emptied.
+    let mut rotating = open(&h, safe, &state).await;
+    assert_eq!(rotating.schedule_retired_sweeps().await.unwrap(), 2);
+    assert_eq!(
+        rotating.schedule_retired_sweeps().await.unwrap(),
+        0,
+        "already scheduled"
+    );
+    let report = rotating.sweep_all().await.unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let from: Vec<_> = report.swept.iter().map(|sweep| sweep.from).collect();
+    assert_eq!(from, vec![key(1), key(2)], "oldest first");
+    assert!(report.swept.iter().all(|sweep| sweep.to == key(3)));
+    assert_eq!(balance(&h, key(1)).await, U256::ZERO);
+    assert_eq!(balance(&h, key(2)).await, U256::ZERO);
+    let total: U256 = report.swept.iter().map(|sweep| sweep.amount).sum();
+    assert_eq!(balance(&h, key(3)).await, total);
+
+    let binding = rotating.binding().unwrap();
+    assert!(binding.sweep_due.is_empty());
+    assert!(binding
+        .history
+        .iter()
+        .all(|retired| retired.swept.is_some()));
+    // Nothing is left to schedule, and asking again moves nothing.
+    assert!(rotating.sweep_retired().await.unwrap().is_empty());
 }

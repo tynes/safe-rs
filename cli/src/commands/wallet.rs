@@ -285,9 +285,9 @@ struct SafeStatus {
     next_owner: Option<OwnerOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pending_tx: Option<TxHash>,
-    /// A retired key whose ETH still has to be moved to the owner
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sweep_owed_from: Option<Address>,
+    /// Retired keys whose ETH still has to be moved to the owner
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sweeps_owed_from: Vec<Address>,
     retired_keys: Vec<OwnerOutput>,
     #[serde(skip)]
     exposure: Option<Exposure>,
@@ -306,7 +306,11 @@ impl SafeStatus {
             exposed: binding.exposed.map(exposure_label),
             next_owner: binding.reserved.map(Into::into),
             pending_tx: binding.pending.as_ref().map(|p| p.outer_tx_hash),
-            sweep_owed_from: binding.sweep_due.as_ref().map(|due| due.from.address()),
+            sweeps_owed_from: binding
+                .sweep_due
+                .iter()
+                .map(|due| due.from.address())
+                .collect(),
             retired_keys: binding
                 .history
                 .iter()
@@ -349,7 +353,7 @@ impl Report for WalletStatusOutput {
             if let Some(pending) = safe.pending_tx {
                 let _ = write!(s, "\n  Pending transaction: {pending}");
             }
-            if let Some(from) = safe.sweep_owed_from {
+            for from in &safe.sweeps_owed_from {
                 let _ = write!(
                     s,
                     "\n  Sweep owed: ETH on {from} still has to move to the owner (`safe wallet sweep`)"
@@ -452,14 +456,56 @@ async fn sweep(args: WalletSweepArgs, json: bool) -> Result<()> {
     let provider = http_provider(&args.rpc.rpc_url);
     let mut rotating =
         RotatingSafe::open_with(provider, args.safe.safe, wallet, store, config).await?;
-    let swept = rotating.sweep_retired().await?;
+    rotating.schedule_retired_sweeps().await?;
+    let report = rotating.sweep_all().await?;
     print_warnings(&rotating.take_warnings());
-    match swept {
-        Some(outcome) => SweepOutput::from(outcome).print(json),
-        None if json => println!("null"),
-        None => println!("Nothing to sweep: the last retired key holds no spare ETH."),
+    let output = WalletSweepOutput {
+        sweeps: report.swept.iter().copied().map(Into::into).collect(),
+        still_owed: report
+            .failed
+            .iter()
+            .map(|(from, error)| OwedSweep {
+                from: *from,
+                reason: error.to_string(),
+            })
+            .collect(),
+    };
+    output.print(json);
+    if !output.still_owed.is_empty() {
+        bail!(
+            "{} sweep(s) could not be completed",
+            output.still_owed.len()
+        );
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct OwedSweep {
+    from: Address,
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct WalletSweepOutput {
+    /// Transfers that moved ETH to the current owner
+    sweeps: Vec<SweepOutput>,
+    /// Retired keys that still hold ETH, and why it could not be moved
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    still_owed: Vec<OwedSweep>,
+}
+
+impl Report for WalletSweepOutput {
+    fn human(&self) -> String {
+        let mut lines: Vec<String> = self.sweeps.iter().map(Report::human).collect();
+        for owed in &self.still_owed {
+            lines.push(format!("Still owed from {}: {}", owed.from, owed.reason));
+        }
+        if lines.is_empty() {
+            lines.push("Nothing to sweep: no retired key holds spare ETH.".to_string());
+        }
+        lines.join("\n")
+    }
 }
 
 #[cfg(test)]

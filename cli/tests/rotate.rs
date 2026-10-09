@@ -288,8 +288,10 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
     let swept = cli
         .wallet_command(&["wallet", "sweep", "--safe", &safe_arg])
         .json();
-    assert_eq!(address(&swept["from"]), key(2));
-    assert_eq!(address(&swept["to"]), key(3));
+    assert_eq!(swept["sweeps"].as_array().unwrap().len(), 1);
+    assert_eq!(address(&swept["sweeps"][0]["from"]), key(2));
+    assert_eq!(address(&swept["sweeps"][0]["to"]), key(3));
+    assert!(swept.get("still_owed").is_none());
     assert_eq!(balance(&h, key(2)).await, U256::ZERO);
 
     // --- A rotation with no other calls. ---

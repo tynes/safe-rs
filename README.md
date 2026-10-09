@@ -279,7 +279,7 @@ safe wallet sweep   --hd-wallet <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL
 | `address` | Prints the funding address (no password needed), or owner key `--index N` |
 | `status` | Shows, per Safe, the current owner key (the address to send gas money to), whether it is exposed, and any pending transaction or owed sweep |
 | `sync` | Rebuilds the record of used keys for a Safe from the chain |
-| `sweep` | Moves ETH left on a Safe's last retired owner key to its current owner |
+| `sweep` | Moves ETH left on a Safe's retired owner keys to its current owner |
 
 ### Wallet Options
 
@@ -346,7 +346,7 @@ The prompt shows how much ETH the old key holds; all of it moves to the new owne
 | Simulation fails | Nothing left your machine; the key is unused | Fix the calls and send again |
 | The transaction reverts on chain | The owner was **not** rotated, but its signature is public. The signed calls stay executable by anyone until the Safe nonce is used | `safe rotate` right away: it rotates at the same Safe nonce, which voids the old signature |
 | No receipt in time, or the broadcast is unclear | Unknown yet. The key is recorded as used | Run any rotating command: it reads the owner list first and picks up from there |
-| The rotation landed but the sweep did not | The old key still holds the gas ETH | The next rotating command sweeps first, or run `safe wallet sweep` |
+| The rotation landed but the sweep did not | The old key still holds the gas ETH. The sweep stays on record until it is done, however many rotations follow | The next rotating command sweeps first, or run `safe wallet sweep` |
 | The state directory is lost | The phrase still derives every key | `safe wallet sync` for every Safe and chain the phrase was used with |
 
 `safe wallet sync` finds the current owner by deriving keys and comparing them with the Safe's owner list, and treats every wallet address that has sent a transaction on that chain as used. With `--from-block` (the Safe's deployment block or earlier) it also reads the Safe's owner events, which restores the history and finds keys that never paid for gas. It then leaves a margin of unused indices.

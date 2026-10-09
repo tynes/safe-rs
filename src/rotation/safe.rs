@@ -41,7 +41,7 @@ use crate::rotation::history::{owner_history, OwnerEventKind};
 use crate::rotation::plan::{check_post_state, plan_rotation, RotationPlan};
 use crate::rotation::state::{
     binding_key, Binding, Exposure, Observation, OwnerRef, PendingTx, Reserved, Retired,
-    RotationState, SignedSweep, Swept,
+    RotationState, SignedSweep, SweepDue, Swept,
 };
 use crate::rotation::store::StateFile;
 use crate::simulation::session::READ_CALL_GAS;
@@ -191,6 +191,25 @@ pub struct SweepOutcome {
     pub to: Address,
 }
 
+/// What [`RotatingSafe::sweep_all`] did with each sweep that was owed.
+#[derive(Debug, Default)]
+pub struct SweepReport {
+    /// Sweeps that moved ETH
+    pub swept: Vec<SweepOutcome>,
+    /// Retired owners whose sweep is still owed, with the reason
+    pub failed: Vec<(Address, Error)>,
+}
+
+impl SweepReport {
+    /// The completed sweeps, or the first failure if any sweep is still owed.
+    pub fn into_result(self) -> Result<Vec<SweepOutcome>> {
+        match self.failed.into_iter().next() {
+            Some((_, error)) => Err(error),
+            None => Ok(self.swept),
+        }
+    }
+}
+
 /// The result of a mined rotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RotationOutcome {
@@ -204,7 +223,7 @@ pub struct RotationOutcome {
     pub safe_outcome: SafeExecutionOutcome,
     /// What happened to the owner list
     pub status: RotationStatus,
-    /// The sweep that followed, if ETH was moved
+    /// The sweep of the owner this transaction retired, if ETH was moved
     pub sweep: Option<SweepOutcome>,
 }
 
@@ -608,7 +627,7 @@ where
                 .map_err(provider_error)?,
         };
 
-        let owed = if self.binding()?.sweep_due.is_some() {
+        let owed = if !self.binding()?.sweep_due.is_empty() {
             " (a sweep to it is still owed: run it first)"
         } else {
             ""
@@ -771,7 +790,12 @@ where
             }
             Observation::Unchanged | Observation::Lost => RotationStatus::NotRotated,
         };
-        let sweep = self.sweep_or_warn().await;
+        let retired = tx.from.address();
+        let sweep = self
+            .sweep_or_warn()
+            .await
+            .into_iter()
+            .find(|sweep| sweep.from == retired);
         Ok(RotationOutcome {
             tx_hash: receipt.transaction_hash,
             safe_tx_hash,
@@ -798,12 +822,19 @@ where
         self.execute(&[]).await
     }
 
-    async fn sweep_or_warn(&mut self) -> Option<SweepOutcome> {
-        match self.sweep().await {
-            Ok(outcome) => outcome,
+    /// Attempts every owed sweep; the ones that fail become warnings.
+    async fn sweep_or_warn(&mut self) -> Vec<SweepOutcome> {
+        match self.sweep_all().await {
+            Ok(report) => {
+                for (from, error) in &report.failed {
+                    self.warnings
+                        .push(format!("a sweep from {from} is still owed: {error}"));
+                }
+                report.swept
+            }
             Err(e) => {
                 self.warnings.push(format!("a sweep is still owed: {e}"));
-                None
+                Vec::new()
             }
         }
     }
@@ -843,19 +874,42 @@ where
             .saturating_add(operator_fee)
     }
 
-    /// Moves the ETH of the last retired owner to the current owner, if a
-    /// sweep is owed.
+    /// Attempts every owed sweep, oldest first, each to the current owner.
     ///
-    /// Returns `None` if nothing is owed or the balance does not cover the
-    /// transfer fee. The signed transfer is stored before its first broadcast;
-    /// a retry rebroadcasts the same bytes while the sender's nonce is
-    /// unchanged, and only signs a replacement (same nonce, higher fee, lower
-    /// amount) once the network fee has risen by an eighth.
-    pub async fn sweep(&mut self) -> Result<Option<SweepOutcome>> {
+    /// A sweep that cannot be completed stays owed and does not stop the
+    /// others; it is reported in [`SweepReport::failed`]. The outer `Err` is for
+    /// failures to read or save the state itself.
+    pub async fn sweep_all(&mut self) -> Result<SweepReport> {
+        let mut report = SweepReport::default();
+        for due in self.binding()?.sweep_due.clone() {
+            let from = due.from.address();
+            match self.sweep_one(due).await {
+                Ok(Some(outcome)) => report.swept.push(outcome),
+                Ok(None) => {}
+                Err(error) => report.failed.push((from, error)),
+            }
+        }
+        Ok(report)
+    }
+
+    /// Moves the ETH of every retired owner with a sweep owed to the current
+    /// owner, and returns the sweeps that moved ETH.
+    ///
+    /// Fails with the first error if any sweep is still owed afterwards; use
+    /// [`RotatingSafe::sweep_all`] to see each result.
+    pub async fn sweep(&mut self) -> Result<Vec<SweepOutcome>> {
+        self.sweep_all().await?.into_result()
+    }
+
+    /// Carries out one owed sweep.
+    ///
+    /// Returns `None` if the balance does not cover the transfer fee, which
+    /// settles the sweep. The signed transfer is stored before its first
+    /// broadcast; a retry rebroadcasts the same bytes while the sender's nonce
+    /// is unchanged, and only signs a replacement (same nonce, higher fee,
+    /// lower amount) once the network fee has risen by an eighth.
+    async fn sweep_one(&mut self, due: SweepDue) -> Result<Option<SweepOutcome>> {
         let binding = self.binding()?;
-        let Some(due) = binding.sweep_due.clone() else {
-            return Ok(None);
-        };
         let to = binding.current.address();
         let from = due.from.address();
         let Some(signer) = self.signer_for(&due.from)? else {
@@ -919,7 +973,7 @@ where
             },
         };
         let Some(amount) = sweep_value(balance, gas, exact.max_fee_per_gas, reserve) else {
-            self.store.state.finish_sweep(&self.key, None)?;
+            self.store.state.finish_sweep(&self.key, from, None)?;
             self.store.save()?;
             return Ok(None);
         };
@@ -927,6 +981,7 @@ where
         let outer = sign_outer_tx(&signer, transfer(amount)).await?;
         self.store.state.set_signed_sweep(
             &self.key,
+            from,
             Some(SignedSweep {
                 tx_hash: outer.tx_hash,
                 nonce,
@@ -1054,18 +1109,46 @@ where
         })
     }
 
-    /// Sweeps the most recently retired owner even if no sweep was scheduled,
-    /// for example because sweeping was off when it was retired.
-    pub async fn sweep_retired(&mut self) -> Result<Option<SweepOutcome>> {
+    /// Schedules a sweep for every retired owner that still holds ETH and has
+    /// none owed yet, and returns how many were added.
+    ///
+    /// This picks up keys retired while sweeping was off. Only keys the wallet
+    /// (or [`RotationConfig::legacy_owner`]) can sign for are considered.
+    pub async fn schedule_retired_sweeps(&mut self) -> Result<usize> {
         let binding = self.binding()?;
-        if binding.sweep_due.is_none() {
-            let Some(last) = binding.history.last() else {
-                return Ok(None);
-            };
-            let from = last.owner;
-            self.store.state.schedule_sweep(&self.key, from)?;
+        let candidates: Vec<OwnerRef> = binding
+            .history
+            .iter()
+            .filter(|retired| retired.swept.is_none())
+            .map(|retired| retired.owner)
+            .filter(|owner| !binding.sweep_due.iter().any(|due| due.from == *owner))
+            .collect();
+        let mut added = 0;
+        for owner in candidates {
+            if self.signer_for(&owner)?.is_none() {
+                continue;
+            }
+            let balance = self
+                .provider
+                .get_balance(owner.address())
+                .await
+                .map_err(provider_error)?;
+            if !balance.is_zero() {
+                self.store.state.schedule_sweep(&self.key, owner)?;
+                added += 1;
+            }
+        }
+        if added > 0 {
             self.store.save()?;
         }
+        Ok(added)
+    }
+
+    /// Sweeps every retired owner that still holds ETH, whether or not a sweep
+    /// was scheduled for it, for example because sweeping was off when it was
+    /// retired.
+    pub async fn sweep_retired(&mut self) -> Result<Vec<SweepOutcome>> {
+        self.schedule_retired_sweeps().await?;
         self.sweep().await
     }
 
@@ -1100,7 +1183,7 @@ where
                 // sign a different transfer. An underpriced replacement means
                 // an earlier one is still pending: keep the record.
                 if class != RejectClass::Underpriced {
-                    self.store.state.set_signed_sweep(&self.key, None)?;
+                    self.store.state.set_signed_sweep(&self.key, from, None)?;
                     self.store.save()?;
                 }
                 Err(unconfirmed(format!("the node rejected it: {reason}")))
@@ -1121,7 +1204,7 @@ where
     ) -> Result<Option<SweepOutcome>> {
         if !success {
             // The nonce is used up; the next attempt has to sign afresh.
-            self.store.state.set_signed_sweep(&self.key, None)?;
+            self.store.state.set_signed_sweep(&self.key, from, None)?;
             self.store.save()?;
             return Err(Error::ExecutionFailed {
                 reason: format!("sweep transaction {tx_hash} reverted"),
@@ -1129,7 +1212,7 @@ where
         }
         self.store
             .state
-            .finish_sweep(&self.key, Some(Swept { tx_hash, amount }))?;
+            .finish_sweep(&self.key, from, Some(Swept { tx_hash, amount }))?;
         self.store.save()?;
         Ok(Some(SweepOutcome {
             tx_hash,

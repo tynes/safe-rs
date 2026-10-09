@@ -25,7 +25,7 @@ pub use plan::{
 #[cfg(feature = "hd-wallet")]
 pub use safe::{
     ExecOptions, PlannedSweep, RotatingSafe, RotationConfig, RotationOutcome, RotationStatus,
-    RotationTx, SweepOutcome, SyncReport, REBUILD_MARGIN,
+    RotationTx, SweepOutcome, SweepReport, SyncReport, REBUILD_MARGIN,
 };
 pub use state::{
     binding_key, Binding, CreationParams, Exposure, Observation, OwnerRef, PendingTx, Reserved,

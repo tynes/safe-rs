@@ -175,8 +175,10 @@ pub struct Binding {
     pub exposed: Option<Exposure>,
     /// A broadcast (or written out) transaction not yet seen on chain
     pub pending: Option<PendingTx>,
-    /// ETH still to be moved off a retired owner
-    pub sweep_due: Option<SweepDue>,
+    /// ETH still to be moved off retired owners, oldest first. An entry stays
+    /// until its sweep is done: a later rotation adds one, it never replaces one
+    #[serde(default)]
+    pub sweep_due: Vec<SweepDue>,
     /// Retired owners, oldest first
     pub history: Vec<Retired>,
     /// How the Safe was created, if this wallet created it
@@ -190,9 +192,16 @@ impl Binding {
             reserved: None,
             exposed: None,
             pending: None,
-            sweep_due: None,
+            sweep_due: Vec::new(),
             history: Vec::new(),
             creation: None,
+        }
+    }
+
+    /// Adds a sweep from `from`, unless one is already owed from it.
+    fn owe_sweep(&mut self, from: OwnerRef) {
+        if !self.sweep_due.iter().any(|due| due.from == from) {
+            self.sweep_due.push(SweepDue { from, signed: None });
         }
     }
 
@@ -423,10 +432,7 @@ impl RotationState {
             binding.reserved = None;
             binding.exposed = None;
             if sweep {
-                binding.sweep_due = Some(SweepDue {
-                    from: current,
-                    signed: None,
-                });
+                binding.owe_sweep(current);
             }
         } else {
             // An owner we did not rotate to: it may be an earlier key whose
@@ -439,21 +445,35 @@ impl RotationState {
         Ok(observation)
     }
 
-    /// Stores the signed sweep before it is first broadcast, or forgets it
-    /// (`None`) when the node turned it down and another one has to be signed.
-    pub fn set_signed_sweep(&mut self, key: &str, signed: Option<SignedSweep>) -> Result<()> {
-        match &mut self.binding_mut(key)?.sweep_due {
+    /// Stores the signed sweep from `from` before it is first broadcast, or
+    /// forgets it (`None`) when the node turned it down and another one has to
+    /// be signed.
+    pub fn set_signed_sweep(
+        &mut self,
+        key: &str,
+        from: Address,
+        signed: Option<SignedSweep>,
+    ) -> Result<()> {
+        let binding = self.binding_mut(key)?;
+        match binding
+            .sweep_due
+            .iter_mut()
+            .find(|due| due.from.address() == from)
+        {
             Some(due) => {
                 due.signed = signed;
                 Ok(())
             }
-            None => Err(Error::Rotation(format!("{key} has no sweep due"))),
+            None => Err(Error::Rotation(format!(
+                "{key} has no sweep due from {from}"
+            ))),
         }
     }
 
-    /// Schedules a sweep of `from`'s ETH to the current owner of `key`.
+    /// Schedules a sweep of `from`'s ETH to the current owner of `key`, unless
+    /// one is already owed.
     pub fn schedule_sweep(&mut self, key: &str, from: OwnerRef) -> Result<()> {
-        self.binding_mut(key)?.sweep_due = Some(SweepDue { from, signed: None });
+        self.binding_mut(key)?.owe_sweep(from);
         Ok(())
     }
 
@@ -472,17 +492,16 @@ impl RotationState {
         Ok(())
     }
 
-    /// Clears a due sweep, recording `swept` on the retired owner if ETH moved.
-    pub fn finish_sweep(&mut self, key: &str, swept: Option<Swept>) -> Result<()> {
+    /// Clears the sweep owed from `from`, recording `swept` on the retired
+    /// owner if ETH moved.
+    pub fn finish_sweep(&mut self, key: &str, from: Address, swept: Option<Swept>) -> Result<()> {
         let binding = self.binding_mut(key)?;
-        let Some(due) = binding.sweep_due.take() else {
-            return Ok(());
-        };
+        binding.sweep_due.retain(|due| due.from.address() != from);
         if let Some(retired) = binding
             .history
             .iter_mut()
             .rev()
-            .find(|retired| retired.owner == due.from)
+            .find(|retired| retired.owner.address() == from)
         {
             retired.swept = swept;
         }
@@ -644,10 +663,10 @@ mod tests {
         assert_eq!(binding.pending, None);
         assert_eq!(
             binding.sweep_due,
-            Some(SweepDue {
+            vec![SweepDue {
                 from: derived(1),
                 signed: None
-            })
+            }]
         );
         assert_eq!(binding.history.len(), 1);
         assert_eq!(binding.history[0].observed_block, Some(11));
@@ -657,7 +676,7 @@ mod tests {
     fn no_sweep_is_scheduled_when_disabled() {
         let mut state = reserved_state();
         state.observe(KEY, &[addr(2)], None, lookup, false).unwrap();
-        assert_eq!(state.binding(KEY).unwrap().sweep_due, None);
+        assert!(state.binding(KEY).unwrap().sweep_due.is_empty());
     }
 
     #[test]
@@ -669,7 +688,7 @@ mod tests {
         assert_eq!(binding.current, derived(9));
         assert_eq!(binding.exposed, Some(Exposure::Adopted));
         assert_eq!(binding.reserved, None);
-        assert_eq!(binding.sweep_due, None);
+        assert!(binding.sweep_due.is_empty());
         assert_eq!(state.next_index, 10, "the adopted index is used up");
     }
 
@@ -716,15 +735,11 @@ mod tests {
             amount: U256::from(99),
             raw: Bytes::from_static(&[0x02]),
         };
-        state.set_signed_sweep(KEY, Some(signed.clone())).unwrap();
+        state
+            .set_signed_sweep(KEY, addr(1), Some(signed.clone()))
+            .unwrap();
         assert_eq!(
-            state
-                .binding(KEY)
-                .unwrap()
-                .sweep_due
-                .as_ref()
-                .unwrap()
-                .signed,
+            state.binding(KEY).unwrap().sweep_due[0].signed,
             Some(signed)
         );
 
@@ -732,11 +747,49 @@ mod tests {
             tx_hash: B256::repeat_byte(7),
             amount: U256::from(99),
         };
-        state.finish_sweep(KEY, Some(swept)).unwrap();
+        state.finish_sweep(KEY, addr(1), Some(swept)).unwrap();
         let binding = state.binding(KEY).unwrap();
-        assert_eq!(binding.sweep_due, None);
+        assert!(binding.sweep_due.is_empty());
         assert_eq!(binding.history[0].swept, Some(swept));
-        assert!(state.set_signed_sweep(KEY, None).is_err(), "nothing is due");
+        assert!(
+            state.set_signed_sweep(KEY, addr(1), None).is_err(),
+            "nothing is due"
+        );
+    }
+
+    #[test]
+    fn a_later_rotation_adds_to_the_owed_sweeps_instead_of_replacing_them() {
+        let mut state = reserved_state();
+        state.observe(KEY, &[addr(2)], None, lookup, true).unwrap();
+        let signed = SignedSweep {
+            tx_hash: B256::repeat_byte(7),
+            nonce: 1,
+            amount: U256::from(99),
+            raw: Bytes::from_static(&[0x02]),
+        };
+        state
+            .set_signed_sweep(KEY, addr(1), Some(signed.clone()))
+            .unwrap();
+
+        // Key 2 rotates to key 3 while the sweep from key 1 is still owed.
+        let next = state.allocate(derive).unwrap();
+        state.reserve(KEY, next).unwrap();
+        state.observe(KEY, &[addr(3)], None, lookup, true).unwrap();
+        let due = &state.binding(KEY).unwrap().sweep_due;
+        assert_eq!(due.len(), 2);
+        assert_eq!(due[0].from, derived(1), "oldest first");
+        assert_eq!(due[0].signed, Some(signed), "its signed transfer is kept");
+        assert_eq!(due[1].from, derived(2));
+
+        // Scheduling the same key again changes nothing.
+        state.schedule_sweep(KEY, derived(1)).unwrap();
+        assert_eq!(state.binding(KEY).unwrap().sweep_due.len(), 2);
+
+        // Each is finished on its own, in any order.
+        state.finish_sweep(KEY, addr(2), None).unwrap();
+        let due = &state.binding(KEY).unwrap().sweep_due;
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].from, derived(1));
     }
 
     #[test]

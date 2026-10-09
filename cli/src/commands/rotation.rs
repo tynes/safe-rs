@@ -148,18 +148,20 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
 
     // ETH still owed to the current owner from an earlier rotation: move it
     // first, since it is what pays for this transaction.
-    let sweep_owed = rotating.binding()?.sweep_due.is_some();
+    let sweep_owed = !rotating.binding()?.sweep_due.is_empty();
     if sweep_owed && !run.sweep.no_sweep && !run.simulate_only {
-        match rotating.sweep().await {
-            Ok(Some(sweep)) => console.line(format!(
+        let report = rotating.sweep_all().await?;
+        for sweep in &report.swept {
+            console.line(format!(
                 "Swept {} ETH owed from {} to {} (tx {})\n",
                 format_ether(sweep.amount),
                 sweep.from,
                 sweep.to,
                 sweep.tx_hash
-            )),
-            Ok(None) => {}
-            Err(e) => eprintln!("warning: a sweep is still owed: {e}"),
+            ));
+        }
+        for (from, error) in &report.failed {
+            eprintln!("warning: a sweep from {from} is still owed: {error}");
         }
     }
 
