@@ -7,7 +7,10 @@
 //! - Fluent builder API for multicall transactions
 //! - Local fork simulation using foundry-fork-db + revm
 //! - Seamless integration with alloy's `sol!` macro ecosystem
-//! - Single-owner (1/1 threshold) Safe support
+//! - Single-signer (threshold 1) Safe support
+//! - One-time owner keys: every transaction swaps the signing owner for a
+//!   fresh key ([`rotation`]; the `hd-wallet` feature adds the encrypted
+//!   phrase and `rotation::RotatingSafe`)
 //!
 //! ## Quick Start
 //!

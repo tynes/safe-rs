@@ -62,6 +62,11 @@ path = "examples/multicall_erc20.rs"
 name = "simulation_only"
 path = "examples/simulation_only.rs"
 
+[[example]]
+name = "rotating_transfer"
+path = "examples/rotating_transfer.rs"
+required-features = ["hd-wallet"]
+
 [workspace.lints.clippy]
 # Enable pedantic lints for stricter code quality
 # Priority -1 so individual lint settings override
