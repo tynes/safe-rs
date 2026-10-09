@@ -60,6 +60,7 @@ pub mod eoa;
 pub mod error;
 pub mod inspect;
 pub mod outer;
+pub mod rotation;
 pub mod safe;
 pub mod signing;
 pub mod simulation;
@@ -85,6 +86,7 @@ pub use envelope::{
 };
 pub use inspect::{is_safe_with, read_safe_state, ModuleList, ReadSafeStateOptions, SafeState};
 pub use outer::{decode_signed_outer_tx, sign_outer_tx, OuterTxParams, SignedOuterTx};
+pub use rotation::{OwnerSwap, RotationPlan};
 pub use simulation::{
     AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator, ParentHeader, SimBlockEnv,
     SimTx, SimulationResult, SpecId, TxChecks,

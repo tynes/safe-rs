@@ -261,12 +261,12 @@ impl LocalHarness {
 
     /// Signs the outer `execTransaction` from the owner with a fixed gas limit.
     pub async fn sign_exec(&self, prepared: &PreparedSafeTx, gas_limit: u64) -> SignedOuterTx {
-        let signed = prepared.sign(&self.owner).await.expect("sign safe tx");
-        let nonce = self
-            .provider
-            .get_transaction_count(self.owner.address())
+        self.sign_exec_with(prepared, &self.owner, &self.owner, gas_limit)
             .await
-            .expect("eoa nonce");
+    }
+
+    /// EIP-1559 fees that clear the next block's base fee.
+    pub async fn fees(&self) -> Eip1559Estimation {
         let base_fee = self
             .provider
             .get_block(BlockId::latest())
@@ -276,15 +276,40 @@ impl LocalHarness {
             .header
             .base_fee_per_gas
             .unwrap_or(1);
-        let fees = Eip1559Estimation {
+        Eip1559Estimation {
             max_fee_per_gas: u128::from(base_fee) * 2 + 1_000_000_000,
             max_priority_fee_per_gas: 1_000_000_000,
-        };
-        let params =
-            OuterTxParams::exec_transaction(&signed, self.owner.address(), nonce, gas_limit, fees);
-        sign_outer_tx(&self.owner, params)
+        }
+    }
+
+    /// Signs the Safe transaction with `owner` and the outer `execTransaction`
+    /// with `payer`, with a fixed gas limit.
+    pub async fn sign_exec_with(
+        &self,
+        prepared: &PreparedSafeTx,
+        owner: &PrivateKeySigner,
+        payer: &PrivateKeySigner,
+        gas_limit: u64,
+    ) -> SignedOuterTx {
+        let signed = prepared.sign(owner).await.expect("sign safe tx");
+        let nonce = self
+            .provider
+            .get_transaction_count(payer.address())
             .await
-            .expect("sign outer")
+            .expect("eoa nonce");
+        let fees = self.fees().await;
+        let params =
+            OuterTxParams::exec_transaction(&signed, payer.address(), nonce, gas_limit, fees);
+        sign_outer_tx(payer, params).await.expect("sign outer")
+    }
+
+    /// The Safe's owners, in list order.
+    pub async fn owners(&self, safe: Address) -> Vec<Address> {
+        ISafe::new(safe, &self.provider)
+            .getOwners()
+            .call()
+            .await
+            .expect("owners")
     }
 
     /// Broadcasts a signed outer transaction and waits for its receipt.

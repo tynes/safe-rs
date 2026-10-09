@@ -24,6 +24,7 @@ use common::{
     enable_module_call, one_shot_initcode, reverter_initcode, set_guard_call, LocalHarness,
 };
 use safe_rs::inspect::{enumerate_modules, read_safe_state, ReadSafeStateOptions};
+use safe_rs::rotation::{check_post_state, plan_rotation};
 use safe_rs::{
     broadcast_raw, decode_safe_outcome, wait_for_receipt, Account, BroadcastOutcome, Call,
     CallBuilder, ChainConfig, Eoa, Error, ForkSession, ISafe, ParentHeader, ReceiptWait,
@@ -712,4 +713,130 @@ async fn eoa_batch_simulation_is_stateful() {
     assert!(results[0].success);
     assert!(!results[1].success);
     assert!(builder.simulation_success().is_err());
+}
+
+async fn safe_state(h: &LocalHarness, safe: Address) -> safe_rs::SafeState {
+    read_safe_state(
+        &h.provider,
+        safe,
+        BlockId::latest(),
+        ReadSafeStateOptions::default(),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rotation_swaps_the_sole_owner_after_the_user_calls() {
+    let h = LocalHarness::new().await;
+    let safe = h.deploy_safe(40).await;
+    h.fund(safe, U256::from(1_000)).await;
+    let recipient = Address::repeat_byte(0x42);
+    let next = Address::repeat_byte(0x51);
+
+    let user = [Call::new(recipient, U256::from(5), Bytes::new())];
+    let plan = plan_rotation(
+        &safe_state(&h, safe).await,
+        h.chain_id,
+        h.addresses.multi_send_call_only,
+        &user,
+        &[(h.owner.address(), next)],
+    )
+    .unwrap();
+    let outer = h.sign_exec(&plan.prepared, OUTER_GAS).await;
+
+    // The simulated post-state is what the plan promised.
+    let mut post = session_at_latest(&h).await;
+    let mut simulated = post.transact_commit(strict_tx(&outer)).unwrap();
+    simulated.require_safe_success(safe, plan.prepared.safe_tx_hash);
+    assert!(simulated.success, "{:?}", simulated.revert_reason);
+    check_post_state(&mut post, &plan).unwrap();
+
+    let receipt = h.send(&outer).await;
+    assert!(decode_safe_outcome(&logs(&receipt), safe, plan.prepared.safe_tx_hash).is_success());
+    assert_eq!(h.owners(safe).await, vec![next]);
+    assert_eq!(
+        h.provider.get_balance(recipient).await.unwrap(),
+        U256::from(5)
+    );
+
+    // The rotated-out key no longer authorizes anything.
+    let stale = h
+        .prepare(
+            safe,
+            &[Call::call(safe, Bytes::new())],
+            SafeTxGasPolicy::Zero,
+        )
+        .await;
+    let stale_outer = h.sign_exec(&stale, OUTER_GAS).await;
+    let rejected = session_at_latest(&h)
+        .await
+        .transact(strict_tx(&stale_outer))
+        .unwrap();
+    assert!(!rejected.success);
+    assert!(
+        rejected
+            .revert_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("GS026")),
+        "unexpected reason {:?}",
+        rejected.revert_reason
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rotation_of_the_middle_owner_keeps_list_order() {
+    let h = LocalHarness::new().await;
+    let first = Address::repeat_byte(0x61);
+    let last = Address::repeat_byte(0x62);
+    let next = Address::repeat_byte(0x63);
+    let safe = h
+        .deploy_safe_with(&[first, h.owner.address(), last], 1, 41)
+        .await;
+
+    let plan = plan_rotation(
+        &safe_state(&h, safe).await,
+        h.chain_id,
+        h.addresses.multi_send_call_only,
+        &[],
+        &[(h.owner.address(), next)],
+    )
+    .unwrap();
+    assert_eq!(plan.swaps[0].prev_owner, first);
+    assert_eq!(plan.prepared.params.to, safe, "rotation only: a direct self-call");
+
+    let outer = h.sign_exec(&plan.prepared, OUTER_GAS).await;
+    let receipt = h.send(&outer).await;
+    assert!(receipt.inner.inner.status());
+    assert_eq!(h.owners(safe).await, vec![first, next, last]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn post_state_check_catches_a_batch_target_without_code() {
+    let h = LocalHarness::new().await;
+    let safe = h.deploy_safe(42).await;
+    let next = Address::repeat_byte(0x71);
+    let codeless = Address::repeat_byte(0x99);
+
+    // A DELEGATECALL to an address with no code succeeds and does nothing, so
+    // the Safe reports success while the owner is unchanged.
+    let user = [Call::call(safe, Bytes::new())];
+    let plan = plan_rotation(
+        &safe_state(&h, safe).await,
+        h.chain_id,
+        codeless,
+        &user,
+        &[(h.owner.address(), next)],
+    )
+    .unwrap();
+    let outer = h.sign_exec(&plan.prepared, OUTER_GAS).await;
+
+    let mut post = session_at_latest(&h).await;
+    let mut simulated = post.transact_commit(strict_tx(&outer)).unwrap();
+    simulated.require_safe_success(safe, plan.prepared.safe_tx_hash);
+    assert!(simulated.success, "the Safe itself reports success");
+    assert!(matches!(
+        check_post_state(&mut post, &plan),
+        Err(Error::Rotation(_))
+    ));
 }

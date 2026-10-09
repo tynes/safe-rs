@@ -94,6 +94,7 @@ sol! {
         function setGuard(address guard) external;
         function setFallbackHandler(address handler) external;
         function addOwnerWithThreshold(address owner, uint256 _threshold) external;
+        function removeOwner(address prevOwner, address owner, uint256 _threshold) external;
         function swapOwner(address prevOwner, address oldOwner, address newOwner) external;
         function changeThreshold(uint256 _threshold) external;
 
@@ -113,6 +114,9 @@ sol! {
         );
         event EnabledModule(address indexed module);
         event ChangedGuard(address indexed guard);
+        event AddedOwner(address indexed owner);
+        event RemovedOwner(address indexed owner);
+        event ChangedThreshold(uint256 threshold);
         event ChangedFallbackHandler(address indexed handler);
     }
 
