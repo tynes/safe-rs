@@ -32,6 +32,15 @@ pub enum Commands {
 
     /// Deploy a new Safe deterministically (same address across chains)
     Create(CreateArgs),
+
+    /// Swap the Safe's owner for the HD wallet's next unused key, with no other
+    /// calls. Also moves an existing Safe onto the wallet (--from-*) and retires
+    /// a key after a failed transaction
+    Rotate(Box<RotateArgs>),
+
+    /// Manage HD wallets: the encrypted phrase that one-time owner keys come from
+    #[command(subcommand)]
+    Wallet(WalletCommand),
 }
 
 #[derive(Args, Clone)]
@@ -217,8 +226,22 @@ pub struct SendArgs {
     #[arg(long)]
     pub no_confirm: bool,
 
+    /// Use the Safe's owner key once: append a swap of the owner for the next
+    /// unused key of --hd-wallet, then move the old key's ETH to the new one
+    #[arg(long, conflicts_with_all = ["skip_simulation", "safe_tx_gas", "multi_send", "nonce"])]
+    pub rotate: bool,
+
+    #[command(flatten)]
+    pub hd: HdArgs,
+
+    #[command(flatten)]
+    pub sweep: SweepArgs,
+
     #[command(flatten)]
     pub wallet: WalletArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
 
     #[command(flatten)]
     pub payer: PayerArgs,
@@ -273,6 +296,9 @@ pub struct InfoArgs {
 
     #[command(flatten)]
     pub wallet: WalletArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
 }
 
 #[derive(Parser, Clone)]
@@ -316,8 +342,229 @@ pub struct CreateArgs {
     #[arg(long)]
     pub no_confirm: bool,
 
+    /// Deploy the same Safe an HD wallet created on another chain, given as
+    /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
+    /// must be rotated right away
+    #[arg(long, value_name = "CHAIN_ID:SAFE", requires = "hd_wallet", conflicts_with_all = ["owners", "salt_nonce"])]
+    pub same_as: Option<String>,
+
+    #[command(flatten)]
+    pub hd: HdArgs,
+
+    #[command(flatten)]
+    pub sweep: SweepArgs,
+
     #[command(flatten)]
     pub wallet: WalletArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+
+    #[command(flatten)]
+    pub payer: PayerArgs,
+}
+
+#[derive(Parser, Clone)]
+pub struct RotateArgs {
+    #[command(flatten)]
+    pub safe: SafeArgs,
+
+    #[command(flatten)]
+    pub rpc: RpcArgs,
+
+    #[command(flatten)]
+    pub hd: HdArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+
+    /// Private key of the Safe's current owner, to move the Safe onto the HD wallet
+    #[arg(long, value_name = "KEY", conflicts_with_all = ["from_keystore", "from_interactive"])]
+    pub from_private_key: Option<String>,
+
+    /// Keystore of the Safe's current owner (its password is prompted for)
+    #[arg(long, value_name = "PATH", conflicts_with = "from_interactive")]
+    pub from_keystore: Option<PathBuf>,
+
+    /// Prompt for the private key of the Safe's current owner
+    #[arg(long)]
+    pub from_interactive: bool,
+
+    #[command(flatten)]
+    pub sweep: SweepArgs,
+
+    /// Move the whole ETH balance of the --from-* key to the new owner without
+    /// asking. Needed with --no-confirm or --json, where no prompt shows the amount
+    #[arg(long, conflicts_with = "no_sweep")]
+    pub sweep_legacy: bool,
+
+    #[command(flatten)]
+    pub payer: PayerArgs,
+
+    /// Only simulate, don't sign off or broadcast the transaction
+    #[arg(long)]
+    pub simulate_only: bool,
+
+    /// Gas limit of the outer transaction (default: simulated gas + 20%)
+    #[arg(long)]
+    pub gas_limit: Option<u64>,
+
+    /// maxFeePerGas of the outer transaction in wei (default: node estimate)
+    #[arg(long)]
+    pub max_fee_per_gas: Option<u128>,
+
+    /// maxPriorityFeePerGas of the outer transaction in wei (default: node estimate)
+    #[arg(long)]
+    pub max_priority_fee_per_gas: Option<u128>,
+
+    /// Seconds to wait for the receipt after broadcasting
+    #[arg(long, default_value_t = 120)]
+    pub timeout: u64,
+
+    /// Print call traces of the simulated transaction
+    #[arg(long)]
+    pub trace: bool,
+
+    #[command(flatten)]
+    pub sim: SimArgs,
+
+    /// MultiSendCallOnly address (default: canonical v1.4.1)
+    #[arg(long)]
+    pub multi_send_call_only: Option<Address>,
+
+    /// Skip confirmation prompt
+    #[arg(long)]
+    pub no_confirm: bool,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum WalletCommand {
+    /// Create an HD wallet from a new 24-word phrase and encrypt it to disk
+    New(WalletNewArgs),
+
+    /// Encrypt an existing BIP-39 phrase to disk as an HD wallet
+    Import(WalletImportArgs),
+
+    /// List the HD wallets on disk
+    List,
+
+    /// Print the wallet's funding address, or the address of one owner key
+    Address(WalletAddressArgs),
+
+    /// Show which keys own which Safe, and where to send gas money
+    Status(WalletStatusArgs),
+
+    /// Rebuild the record of used keys for a Safe from the chain
+    Sync(WalletSyncArgs),
+
+    /// Move the ETH left on a Safe's last retired owner key to its current owner
+    Sweep(WalletSweepArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct WalletNewArgs {
+    /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
+    pub name: String,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+}
+
+#[derive(Args, Clone)]
+pub struct WalletImportArgs {
+    /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
+    pub name: String,
+
+    /// File holding the phrase (default: prompt, without echo)
+    #[arg(long, value_name = "PATH")]
+    pub phrase_file: Option<PathBuf>,
+
+    /// First index to use for owner keys, for a phrase whose lower indices
+    /// were already used by another wallet
+    #[arg(long, value_name = "INDEX")]
+    pub start_index: Option<u32>,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+}
+
+#[derive(Args, Clone)]
+pub struct WalletAddressArgs {
+    #[command(flatten)]
+    pub hd: HdArgs,
+
+    /// Owner key index (default: the funding address, which needs no password)
+    #[arg(long)]
+    pub index: Option<u32>,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+}
+
+#[derive(Args, Clone)]
+pub struct WalletStatusArgs {
+    #[command(flatten)]
+    pub hd: HdArgs,
+
+    /// Only show this Safe
+    #[arg(long)]
+    pub safe: Option<Address>,
+}
+
+#[derive(Args, Clone)]
+pub struct WalletSyncArgs {
+    #[command(flatten)]
+    pub hd: HdArgs,
+
+    #[command(flatten)]
+    pub safe: SafeArgs,
+
+    #[command(flatten)]
+    pub rpc: RpcArgs,
+
+    /// How many wallet indices to derive and compare
+    #[arg(long, default_value_t = 1000)]
+    pub scan_limit: u32,
+
+    /// Also read the Safe's owner events from this block on, to restore its
+    /// history and find keys that never paid for gas. Use the Safe's
+    /// deployment block or earlier
+    #[arg(long, value_name = "BLOCK")]
+    pub from_block: Option<u64>,
+
+    /// Blocks per eth_getLogs request
+    #[arg(long, default_value_t = 10_000, requires = "from_block")]
+    pub chunk: u64,
+
+    /// MultiSendCallOnly address (default: canonical v1.4.1)
+    #[arg(long)]
+    pub multi_send_call_only: Option<Address>,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+}
+
+#[derive(Args, Clone)]
+pub struct WalletSweepArgs {
+    #[command(flatten)]
+    pub hd: HdArgs,
+
+    #[command(flatten)]
+    pub safe: SafeArgs,
+
+    #[command(flatten)]
+    pub rpc: RpcArgs,
+
+    /// Wei to leave on the retired owner (default: what the chain charges outside gas)
+    #[arg(long, value_name = "WEI")]
+    pub sweep_reserve: Option<U256>,
+
+    /// Seconds to wait for the receipt after broadcasting
+    #[arg(long, default_value_t = 120)]
+    pub timeout: u64,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
 }
 
 #[derive(Parser, Clone)]
@@ -326,13 +573,9 @@ pub struct WalletArgs {
     #[arg(long, env = "PRIVATE_KEY")]
     pub private_key: Option<String>,
 
-    /// Path to keystore file
+    /// Path to a keystore file (Web3 Secret Storage v3, as written by `cast wallet import`)
     #[arg(long)]
     pub keystore: Option<String>,
-
-    /// Keystore password
-    #[arg(long)]
-    pub password: Option<String>,
 
     /// Prompt for private key interactively
     #[arg(short, long)]
@@ -346,11 +589,46 @@ impl WalletArgs {
     }
 }
 
+/// How the password of a keystore or HD wallet is supplied (default: a prompt).
+#[derive(Args, Clone, Default)]
+pub struct PasswordArgs {
+    /// File holding the keystore or HD wallet password
+    #[arg(long, env = "SAFE_PASSWORD_FILE", value_name = "PATH")]
+    pub password_file: Option<PathBuf>,
+
+    /// Keystore or HD wallet password. Visible in the process list and shell
+    /// history: prefer --password-file or the prompt
+    #[arg(long)]
+    pub password: Option<String>,
+}
+
+/// The HD wallet one-time owner keys are derived from.
+#[derive(Args, Clone, Default)]
+pub struct HdArgs {
+    /// HD wallet: a name under ~/.safe-rs/wallets, or the path of a mnemonic keystore
+    #[arg(long, env = "SAFE_HD_WALLET", value_name = "NAME|PATH")]
+    pub hd_wallet: Option<String>,
+}
+
+/// What happens to a retired owner key's ETH.
+#[derive(Args, Clone, Default)]
+pub struct SweepArgs {
+    /// Leave the retired owner key's ETH where it is, instead of moving it to
+    /// the next owner
+    #[arg(long)]
+    pub no_sweep: bool,
+
+    /// Wei to leave on the retired owner key when sweeping (default: what the
+    /// chain charges outside gas, which is nothing on most chains)
+    #[arg(long, value_name = "WEI", conflicts_with = "no_sweep")]
+    pub sweep_reserve: Option<U256>,
+}
+
 /// The account that sends the outer transaction and pays for gas.
 #[derive(Args, Clone)]
 pub struct PayerArgs {
     /// Private key that sends the outer transaction and pays for gas, instead
-    /// of the owner key
+    /// of the owner key (with --hd-wallet on create: instead of the funding key)
     #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY")]
     pub payer_private_key: Option<String>,
 }
@@ -408,5 +686,123 @@ mod tests {
     fn cli_definition_is_valid() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    const TO: &str = "0x0000000000000000000000000000000000000042";
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut all = vec!["safe"];
+        all.extend_from_slice(args);
+        Cli::try_parse_from(all)
+    }
+
+    fn send(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "send",
+            TO,
+            "--safe",
+            SAFE,
+            "--rpc-url",
+            "http://localhost:8545",
+        ];
+        args.extend_from_slice(extra);
+        parse(&args)
+    }
+
+    #[test]
+    fn rotate_excludes_the_options_that_would_weaken_it() {
+        assert!(send(&["--rotate", "--hd-wallet", "w"]).is_ok());
+        // The batch target stays configurable; it must be the call-only one.
+        assert!(send(&["--rotate", "--multi-send-call-only", TO]).is_ok());
+        for conflicting in [
+            &["--skip-simulation"][..],
+            &["--safe-tx-gas", "100000"],
+            &["--multi-send", TO],
+            &["--nonce", "3"],
+        ] {
+            let mut args = vec!["--rotate"];
+            args.extend_from_slice(conflicting);
+            assert!(send(&args).is_err(), "{conflicting:?} must conflict");
+        }
+        assert!(send(&["--rotate", "--no-sweep"]).is_ok());
+        assert!(send(&["--rotate", "--sweep-reserve", "1000"]).is_ok());
+        assert!(
+            send(&["--rotate", "--no-sweep", "--sweep-reserve", "1"]).is_err(),
+            "a reserve without a sweep is a contradiction"
+        );
+    }
+
+    fn rotate(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "rotate",
+            "--safe",
+            SAFE,
+            "--rpc-url",
+            "http://localhost:8545",
+            "--hd-wallet",
+            "w",
+        ];
+        args.extend_from_slice(extra);
+        parse(&args)
+    }
+
+    #[test]
+    fn rotate_takes_one_legacy_key_source_and_one_sweep_choice() {
+        assert!(rotate(&[]).is_ok());
+        assert!(rotate(&["--from-private-key", "0x01"]).is_ok());
+        assert!(rotate(&["--from-interactive", "--sweep-legacy"]).is_ok());
+        assert!(rotate(&["--from-private-key", "0x01", "--from-interactive"]).is_err());
+        assert!(rotate(&["--from-private-key", "0x01", "--from-keystore", "k.json"]).is_err());
+        assert!(rotate(&["--from-keystore", "k.json", "--from-interactive"]).is_err());
+        assert!(rotate(&["--sweep-legacy", "--no-sweep"]).is_err());
+    }
+
+    #[test]
+    fn wallet_and_create_options_parse() {
+        assert!(parse(&["wallet", "new", "treasury"]).is_ok());
+        assert!(parse(&["wallet", "import", "treasury", "--start-index", "5"]).is_ok());
+        assert!(parse(&["wallet", "list"]).is_ok());
+        assert!(parse(&["wallet", "status", "--hd-wallet", "w"]).is_ok());
+        let sync = [
+            "wallet",
+            "sync",
+            "--hd-wallet",
+            "w",
+            "--safe",
+            SAFE,
+            "--rpc-url",
+            "http://localhost:8545",
+        ];
+        assert!(parse(&sync).is_ok());
+        let mut chunk_only = sync.to_vec();
+        chunk_only.extend(["--chunk", "500"]);
+        assert!(parse(&chunk_only).is_err(), "--chunk needs --from-block");
+        chunk_only.extend(["--from-block", "0"]);
+        assert!(parse(&chunk_only).is_ok());
+
+        let create = ["create", "--rpc-url", "http://localhost:8545"];
+        let with = |extra: &[&str]| {
+            let mut args = create.to_vec();
+            args.extend_from_slice(extra);
+            parse(&args)
+        };
+        let same_as = format!("10:{SAFE}");
+        assert!(with(&["--hd-wallet", "w", "--same-as", &same_as]).is_ok());
+        assert!(
+            with(&["--same-as", &same_as]).is_err(),
+            "--same-as needs --hd-wallet"
+        );
+        assert!(
+            with(&[
+                "--hd-wallet",
+                "w",
+                "--same-as",
+                &same_as,
+                "--salt-nonce",
+                "7"
+            ])
+            .is_err(),
+            "the salt comes from the original Safe"
+        );
     }
 }

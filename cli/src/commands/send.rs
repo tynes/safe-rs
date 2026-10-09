@@ -13,13 +13,14 @@ use safe_rs::{
 
 use crate::bundle::load_bundle;
 use crate::cli::SendArgs;
-use crate::commands::{fork_session, http_provider, HttpProvider};
+use crate::commands::rotation::{self, RotationRun};
+use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
 use crate::output::{
     calls_summary, confirm_prompt, Console, ExecutionOutput, Report, SignedTxOutput,
     SimulationOutput,
 };
 use crate::sig_parser::{encode_function_call, parse_call_spec};
-use crate::wallet::{create_payer, create_signer};
+use crate::wallet::{create_payer, create_signer, load_hd_wallet, open_state};
 
 /// How often to poll for the receipt after broadcasting.
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -34,6 +35,19 @@ fn emit(report: &impl Report, json: bool, console: Console) {
 }
 
 pub async fn run(args: SendArgs, json: bool) -> Result<()> {
+    if args.rotate {
+        return Box::pin(run_rotating(args, json)).await;
+    }
+    if args.sweep.no_sweep || args.sweep.sweep_reserve.is_some() {
+        bail!("--no-sweep and --sweep-reserve only apply with --rotate");
+    }
+    if args.hd.hd_wallet.is_some() && !args.wallet.is_set() {
+        bail!(
+            "--hd-wallet needs --rotate: sending without rotating would publish an owner \
+             key and leave it in charge of the Safe"
+        );
+    }
+
     let calls = build_calls(&args)?;
     if calls.is_empty() {
         return Err(eyre!("No calls specified"));
@@ -48,7 +62,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
 
     // The owner signs the Safe transaction; the payer sends the outer
     // transaction. They are the same key unless a payer was given.
-    let signer = create_signer(&args.wallet)?;
+    let signer = create_signer(&args.wallet, &args.password)?;
     let payer = create_payer(&args.payer)?.unwrap_or_else(|| signer.clone());
     let from = payer.address();
     let provider = http_provider(&args.rpc.rpc_url);
@@ -89,7 +103,12 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     console.line(calls_summary(&calls));
     console.line("");
 
-    let fees = outer_fees(&provider, &args).await?;
+    let fees = outer_fees(
+        &provider,
+        args.max_fee_per_gas,
+        args.max_priority_fee_per_gas,
+    )
+    .await?;
     let (eoa_nonce, gas_limit) = if args.skip_simulation {
         console.line("Skipping simulation (--skip-simulation)\n");
         let nonce = provider.get_transaction_count(from).await?;
@@ -205,6 +224,48 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `send --rotate`: the user's calls followed by a swap of the owner for the HD
+/// wallet's next unused key, then a sweep of the old key's ETH.
+async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
+    if args.wallet.is_set() {
+        bail!(
+            "with --rotate the owner key comes from --hd-wallet: remove --private-key, \
+             --keystore and --interactive, and unset PRIVATE_KEY"
+        );
+    }
+    let calls = build_calls(&args)?;
+    if calls.is_empty() {
+        return Err(eyre!("No calls specified"));
+    }
+    let payer = create_payer(&args.payer)?;
+    let wallet = load_hd_wallet(&args.hd, &args.password)?;
+    let store = open_state(&wallet)?;
+    rotation::run(RotationRun {
+        rpc_url: &args.rpc.rpc_url,
+        safe: args.safe.safe,
+        wallet,
+        store,
+        legacy_owner: None,
+        sweep_legacy: false,
+        payer,
+        sweep: &args.sweep,
+        calls,
+        multi_send_call_only: args.multi_send_call_only,
+        sim: &args.sim,
+        gas_limit: args.gas_limit,
+        max_fee_per_gas: args.max_fee_per_gas,
+        max_priority_fee_per_gas: args.max_priority_fee_per_gas,
+        timeout: args.timeout,
+        trace: args.trace,
+        simulate_only: args.simulate_only,
+        raw_out: args.raw_out.clone(),
+        no_submit: args.no_submit,
+        no_confirm: args.no_confirm,
+        json,
+    })
+    .await
+}
+
 /// Simulates the exact outer `execTransaction` the CLI would sign, in the block
 /// after `--block`, with all validity checks (nonce, fees, balance).
 ///
@@ -220,25 +281,6 @@ async fn simulate(
 ) -> Result<ExecSimulation> {
     let session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
     Ok(simulate_exec(&session, signed, from, fees, args.gas_limit)?)
-}
-
-/// EIP-1559 fees for the outer transaction: the node estimate, with any
-/// `--max-fee-per-gas` / `--max-priority-fee-per-gas` override applied.
-async fn outer_fees(provider: &HttpProvider, args: &SendArgs) -> Result<Eip1559Estimation> {
-    let mut fees = match (args.max_fee_per_gas, args.max_priority_fee_per_gas) {
-        (Some(max_fee_per_gas), Some(max_priority_fee_per_gas)) => Eip1559Estimation {
-            max_fee_per_gas,
-            max_priority_fee_per_gas,
-        },
-        _ => provider.estimate_eip1559_fees().await?,
-    };
-    if let Some(max_fee) = args.max_fee_per_gas {
-        fees.max_fee_per_gas = max_fee;
-    }
-    if let Some(priority_fee) = args.max_priority_fee_per_gas {
-        fees.max_priority_fee_per_gas = priority_fee;
-    }
-    Ok(fees)
 }
 
 /// `eth_estimateGas` for the outer transaction, plus 20%.

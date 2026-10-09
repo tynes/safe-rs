@@ -14,7 +14,7 @@ name = "safe"
 path = "src/main.rs"
 
 [dependencies]
-safe-rs = { path = "..", version = "0.12" }
+safe-rs = { path = "..", version = "0.12", features = ["hd-wallet"] }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 alloy = { version = "2.5", features = ["full", "signer-local"] }
@@ -29,6 +29,12 @@ dialoguer = "0.11"
 hex = "0.4"
 rpassword = "7"
 url = "2"
+rand = "0.8"
+zeroize = "1"
+
+[dev-dependencies]
+alloy = { version = "2.5", features = ["full", "signer-local", "node-bindings"] }
+tempfile = "3"
 
 [lints]
 workspace = true

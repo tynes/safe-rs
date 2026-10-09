@@ -7,7 +7,7 @@ use safe_rs::{
     WalletBuilder, WalletConfig,
 };
 
-use crate::cli::{InfoArgs, SafeVersion, WalletArgs};
+use crate::cli::{InfoArgs, PasswordArgs, SafeVersion, WalletArgs};
 use crate::commands::{http_provider, HttpProvider};
 use crate::output::{Report, SafeInfoOutput};
 use crate::wallet::create_signer;
@@ -22,7 +22,7 @@ pub async fn run(args: InfoArgs, json: bool) -> Result<()> {
         Some(safe) => {
             read_safe_state(&provider, safe, block, ReadSafeStateOptions::default()).await?
         }
-        None => read_default_safe(&provider, &args.wallet, block).await?,
+        None => read_default_safe(&provider, &args.wallet, &args.password, block).await?,
     };
 
     SafeInfoOutput::new(state, header.number, header.hash).print(json);
@@ -37,15 +37,16 @@ pub async fn run(args: InfoArgs, json: bool) -> Result<()> {
 async fn read_default_safe(
     provider: &HttpProvider,
     wallet: &WalletArgs,
+    password: &PasswordArgs,
     block: BlockId,
 ) -> Result<SafeState> {
     if !wallet.is_set() {
         bail!(
-            "No Safe specified. Pass its address, or --private-key or --interactive to use \
-             the signer's default Safe"
+            "No Safe specified. Pass its address, or --private-key, --keystore or \
+             --interactive to use the signer's default Safe"
         );
     }
-    let signer = create_signer(wallet)?;
+    let signer = create_signer(wallet, password)?;
     let signer_address = signer.address();
     let builder = WalletBuilder::new(provider.clone(), signer);
 

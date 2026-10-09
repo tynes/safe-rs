@@ -274,8 +274,8 @@ where
     /// Opens `safe` and reconciles the state with the chain.
     ///
     /// A Safe the state does not know yet is adopted if one of its owners is a
-    /// key of the wallet, or is [`RotationConfig::legacy_owner`]. Any sweep
-    /// still owed is attempted; failures end up in [`RotatingSafe::warnings`].
+    /// key of the wallet, or is [`RotationConfig::legacy_owner`]. Opening only
+    /// reads from the chain; it sends nothing.
     pub async fn open_with(
         provider: P,
         safe: Address,
@@ -425,7 +425,10 @@ where
 
     /// Updates the state from the chain: who owns the Safe, whether a pending
     /// transaction can still be mined, and whether this wallet's keys are in
-    /// use elsewhere. Then attempts any sweep still owed.
+    /// use elsewhere.
+    ///
+    /// This only reads. A rotation it discovers schedules a sweep, which
+    /// [`RotatingSafe::sweep`] or the next [`RotatingSafe::execute`] carries out.
     pub async fn reconcile(&mut self) -> Result<Observation> {
         let head = ParentHeader::fetch(&self.provider, BlockId::latest()).await?;
         let owners = self.owners_at(head.block_id()).await?;
@@ -437,7 +440,6 @@ where
         let warnings = self.store.state.cross_check();
         self.warnings.extend(warnings);
         self.store.save()?;
-        self.sweep_or_warn().await;
         Ok(observation)
     }
 
@@ -554,6 +556,9 @@ where
     /// sets of calls must not be live at once; a rotation-only transaction is
     /// allowed), if the simulation reverts, or if the simulated owner list is
     /// not exactly the planned one.
+    ///
+    /// Run [`RotatingSafe::sweep`] first if a sweep is owed: until then the
+    /// current owner may not hold the ETH to pay for this.
     pub async fn prepare(&mut self, calls: &[Call], options: ExecOptions) -> Result<RotationTx> {
         let binding = self.binding()?;
         let current = binding.current;
@@ -603,11 +608,16 @@ where
                 .map_err(provider_error)?,
         };
 
+        let owed = if self.binding()?.sweep_due.is_some() {
+            " (a sweep to it is still owed: run it first)"
+        } else {
+            ""
+        };
         let session = self.session(&head);
         let simulated = simulate_exec(&session, &signed, payer.address(), fees, options.gas_limit)
             .map_err(|e| match e {
                 Error::Revm(reason) if reason.contains("LackOfFund") => Error::Rotation(format!(
-                    "{} cannot pay for this transaction: fund it, or use a separate payer",
+                    "{} cannot pay for this transaction: fund it, or use a separate payer{owed}",
                     payer.address()
                 )),
                 other => other,
@@ -773,7 +783,12 @@ where
     }
 
     /// Prepares and submits `calls` followed by the owner swap.
+    ///
+    /// A sweep still owed from an earlier rotation runs first, so the current
+    /// owner has its gas; if it fails, that is a warning and the transaction is
+    /// attempted anyway.
     pub async fn execute(&mut self, calls: &[Call]) -> Result<RotationOutcome> {
+        self.sweep_or_warn().await;
         let tx = self.prepare(calls, ExecOptions::default()).await?;
         self.submit(tx).await
     }

@@ -330,14 +330,20 @@ async fn a_rotation_completed_while_away_is_picked_up_on_reopen() {
     drop(rotating);
     front_run(&h, &tx.signed).await;
 
-    let rotating = open(&h, safe, &state).await;
+    let mut rotating = open(&h, safe, &state).await;
     let binding = rotating.binding().unwrap();
     assert_eq!(binding.current.index(), Some(2));
     assert_eq!(binding.pending, None);
     assert_eq!(binding.exposed, None);
-    assert_eq!(binding.sweep_due, None, "the owed sweep ran on open");
+    assert!(binding.sweep_due.is_some(), "opening only reads");
+    assert!(balance(&h, key(1)).await > U256::ZERO);
+
+    // The next transaction carries out the owed sweep before anything else.
+    let outcome = rotating.rotate().await.unwrap();
+    assert_eq!(outcome.status, RotationStatus::Rotated);
     assert_eq!(balance(&h, key(1)).await, U256::ZERO);
-    assert!(balance(&h, key(2)).await > U256::ZERO);
+    assert_eq!(balance(&h, key(2)).await, U256::ZERO);
+    assert!(balance(&h, key(3)).await > U256::ZERO);
     assert!(rotating.warnings().is_empty(), "{:?}", rotating.warnings());
 }
 
@@ -384,12 +390,14 @@ async fn a_crash_after_broadcast_is_reconciled_from_the_chain() {
 
     h.provider.anvil_mine(Some(1), None).await.unwrap();
     h.provider.anvil_set_auto_mine(true).await.unwrap();
-    let rotating = open(&h, safe, &state).await;
+    let mut rotating = open(&h, safe, &state).await;
     let binding = rotating.binding().unwrap();
     assert_eq!(binding.current.index(), Some(2));
     assert_eq!(binding.pending, None);
     assert_eq!(binding.exposed, None);
     assert_eq!(h.owners(safe).await, vec![key(2)]);
+    let swept = rotating.sweep().await.unwrap().expect("the owed sweep");
+    assert_eq!((swept.from, swept.to), (key(1), key(2)));
     assert_eq!(balance(&h, key(1)).await, U256::ZERO);
     assert_eq!(balance(&h, Address::repeat_byte(0x42)).await, U256::from(1));
 }
@@ -422,15 +430,23 @@ async fn a_sweep_interrupted_after_broadcast_lands_exactly_once() {
     h.provider.anvil_set_auto_mine(false).await.unwrap();
     rotating.reconcile().await.unwrap();
     assert_eq!(rotating.binding().unwrap().current.index(), Some(2));
+    let unconfirmed = rotating.sweep().await;
+    assert!(
+        matches!(unconfirmed, Err(Error::Unconfirmed { .. })),
+        "{unconfirmed:?}"
+    );
     let due = rotating.binding().unwrap().sweep_due.clone().expect("owed");
     let stored = due
         .signed
         .expect("the signed transfer is saved before broadcast");
-    assert_eq!(rotating.warnings().len(), 1, "{:?}", rotating.warnings());
     drop(rotating);
 
-    // Reopening rebroadcasts the same bytes instead of signing a second transfer.
-    let rotating = open_with(&h, safe, &state, short).await;
+    // Retrying rebroadcasts the same bytes instead of signing a second transfer.
+    let mut rotating = open_with(&h, safe, &state, short).await;
+    assert!(matches!(
+        rotating.sweep().await,
+        Err(Error::Unconfirmed { tx_hash, .. }) if tx_hash == stored.tx_hash
+    ));
     let again = rotating
         .binding()
         .unwrap()
@@ -442,12 +458,16 @@ async fn a_sweep_interrupted_after_broadcast_lands_exactly_once() {
 
     h.provider.anvil_mine(Some(1), None).await.unwrap();
     h.provider.anvil_set_auto_mine(true).await.unwrap();
-    let rotating = open(&h, safe, &state).await;
-    let binding = rotating.binding().unwrap();
-    assert_eq!(binding.sweep_due, None);
-    let swept = binding.history[0].swept.expect("recorded");
+    let mut rotating = open(&h, safe, &state).await;
+    let swept = rotating.sweep().await.unwrap().expect("found mined");
     assert_eq!(swept.tx_hash, stored.tx_hash);
     assert_eq!(swept.amount, stored.amount);
+    let binding = rotating.binding().unwrap();
+    assert_eq!(binding.sweep_due, None);
+    assert_eq!(
+        binding.history[0].swept.expect("recorded").tx_hash,
+        stored.tx_hash
+    );
     assert_eq!(balance(&h, key(1)).await, U256::ZERO);
     assert_eq!(balance(&h, key(2)).await, stored.amount);
     assert_eq!(
@@ -585,13 +605,16 @@ async fn an_owed_sweep_that_cannot_run_is_a_warning_not_a_failure() {
     drop(store);
 
     let mut rotating = open(&h, safe, &state).await;
-    assert_eq!(rotating.warnings().len(), 1, "{:?}", rotating.warnings());
     assert!(
         rotating.binding().unwrap().sweep_due.is_some(),
         "still owed"
     );
+    assert!(matches!(rotating.sweep().await, Err(Error::Rotation(_))));
+
     let outcome = rotating.rotate().await.unwrap();
     assert_eq!(outcome.status, RotationStatus::Rotated);
+    assert_eq!(rotating.warnings().len(), 1, "{:?}", rotating.warnings());
+    assert!(rotating.warnings()[0].contains("still owed"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

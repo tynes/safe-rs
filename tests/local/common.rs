@@ -23,11 +23,19 @@ use safe_rs::{
 /// Anvil's default deterministic CREATE2 deployer (Arachnid).
 pub const CREATE2_DEPLOYER: Address = address!("0x4e59b44847b379578588920cA78FbF26c0B4956C");
 
+/// The vendored Safe artifacts. The harness is also compiled into the CLI
+/// crate's tests, whose manifest is one directory down.
+fn fixtures_dir() -> std::path::PathBuf {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    [manifest.to_path_buf(), manifest.join("..")]
+        .into_iter()
+        .map(|dir| dir.join("tests/fixtures/safe-1.4.1"))
+        .find(|dir| dir.is_dir())
+        .expect("Safe fixtures directory")
+}
+
 fn artifact_bytecode(name: &str) -> Bytes {
-    let path = format!(
-        "{}/tests/fixtures/safe-1.4.1/{name}.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = fixtures_dir().join(format!("{name}.json"));
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("read artifact"))
             .expect("parse artifact");
