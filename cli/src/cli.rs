@@ -1,9 +1,10 @@
+use std::fmt;
 use std::path::PathBuf;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, U256};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use safe_rs::SpecId;
+use safe_rs::{ChainAddresses, SpecId};
 use url::Url;
 
 #[derive(Parser)]
@@ -71,8 +72,10 @@ pub enum EvmSpec {
     Osaka,
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug)]
+/// Safe versions `safe create` can deploy, newest first.
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
 pub enum SafeVersion {
+    #[default]
     #[value(name = "1.5.0")]
     V1_5_0,
     #[value(name = "1.4.1")]
@@ -86,6 +89,24 @@ impl From<EvmSpec> for SpecId {
             EvmSpec::Prague => SpecId::PRAGUE,
             EvmSpec::Osaka => SpecId::OSAKA,
         }
+    }
+}
+
+impl From<SafeVersion> for ChainAddresses {
+    fn from(version: SafeVersion) -> Self {
+        match version {
+            SafeVersion::V1_5_0 => ChainAddresses::v1_5_0(),
+            SafeVersion::V1_4_1 => ChainAddresses::v1_4_1(),
+        }
+    }
+}
+
+impl fmt::Display for SafeVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            SafeVersion::V1_5_0 => "1.5.0",
+            SafeVersion::V1_4_1 => "1.4.1",
+        })
     }
 }
 
@@ -234,8 +255,11 @@ pub struct CallArgs {
 
 #[derive(Parser, Clone)]
 pub struct InfoArgs {
-    #[command(flatten)]
-    pub safe: SafeArgs,
+    /// Safe contract address (default: the Safe that `safe create` deploys for
+    /// the signer when run without options; the newest Safe version that has
+    /// one)
+    #[arg(value_name = "SAFE")]
+    pub safe: Option<Address>,
 
     #[command(flatten)]
     pub rpc: RpcArgs,
@@ -243,6 +267,9 @@ pub struct InfoArgs {
     /// Block to read at: a number, hash or tag (default: latest)
     #[arg(long, value_parser = parse_block_id)]
     pub block: Option<BlockId>,
+
+    #[command(flatten)]
+    pub wallet: WalletArgs,
 }
 
 #[derive(Parser, Clone)]
@@ -278,8 +305,8 @@ pub struct CreateArgs {
     #[arg(long)]
     pub factory: Option<Address>,
 
-    /// Safe version to use (default: 1.5.0)
-    #[arg(long, value_enum, default_value = "1.5.0")]
+    /// Safe version to use
+    #[arg(long, value_enum, default_value_t)]
     pub safe_version: SafeVersion,
 
     /// Skip confirmation prompt
@@ -309,6 +336,13 @@ pub struct WalletArgs {
     pub interactive: bool,
 }
 
+impl WalletArgs {
+    /// Whether any wallet option was given.
+    pub fn is_set(&self) -> bool {
+        self.interactive || self.keystore.is_some() || self.private_key.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +354,42 @@ mod tests {
         let hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
         assert!(matches!(parse_block_id(hash).unwrap(), BlockId::Hash(_)));
         assert!(parse_block_id("nope").is_err());
+    }
+
+    const SAFE: &str = "0x1111111111111111111111111111111111111111";
+
+    fn parse_info(args: &[&str]) -> Result<InfoArgs, clap::Error> {
+        let args = [
+            &["safe", "info", "--rpc-url", "http://localhost:8545"],
+            args,
+        ]
+        .concat();
+        match Cli::try_parse_from(args)?.command {
+            Commands::Info(info) => Ok(info),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn info_takes_the_safe_as_an_optional_positional() {
+        let info = parse_info(&[SAFE]).unwrap();
+        assert_eq!(info.safe, Some(SAFE.parse().unwrap()));
+
+        let info = parse_info(&["--private-key", "0x01"]).unwrap();
+        assert_eq!(info.safe, None);
+        assert!(info.wallet.is_set());
+
+        assert!(parse_info(&["--safe", SAFE]).is_err());
+    }
+
+    #[test]
+    fn safe_versions_display_as_their_cli_values_default_first() {
+        let versions = SafeVersion::value_variants();
+        assert_eq!(versions[0].to_string(), SafeVersion::default().to_string());
+        for version in versions {
+            let name = version.to_possible_value().unwrap();
+            assert_eq!(version.to_string(), name.get_name());
+        }
     }
 
     #[test]
