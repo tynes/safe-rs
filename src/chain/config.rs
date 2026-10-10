@@ -36,6 +36,17 @@ impl ChainAddresses {
         }
     }
 
+    /// Returns the canonical Safe v1.5.0 addresses
+    pub fn v1_5_0() -> Self {
+        Self {
+            safe_singleton: address!("Ff51A5898e281Db6DfC7855790607438dF2ca44b"),
+            multi_send: address!("218543288004CD07832472D464648173c77D7eB7"),
+            multi_send_call_only: address!("A83c336B20401Af773B6219BA5027174338D1836"),
+            proxy_factory: address!("14F2982D601c9458F93bd70B218933A6f8165e7b"),
+            fallback_handler: address!("3EfCBb83A4A7AfcB4F68D501E2c2203a38be77f4"),
+        }
+    }
+
     /// Returns the canonical Safe v1.3.0 addresses (for backwards compatibility)
     pub fn v1_3_0() -> Self {
         Self {
@@ -162,5 +173,18 @@ mod tests {
         let default = ChainAddresses::default();
         let v1_4_1 = ChainAddresses::v1_4_1();
         assert_eq!(default.safe_singleton, v1_4_1.safe_singleton);
+    }
+
+    #[test]
+    fn test_v1_5_0_addresses() {
+        let addrs = ChainAddresses::v1_5_0();
+        assert_eq!(
+            addrs.safe_singleton,
+            address!("Ff51A5898e281Db6DfC7855790607438dF2ca44b")
+        );
+        assert_eq!(
+            addrs.proxy_factory,
+            address!("14F2982D601c9458F93bd70B218933A6f8165e7b")
+        );
     }
 }

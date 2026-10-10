@@ -371,8 +371,19 @@ where
             reason: format!("Failed to get deployment receipt: {}", e),
         })?;
 
-        // Verify deployment
-        if !is_safe_with(&self.provider, safe_address, &[addresses.safe_singleton]).await? {
+        // Check if the transaction was successful
+        if !receipt.inner.inner.status() {
+            return Err(Error::ExecutionFailed {
+                reason: format!(
+                    "Deployment transaction failed: {}",
+                    receipt.transaction_hash
+                ),
+            });
+        }
+
+        // Verify deployment was created at the expected address using the wallet_provider
+        // to avoid stale-read issues from different RPC nodes
+        if !is_safe_with(&wallet_provider, safe_address, &[addresses.safe_singleton]).await? {
             return Err(Error::ExecutionFailed {
                 reason: format!("Deployment failed: no Safe at expected address {}", safe_address),
             });

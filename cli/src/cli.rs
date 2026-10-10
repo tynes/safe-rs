@@ -71,6 +71,14 @@ pub enum EvmSpec {
     Osaka,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum SafeVersion {
+    #[value(name = "1.5.0")]
+    V1_5_0,
+    #[value(name = "1.4.1")]
+    V1_4_1,
+}
+
 impl From<EvmSpec> for SpecId {
     fn from(spec: EvmSpec) -> Self {
         match spec {
@@ -262,13 +270,17 @@ pub struct CreateArgs {
     #[arg(long)]
     pub fallback_handler: Option<Address>,
 
-    /// Safe singleton address (default: canonical v1.4.1)
+    /// Safe singleton address (default: based on --safe-version)
     #[arg(long)]
     pub singleton: Option<Address>,
 
-    /// Safe proxy factory address (default: canonical v1.4.1)
+    /// Safe proxy factory address (default: based on --safe-version)
     #[arg(long)]
     pub factory: Option<Address>,
+
+    /// Safe version to use (default: 1.5.0)
+    #[arg(long, value_enum, default_value = "1.5.0")]
+    pub safe_version: SafeVersion,
 
     /// Skip confirmation prompt
     #[arg(long)]
