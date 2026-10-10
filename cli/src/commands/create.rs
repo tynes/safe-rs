@@ -1,7 +1,7 @@
 use color_eyre::eyre::Result;
 use safe_rs::{is_safe_with, ChainAddresses, WalletBuilder, WalletConfig};
 
-use crate::cli::CreateArgs;
+use crate::cli::{CreateArgs, SafeVersion};
 use crate::commands::http_provider;
 use crate::output::{confirm_prompt, CreateOutput, Report};
 use crate::wallet::create_signer;
@@ -10,7 +10,10 @@ pub async fn run(args: CreateArgs, json: bool) -> Result<()> {
     let signer = create_signer(&args.wallet)?;
     let signer_address = signer.address();
 
-    let mut addresses = ChainAddresses::v1_4_1();
+    let mut addresses = match args.safe_version {
+        SafeVersion::V1_5_0 => ChainAddresses::v1_5_0(),
+        SafeVersion::V1_4_1 => ChainAddresses::v1_4_1(),
+    };
     if let Some(singleton) = args.singleton {
         addresses.safe_singleton = singleton;
     }

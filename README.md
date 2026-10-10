@@ -187,6 +187,7 @@ safe create \
     --owner 0xAdditionalOwner \
     --threshold 2 \
     --salt-nonce 12345 \
+    --safe-version 1.5.0 \
     --rpc-url $ETH_RPC_URL \
     --private-key $PRIVATE_KEY
 ```
@@ -197,6 +198,7 @@ safe create \
 | `--owner <address>` | Additional owner (repeatable) |
 | `--threshold <n>` | Required signatures (default: 1) |
 | `--salt-nonce <n>` | Salt for deterministic address |
+| `--safe-version <version>` | Safe version: `1.5.0` (default) or `1.4.1` |
 | `--compute-only` | Show address without deploying |
 | `--fallback-handler <address>` | Custom fallback handler |
 | `--singleton <address>` / `--factory <address>` | Non-canonical Safe deployment |
@@ -405,9 +407,9 @@ Fields:
 - `operation` — 0 for Call, 1 for DelegateCall (optional, default: 0). With `--call-only`, a DelegateCall entry is rejected.
 - `value` accepts decimal or `0x`-prefixed hex
 
-## Supported Chains
+## Supported Chains and Versions
 
-safe-rs includes pre-configured addresses for Safe v1.4.1 contracts:
+safe-rs supports Safe v1.5.0 (default) and v1.4.1. Specify the version with `safe create --safe-version 1.5.0` or `--safe-version 1.4.1`. The CLI defaults to v1.5.0.
 
 | Chain | Chain ID |
 |-------|----------|
@@ -422,6 +424,18 @@ safe-rs includes pre-configured addresses for Safe v1.4.1 contracts:
 | Gnosis | 100 |
 
 All chains use the same contract addresses (deployed via CREATE2):
+
+**Safe v1.5.0:**
+
+| Contract | Address |
+|----------|---------|
+| Safe Singleton | `0xFf51A5898e281Db6DfC7855790607438dF2ca44b` |
+| MultiSend | `0x218543288004CD07832472D464648173c77D7eB7` |
+| MultiSendCallOnly | `0xA83c336B20401Af773B6219BA5027174338D1836` |
+| Proxy Factory | `0x14F2982D601c9458F93bd70B218933A6f8165e7b` |
+| Fallback Handler | `0x3EfCBb83A4A7AfcB4F68D501E2c2203a38be77f4` |
+
+**Safe v1.4.1:**
 
 | Contract | Address |
 |----------|---------|
