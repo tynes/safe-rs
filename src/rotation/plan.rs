@@ -14,9 +14,15 @@ use crate::inspect::{SafeState, SENTINEL};
 use crate::simulation::ForkSession;
 use crate::types::Call;
 
-/// The only Safe version rotation supports: its owner and execution events are
-/// indexed, which the outcome and history decoding rely on.
-pub const SUPPORTED_VERSION: &str = "1.4.1";
+/// The Safe versions rotation supports.
+///
+/// In both, `swapOwner` keeps the owner's place in the list, the owner and
+/// execution events are indexed (which the outcome and history decoding rely
+/// on), and with `safeTxGas = 0` and no refund a failing inner call reverts the
+/// whole transaction without using the Safe nonce. They differ in what that
+/// revert carries: v1.4.1 reverts with `GS013`, v1.5.0 with the inner call's
+/// own revert data.
+pub const SUPPORTED_VERSIONS: [&str; 2] = ["1.4.1", "1.5.0"];
 
 /// The entry before `owner` in the Safe's owner linked list.
 ///
@@ -150,9 +156,9 @@ fn is_owner_management(data: &[u8]) -> bool {
 /// go through `MultiSendCallOnly`; a rotation without user calls and with a
 /// single swap is a direct self-call.
 ///
-/// Rejected up front: a Safe that is not v1.4.1 or not threshold 1, an empty
-/// swap list, DelegateCall entries, and user calls that change the Safe's
-/// owners or threshold themselves.
+/// Rejected up front: a Safe whose version is not in [`SUPPORTED_VERSIONS`] or
+/// whose threshold is not 1, an empty swap list, DelegateCall entries, and user
+/// calls that change the Safe's owners or threshold themselves.
 pub fn plan_rotation(
     state: &SafeState,
     chain_id: u64,
@@ -161,9 +167,14 @@ pub fn plan_rotation(
     swaps: &[(Address, Address)],
 ) -> Result<RotationPlan> {
     let safe = state.address;
-    if state.version.as_deref() != Some(SUPPORTED_VERSION) {
+    let supported = state
+        .version
+        .as_deref()
+        .is_some_and(|version| SUPPORTED_VERSIONS.contains(&version));
+    if !supported {
         return Err(Error::Rotation(format!(
-            "owner rotation needs Safe v{SUPPORTED_VERSION}, found {}",
+            "owner rotation needs Safe v{}, found {}",
+            SUPPORTED_VERSIONS.join(" or v"),
             state.version.as_deref().unwrap_or("an unknown version")
         )));
     }
@@ -371,12 +382,23 @@ mod tests {
     fn unsupported_safes_and_batches_are_rejected() {
         let swap = [(addr(0xA), addr(0xB))];
 
-        let mut old = state(&[addr(0xA)]);
-        old.version = Some("1.3.0".to_string());
-        assert!(matches!(
-            plan_rotation(&old, 1, MSCO, &[], &swap),
-            Err(Error::Rotation(_))
-        ));
+        for unsupported in [Some("1.3.0"), Some("1.6.0"), None] {
+            let mut other = state(&[addr(0xA)]);
+            other.version = unsupported.map(str::to_string);
+            let refused = plan_rotation(&other, 1, MSCO, &[], &swap);
+            let Err(Error::Rotation(message)) = refused else {
+                panic!("{unsupported:?} must be refused, got {refused:?}")
+            };
+            assert!(message.contains("v1.4.1 or v1.5.0"), "{message}");
+        }
+        for supported in SUPPORTED_VERSIONS {
+            let mut safe = state(&[addr(0xA)]);
+            safe.version = Some(supported.to_string());
+            assert!(
+                plan_rotation(&safe, 1, MSCO, &[], &swap).is_ok(),
+                "{supported}"
+            );
+        }
 
         let mut multisig = state(&[addr(0xA), addr(0xC)]);
         multisig.threshold = U256::from(2);

@@ -345,7 +345,7 @@ pub struct CreateArgs {
     /// Deploy the same Safe an HD wallet created on another chain, given as
     /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
     /// must be rotated right away
-    #[arg(long, value_name = "CHAIN_ID:SAFE", requires = "hd_wallet", conflicts_with_all = ["owners", "salt_nonce"])]
+    #[arg(long, value_name = "CHAIN_ID:SAFE", requires = "hd_wallet", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
     pub same_as: Option<String>,
 
     #[command(flatten)]
@@ -804,5 +804,18 @@ mod tests {
             .is_err(),
             "the salt comes from the original Safe"
         );
+        assert!(
+            with(&[
+                "--hd-wallet",
+                "w",
+                "--same-as",
+                &same_as,
+                "--safe-version",
+                "1.4.1"
+            ])
+            .is_err(),
+            "so do the version and contracts"
+        );
+        assert!(with(&["--hd-wallet", "w", "--safe-version", "1.4.1"]).is_ok());
     }
 }

@@ -11,9 +11,9 @@
 //! for the next unused key of an HD wallet. The old owner's remaining ETH is
 //! then moved to the new owner, which pays for the next transaction.
 //!
-//! The Safe must be a threshold-1 Safe v1.4.1 whose owner is a key of the
-//! wallet (see `safe create --hd-wallet` and `safe rotate --from-private-key`
-//! in the CLI), and that owner must hold ETH for gas.
+//! The Safe must be a threshold-1 Safe (v1.4.1 or v1.5.0) whose owner is a key
+//! of the wallet (see `safe create --hd-wallet` and `safe rotate
+//! --from-private-key` in the CLI), and that owner must hold ETH for gas.
 //!
 //! # Usage
 //!

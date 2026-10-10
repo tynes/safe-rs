@@ -235,7 +235,7 @@ safe create \
 | `--fallback-handler <address>` | Custom fallback handler |
 | `--singleton <address>` / `--factory <address>` | Non-canonical Safe deployment |
 
-With `--hd-wallet <name>` the Safe is a 1/1 owned by a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--same-as <chain_id>:<safe>` deploys the same Safe on another chain.
+With `--hd-wallet <name>` the Safe is a 1/1 owned by a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--safe-version` applies as usual. `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version and contracts it was first created with.
 
 ### `safe rotate`
 
@@ -354,7 +354,7 @@ The prompt shows how much ETH the old key holds; all of it moves to the new owne
 ### Limits
 
 - **Threshold 1 only.** In a 1-of-N Safe only the signing owner rotates. N-of-M signature collection is not supported.
-- **Safe v1.4.1 only.**
+- **Safe v1.4.1 and v1.5.0.** Other versions are refused.
 - **Sync every Safe.** After losing state, a key retired on a Safe or chain you did not sync could be handed out again. A phrase imported from another wallet may have keys that already signed: use `--start-index`, or better, a phrase from `safe wallet new`.
 - **Never export the account's extended public key (xpub).** The derivation is not hardened: with the xpub, one recovered key yields all the others. safe-rs never writes it anywhere.
 - **The same Safe on several chains** starts with the same owner key on each. Rotating on one chain publishes the key that still owns the others: `safe wallet status` flags them, and each needs a `safe rotate`. An address where the Safe is *not* deployed can be claimed by whoever holds that first key, forever, because anyone may deploy it.
