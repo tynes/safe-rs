@@ -214,11 +214,11 @@ pub struct SendArgs {
     #[command(flatten)]
     pub sim: SimArgs,
 
-    /// MultiSend address (default: canonical v1.4.1)
+    /// MultiSend address (default: canonical for the Safe's version)
     #[arg(long)]
     pub multi_send: Option<Address>,
 
-    /// MultiSendCallOnly address (default: canonical v1.4.1)
+    /// MultiSendCallOnly address (default: canonical for the Safe's version)
     #[arg(long)]
     pub multi_send_call_only: Option<Address>,
 
@@ -428,7 +428,7 @@ pub struct RotateArgs {
     #[command(flatten)]
     pub sim: SimArgs,
 
-    /// MultiSendCallOnly address (default: canonical v1.4.1)
+    /// MultiSendCallOnly address (default: canonical for the Safe's version)
     #[arg(long)]
     pub multi_send_call_only: Option<Address>,
 

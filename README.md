@@ -151,7 +151,7 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 | `--trace` | Print call traces of the simulation |
 | `--block <n\|hash\|tag>` | Simulate on top of this block (default: latest) |
 | `--spec <cancun\|prague\|osaka>` | EVM spec for simulation (default: osaka) |
-| `--multi-send <addr>` / `--multi-send-call-only <addr>` | Non-canonical MultiSend deployments |
+| `--multi-send <addr>` / `--multi-send-call-only <addr>` | MultiSend contracts to batch through (default: the canonical ones for the Safe's version) |
 | `--no-confirm` | Skip confirmation prompt |
 | `--json` | Output as JSON |
 | `-i, --interactive` | Prompt for private key |
@@ -163,7 +163,7 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 
 `--rotate` cannot be combined with `--skip-simulation`, `--safe-tx-gas`, `--nonce` or `--multi-send`: the rotation has to succeed or fail together with the calls, and its result is checked in simulation.
 
-Two or more calls go through a MultiSend contract. If it has no code on the chain (at `--block`, when simulating from one), the command stops before signing anything and names the address: the Safe would otherwise report success for a batch that never ran. Pass the chain's deployment with `--multi-send` or `--multi-send-call-only`.
+Two or more calls go through a MultiSend contract: by default the canonical one for the Safe's version (v1.5.0 for a v1.5.0 Safe, v1.4.1 for any other), with or without `--rotate`. Pass another with `--multi-send` or `--multi-send-call-only`. A Safe sent a batch through an address without code reports success while none of the calls ran, so if the contract has no code on the chain (at `--block`, when simulating from one) the command stops before signing anything and names the address. With `--rotate` the same mistake fails the simulation instead, as an owner list that did not change.
 
 The `--raw-out` document contains `chain_id`, `safe`, `safe_nonce`, `safe_tx_hash`, the Safe transaction fields (`safe_tx`), the owner `signer` and `signature`, the outer transaction fields (`outer`), the EIP-2718 `raw` bytes and their `tx_hash`. `raw` can be rebroadcast as is with `cast publish`. With `--rotate` it also has a `rotation` object naming the old and new owner, the payer and the planned sweep.
 
@@ -390,6 +390,8 @@ let safe = Safe::connect(provider, signer, safe_address).await?;
 safe.verify_single_owner().await?;
 ```
 
+`Safe::connect` reads the chain ID and the Safe's version, and batches through the canonical MultiSend contracts for that version (v1.4.1's if the version cannot be read). `Safe::new` takes a `ChainConfig` and uses its addresses as given, as does `RotationConfig`; `ChainConfig::new` is v1.4.1. `detect_addresses` does the lookup `Safe::connect` does, for a configuration you build yourself.
+
 ### Building Transactions
 
 The `MulticallBuilder` provides a fluent API for constructing transactions:
@@ -614,7 +616,7 @@ safe-rs supports Safe v1.5.0 (default) and v1.4.1. Specify the version with `saf
 | Avalanche | 43114 |
 | Gnosis | 100 |
 
-All chains use the same contract addresses (deployed via CREATE2):
+All chains use the same contract addresses (deployed via CREATE2). A Safe's batches go through the MultiSend contracts of its own version:
 
 **Safe v1.5.0:**
 

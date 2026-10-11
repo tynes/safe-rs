@@ -47,6 +47,19 @@ impl ChainAddresses {
         }
     }
 
+    /// Returns the canonical addresses for a Safe whose `VERSION()` is `version`.
+    ///
+    /// v1.5.0 has its own deployments, and a chain may have no others. Every
+    /// other version gets the v1.4.1 addresses: MultiSend is not tied to the
+    /// Safe's version, and those are the ones older Safes have been batched
+    /// through all along.
+    pub fn for_version(version: &str) -> Self {
+        match version {
+            "1.5.0" => Self::v1_5_0(),
+            _ => Self::v1_4_1(),
+        }
+    }
+
     /// Returns the canonical Safe v1.3.0 addresses (for backwards compatibility)
     pub fn v1_3_0() -> Self {
         Self {
@@ -173,6 +186,29 @@ mod tests {
         let default = ChainAddresses::default();
         let v1_4_1 = ChainAddresses::v1_4_1();
         assert_eq!(default.safe_singleton, v1_4_1.safe_singleton);
+    }
+
+    #[test]
+    fn addresses_follow_the_safe_version() {
+        let v1_4_1 = ChainAddresses::v1_4_1();
+        let v1_5_0 = ChainAddresses::v1_5_0();
+        assert_ne!(v1_4_1.multi_send, v1_5_0.multi_send);
+        assert_ne!(v1_4_1.multi_send_call_only, v1_5_0.multi_send_call_only);
+
+        let picked = ChainAddresses::for_version("1.5.0");
+        assert_eq!(picked.multi_send, v1_5_0.multi_send);
+        assert_eq!(picked.multi_send_call_only, v1_5_0.multi_send_call_only);
+        assert_eq!(picked.safe_singleton, v1_5_0.safe_singleton);
+
+        // Everything else keeps the addresses that were the default before.
+        for version in ["1.4.1", "1.3.0", "1.5.1", ""] {
+            let picked = ChainAddresses::for_version(version);
+            assert_eq!(picked.multi_send, v1_4_1.multi_send, "{version}");
+            assert_eq!(
+                picked.multi_send_call_only, v1_4_1.multi_send_call_only,
+                "{version}"
+            );
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::process::Command;
 use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 use common::LocalHarness;
-use safe_rs::HdWallet;
+use safe_rs::{ChainAddresses, HdWallet};
 use serde_json::Value;
 
 /// A BIP-39 test vector, deliberately not Anvil's own phrase.
@@ -632,4 +632,61 @@ async fn a_signed_but_unsent_transaction_is_tracked_until_it_lands() {
     assert!(done.get("pending_tx").is_none());
     assert!(done.get("exposed").is_none());
     assert_eq!(done["retired_keys"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotating_send_defaults_to_the_multisend_of_the_safe_version() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli {
+        h: &h,
+        home: dir.path().join("home"),
+        password_file: dir.path().join("password"),
+    };
+    write(&cli.password_file, "pw");
+    let phrase_file = dir.path().join("phrase");
+    write(&phrase_file, PHRASE);
+    cli.run(&[
+        "wallet",
+        "import",
+        "demo",
+        "--phrase-file",
+        phrase_file.to_str().unwrap(),
+        "--password-file",
+        cli.password_file.to_str().unwrap(),
+        "--json",
+    ])
+    .json();
+
+    // A chain that has the v1.5.0 MultiSendCallOnly and not the v1.4.1 one,
+    // and a Safe reporting v1.5.0 that wallet key 1 owns.
+    let v1_4_1 = ChainAddresses::v1_4_1().multi_send_call_only;
+    assert!(h.provider.get_code_at(v1_4_1).await.unwrap().is_empty());
+    h.set_multi_send_call_only(ChainAddresses::v1_5_0().multi_send_call_only)
+        .await;
+    let singleton = h.deploy_singleton_reporting("1.5.0").await;
+    let safe = h.deploy_safe_on(singleton, &[key(1)], 1, 502).await;
+    h.fund(key(1), eth(1)).await;
+    h.fund(safe, U256::from(1_000)).await;
+    let recipient = Address::repeat_byte(0x42);
+
+    // Without --multi-send-call-only, the call and the swap go through the
+    // v1.5.0 contract.
+    let sent = cli
+        .wallet_command(&[
+            "send",
+            &recipient.to_string(),
+            "--value",
+            "5",
+            "--safe",
+            &safe.to_string(),
+            "--rotate",
+        ])
+        .json();
+    assert_eq!(sent["status"], "rotated");
+    assert_eq!(sent["old_owner"]["index"], 1);
+    let owner = address(&sent["owner"]["address"]);
+    assert_ne!(owner, key(1));
+    assert_eq!(h.owners(safe).await, vec![owner]);
+    assert_eq!(balance(&h, recipient).await, U256::from(5));
 }

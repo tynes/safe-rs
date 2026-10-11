@@ -29,7 +29,7 @@ use safe_rs::rotation::{check_post_state, plan_rotation};
 use safe_rs::{
     broadcast_raw, decode_safe_outcome, sign_outer_tx, simulate_exec, submit_and_wait,
     wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig,
-    Eoa, Error, ForkSession, ISafe, OuterTxParams, ParentHeader, PreparedSafeTx, ReceiptWait,
+    Eoa, Error, ForkSession, ISafe, OuterTxParams, ParentHeader, PreparedSafeTx, ReceiptWait, Safe,
     SafeExecutionOutcome, SafeTxGasPolicy, SimTx, SpecId, Submission, TxChecks, WalletBuilder,
     WalletConfig,
 };
@@ -847,6 +847,59 @@ async fn builder_checks_the_batch_target_at_the_requested_block() {
     assert_eq!(
         h.provider.get_balance(recipient).await.unwrap(),
         U256::from(15)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_batches_through_the_contracts_of_the_safe_version() {
+    let h = LocalHarness::new().await;
+    let v1_4_1 = ChainAddresses::v1_4_1();
+    let v1_5_0 = ChainAddresses::v1_5_0();
+    let recipient = Address::repeat_byte(0x49);
+
+    // A chain that has the v1.5.0 MultiSendCallOnly and not the v1.4.1 one.
+    h.set_multi_send_call_only(v1_5_0.multi_send_call_only)
+        .await;
+    let singleton = h.deploy_singleton_reporting("1.5.0").await;
+    let new_safe = h
+        .deploy_safe_on(singleton, &[h.owner.address()], 1, 15)
+        .await;
+    let old_safe = h.deploy_safe(15).await;
+    h.fund(new_safe, U256::from(1_000)).await;
+    h.fund(old_safe, U256::from(1_000)).await;
+    let connect = |safe| Safe::connect(h.owner_provider(), h.owner.clone(), safe);
+    let batch = |safe| {
+        Safe::batch(safe)
+            .call_only()
+            .add(Call::new(recipient, U256::from(10), Bytes::new()))
+            .add(Call::new(recipient, U256::from(5), Bytes::new()))
+    };
+
+    // The v1.5.0 Safe batches through the v1.5.0 contract.
+    let safe = connect(new_safe).await.unwrap();
+    assert_eq!(safe.addresses().multi_send, v1_5_0.multi_send);
+    let prepared = batch(&safe).prepare().await.unwrap();
+    assert_eq!(prepared.params.to, v1_5_0.multi_send_call_only);
+    assert!(batch(&safe).execute().await.unwrap().success);
+    assert_eq!(
+        h.provider.get_balance(recipient).await.unwrap(),
+        U256::from(15)
+    );
+
+    // The v1.4.1 Safe keeps the v1.4.1 one, which this chain does not have.
+    let safe = connect(old_safe).await.unwrap();
+    assert_eq!(safe.addresses().multi_send, v1_4_1.multi_send);
+    assert!(refused(
+        &batch(&safe).prepare().await,
+        v1_4_1.multi_send_call_only
+    ));
+
+    // So does an address whose version cannot be read.
+    let safe = connect(Address::repeat_byte(0x77)).await.unwrap();
+    assert_eq!(safe.addresses().multi_send, v1_4_1.multi_send);
+    assert_eq!(
+        safe.addresses().multi_send_call_only,
+        v1_4_1.multi_send_call_only
     );
 }
 

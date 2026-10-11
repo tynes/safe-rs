@@ -62,7 +62,9 @@ pub const REBUILD_MARGIN: u32 = 16;
 /// How a [`RotatingSafe`] behaves.
 #[derive(Clone)]
 pub struct RotationConfig {
-    /// Safe contract addresses (`multi_send_call_only` carries the batches)
+    /// Safe contract addresses (`multi_send_call_only` carries the batches).
+    /// They are used as given, whatever the Safe's version:
+    /// [`detect_addresses`](crate::detect_addresses) returns the ones matching it.
     pub addresses: ChainAddresses,
     /// Sends the outer transaction and pays for gas. `None`: the current owner.
     pub payer: Option<PrivateKeySigner>,

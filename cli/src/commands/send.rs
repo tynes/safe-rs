@@ -6,9 +6,9 @@ use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
 use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::{
-    broadcast_raw, is_gs013_revert, safe_outcome_for_receipt, sign_outer_tx, simulate_exec,
-    wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig,
-    Error, ExecSimulation, OuterTxParams, ReceiptWait, Safe, SignedSafeTx,
+    broadcast_raw, detect_addresses, is_gs013_revert, safe_outcome_for_receipt, sign_outer_tx,
+    simulate_exec, wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses,
+    ChainConfig, Error, ExecSimulation, OuterTxParams, ReceiptWait, Safe, SignedSafeTx,
 };
 
 use crate::bundle::load_bundle;
@@ -68,7 +68,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     let provider = http_provider(&args.rpc.rpc_url);
     let chain_id = provider.get_chain_id().await?;
     let safe_address = args.safe.safe;
-    let config = ChainConfig::with_addresses(chain_id, chain_addresses(&args));
+    let config = ChainConfig::with_addresses(chain_id, chain_addresses(&provider, &args).await);
     let safe = Safe::new(provider.clone(), signer.clone(), safe_address, config);
 
     // Verify ownership
@@ -321,9 +321,10 @@ async fn estimate_outer_gas(
     Ok(estimate + estimate / 5)
 }
 
-/// Canonical v1.4.1 addresses with the `--multi-send*` overrides applied.
-fn chain_addresses(args: &SendArgs) -> ChainAddresses {
-    let mut addresses = ChainAddresses::v1_4_1();
+/// Canonical addresses for the Safe's version with the `--multi-send*`
+/// overrides applied.
+async fn chain_addresses(provider: &HttpProvider, args: &SendArgs) -> ChainAddresses {
+    let mut addresses = detect_addresses(provider, args.safe.safe).await;
     if let Some(multi_send) = args.multi_send {
         addresses.multi_send = multi_send;
     }

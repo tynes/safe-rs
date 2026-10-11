@@ -193,3 +193,54 @@ async fn the_batch_target_must_exist_at_the_simulated_block() {
     simulate(&["--block", &before]).assert_missing_batch_target(late, "--multi-send-call-only");
     assert_eq!(simulate(&[]).json()["success"], true);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_default_multisend_follows_the_safe_version() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let recipient = Address::repeat_byte(0x49);
+    let bundle = dir.path().join("bundle.json");
+    write_transfers(&bundle, recipient);
+    let bundle = bundle.to_str().unwrap();
+    let v1_4_1 = ChainAddresses::v1_4_1();
+    let v1_5_0 = ChainAddresses::v1_5_0();
+
+    // A chain that has the v1.5.0 MultiSendCallOnly and not the v1.4.1 one.
+    h.set_multi_send_call_only(v1_5_0.multi_send_call_only)
+        .await;
+    let singleton = h.deploy_singleton_reporting("1.5.0").await;
+    let new_safe = h
+        .deploy_safe_on(singleton, &[h.owner.address()], 1, 602)
+        .await;
+    let old_safe = h.deploy_safe(602).await;
+    h.fund(new_safe, U256::from(1_000)).await;
+    h.fund(old_safe, U256::from(1_000)).await;
+    let batch_target = |safe, extra: &[&str]| {
+        let mut args = vec!["--bundle", bundle, "--call-only", "--no-submit"];
+        args.extend_from_slice(extra);
+        let signed = send(&h, &home, safe, &args).json();
+        let to: Address = signed["safe_tx"]["to"].as_str().unwrap().parse().unwrap();
+        to
+    };
+
+    // The v1.5.0 Safe batches through the v1.5.0 contract without being told to.
+    assert_eq!(batch_target(new_safe, &[]), v1_5_0.multi_send_call_only);
+    let sent = send(&h, &home, new_safe, &["--bundle", bundle, "--call-only"]).json();
+    assert_eq!(sent["outcome"], "success");
+    assert_eq!(balance(&h, recipient).await, U256::from(15));
+
+    // The v1.4.1 Safe keeps the v1.4.1 one, which this chain does not have.
+    send(&h, &home, old_safe, &["--bundle", bundle, "--call-only"])
+        .assert_missing_batch_target(v1_4_1.multi_send_call_only, "--multi-send-call-only");
+
+    // An override wins over the version, for either Safe.
+    for (safe, target) in [
+        (new_safe, h.addresses.multi_send_call_only),
+        (old_safe, h.addresses.multi_send_call_only),
+        (old_safe, v1_5_0.multi_send_call_only),
+    ] {
+        let chosen = batch_target(safe, &["--multi-send-call-only", &target.to_string()]);
+        assert_eq!(chosen, target);
+    }
+}

@@ -9,7 +9,8 @@ use alloy::eips::eip1559::Eip1559Estimation;
 use alloy::eips::BlockId;
 use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::node_bindings::{Anvil, AnvilInstance};
-use alloy::primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy::primitives::{address, hex, keccak256, Address, Bytes, B256, U256};
+use alloy::providers::ext::AnvilApi;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
@@ -153,17 +154,21 @@ impl LocalHarness {
         safe: Address,
         addresses: ChainAddresses,
     ) -> Safe<DynProvider<AnyNetwork>> {
-        let wallet_provider = ProviderBuilder::new()
-            .network::<AnyNetwork>()
-            .wallet(EthereumWallet::from(self.owner.clone()))
-            .connect_http(self.url())
-            .erased();
         Safe::new(
-            wallet_provider,
+            self.owner_provider(),
             self.owner.clone(),
             safe,
             ChainConfig::with_addresses(self.chain_id, addresses),
         )
+    }
+
+    /// A provider that signs and sends as the owner.
+    pub fn owner_provider(&self) -> DynProvider<AnyNetwork> {
+        ProviderBuilder::new()
+            .network::<AnyNetwork>()
+            .wallet(EthereumWallet::from(self.owner.clone()))
+            .connect_http(self.url())
+            .erased()
     }
 
     pub fn url(&self) -> url::Url {
@@ -200,6 +205,34 @@ impl LocalHarness {
             .await
     }
 
+    /// Gives `address` the code of `MultiSendCallOnly`, as on a chain where
+    /// the contract is deployed there.
+    pub async fn set_multi_send_call_only(&self, address: Address) {
+        let code = self
+            .provider
+            .get_code_at(self.addresses.multi_send_call_only)
+            .await
+            .expect("code");
+        self.provider
+            .anvil_set_code(address, code)
+            .await
+            .expect("set code");
+    }
+
+    /// Deploys a Safe singleton whose `VERSION()` reports `version`.
+    ///
+    /// The code is v1.4.1's with only that string replaced: enough for
+    /// whatever reads the version to choose contracts or gate a feature.
+    pub async fn deploy_singleton_reporting(&self, version: &str) -> Address {
+        assert_eq!(version.len(), "1.4.1".len(), "same length as 1.4.1");
+        let initcode = hex::encode(artifact_bytecode("Safe"));
+        let reported = hex::encode("1.4.1");
+        assert_eq!(initcode.matches(&reported).count(), 1);
+        let patched = initcode.replace(&reported, &hex::encode(version));
+        self.create2(patched.parse().expect("patched bytecode"))
+            .await
+    }
+
     /// Deploys a strict 1/1 Safe for the owner through the factory.
     pub async fn deploy_safe(&self, salt_nonce: u64) -> Address {
         self.deploy_safe_with(&[self.owner.address()], 1, salt_nonce)
@@ -212,24 +245,33 @@ impl LocalHarness {
         threshold: u64,
         salt_nonce: u64,
     ) -> Address {
+        self.deploy_safe_on(self.addresses.safe_singleton, owners, threshold, salt_nonce)
+            .await
+    }
+
+    /// Deploys a Safe that is a proxy for `singleton`.
+    pub async fn deploy_safe_on(
+        &self,
+        singleton: Address,
+        owners: &[Address],
+        threshold: u64,
+        salt_nonce: u64,
+    ) -> Address {
         let creation_code =
             safe_rs::fetch_proxy_creation_code(&self.provider, self.addresses.proxy_factory)
                 .await
                 .expect("creation code");
         let (predicted, initializer) = safe_rs::predict_safe_address(
             self.addresses.proxy_factory,
-            self.addresses.safe_singleton,
+            singleton,
             owners,
             threshold,
             self.addresses.fallback_handler,
             U256::from(salt_nonce),
             &creation_code,
         );
-        let data = safe_rs::encode_create_proxy_with_nonce(
-            self.addresses.safe_singleton,
-            initializer,
-            U256::from(salt_nonce),
-        );
+        let data =
+            safe_rs::encode_create_proxy_with_nonce(singleton, initializer, U256::from(salt_nonce));
         let tx = TransactionRequest::default()
             .to(self.addresses.proxy_factory)
             .input(data.into());

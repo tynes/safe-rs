@@ -47,6 +47,21 @@ pub async fn is_safe<P: Provider<N>, N: Network>(
     is_safe_with(provider, address, &known).await
 }
 
+/// The canonical contracts for the version the Safe at `address` reports (see
+/// [`ChainAddresses::for_version`]): a v1.5.0 Safe batches through the v1.5.0
+/// MultiSend contracts.
+///
+/// A Safe whose `VERSION()` cannot be read gets the v1.4.1 addresses.
+pub async fn detect_addresses<P: Provider<N>, N: Network>(
+    provider: &P,
+    address: Address,
+) -> ChainAddresses {
+    let version = ISafe::new(address, provider).VERSION().call().await.ok();
+    version
+        .as_deref()
+        .map_or_else(ChainAddresses::v1_4_1, ChainAddresses::for_version)
+}
+
 /// Result of executing a Safe transaction
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -94,14 +109,17 @@ where
         self
     }
 
-    /// Creates a Safe client with auto-detected chain configuration
+    /// Creates a Safe client with auto-detected chain configuration: the chain
+    /// ID and the canonical contracts for the Safe's version (see
+    /// [`detect_addresses`]). Use [`Safe::new`] to set the addresses explicitly.
     pub async fn connect(provider: P, signer: PrivateKeySigner, address: Address) -> Result<Self> {
         let chain_id = provider
             .get_chain_id()
             .await
             .map_err(|e| Error::Provider(e.to_string()))?;
+        let addresses = detect_addresses(&provider, address).await;
 
-        let config = ChainConfig::new(chain_id);
+        let config = ChainConfig::with_addresses(chain_id, addresses);
         Ok(Self::new(provider, signer, address, config))
     }
 

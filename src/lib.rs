@@ -90,7 +90,10 @@ pub use error::{Error, Result};
 pub use exec::{simulate_exec, submit_and_wait, ExecSimulation, Submission};
 #[cfg(feature = "hd-wallet")]
 pub use hd::HdWallet;
-pub use safe::{is_gs013_revert, is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
+pub use safe::{
+    detect_addresses, is_gs013_revert, is_safe, ExecutionResult, Safe, SafeBuilder,
+    SAFE_SINGLETON_SLOT,
+};
 pub use envelope::{
     batch_params, decode_exec_calldata, BatchTarget, DecodedExecTransaction, PreparedSafeTx,
     SafeTxGasPolicy, SignedSafeTx,

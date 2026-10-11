@@ -10,7 +10,7 @@ use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::rotation::{
     ExecOptions, OwnerRef, RotatingSafe, RotationConfig, RotationStatus, StateFile,
 };
-use safe_rs::{Call, ChainAddresses, Error, HdWallet, SpecId};
+use safe_rs::{detect_addresses, Call, ChainAddresses, Error, HdWallet, SpecId};
 use url::Url;
 
 use crate::cli::{SimArgs, SweepArgs};
@@ -124,8 +124,18 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
     let console = Console::new(run.json, raw_out.as_deref() == Some("-"));
 
     let provider = http_provider(run.rpc_url);
+    // Unless overridden, batches go through the MultiSendCallOnly of the
+    // Safe's own version.
+    let multi_send_call_only = match run.multi_send_call_only {
+        Some(address) => address,
+        None => {
+            detect_addresses(&provider, run.safe)
+                .await
+                .multi_send_call_only
+        }
+    };
     let mut config = rotation_config(
-        run.multi_send_call_only,
+        Some(multi_send_call_only),
         SpecId::from(run.sim.spec),
         run.sim.block_time,
         run.timeout,
