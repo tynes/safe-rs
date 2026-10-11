@@ -33,7 +33,7 @@ use crate::envelope::SignedSafeTx;
 use crate::error::{Error, Result};
 use crate::exec::{simulate_exec, submit_and_wait, Submission};
 use crate::hd::HdWallet;
-use crate::inspect::{read_safe_state, ReadSafeStateOptions};
+use crate::inspect::{read_safe_state, require_batch_target, ReadSafeStateOptions};
 use crate::outer::{
     decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
 };
@@ -47,7 +47,7 @@ use crate::rotation::store::StateFile;
 use crate::simulation::session::READ_CALL_GAS;
 use crate::simulation::{ForkSession, ParentHeader, SimBlockEnv, SimulationResult, SpecId};
 use crate::submit::{decode_safe_outcome, receipt_logs, RejectClass, SafeExecutionOutcome};
-use crate::types::Call;
+use crate::types::{Call, Operation};
 
 /// OP-stack `GasPriceOracle` predeploy.
 const GAS_PRICE_ORACLE: Address = address!("0x420000000000000000000000000000000000000F");
@@ -576,7 +576,10 @@ where
     /// Fails if a transaction with user calls is still pending (two competing
     /// sets of calls must not be live at once; a rotation-only transaction is
     /// allowed), if the simulation reverts, or if the simulated owner list is
-    /// not exactly the planned one.
+    /// not exactly the planned one. Calls batched with the swap need
+    /// `MultiSendCallOnly` to have code at
+    /// [`RotationConfig::addresses`]`.multi_send_call_only`, and fail with
+    /// [`Error::MultiSendNotDeployed`] before anything is signed otherwise.
     ///
     /// Run [`RotatingSafe::sweep`] first if a sweep is owed: until then the
     /// current owner may not hold the ETH to pay for this.
@@ -612,6 +615,12 @@ where
             calls,
             &[(current.address(), reserved.address)],
         )?;
+        // The plan has no DelegateCall entries, so this operation means the
+        // calls are batched through MultiSendCallOnly. With no code there the
+        // Safe would report success while neither the calls nor the swap ran.
+        if plan.prepared.params.operation == Operation::DelegateCall {
+            require_batch_target(&self.provider, plan.prepared.params.to, head.block_id()).await?;
+        }
 
         let payer = self.config.payer.clone().unwrap_or_else(|| owner.clone());
         if payer.address() == reserved.address {
