@@ -160,8 +160,20 @@ safe call <to> <signature> [args...] --safe <address> --rpc-url <url> [--block <
 Query Safe state. Every value is read at the same block (`--block`, default: latest).
 
 ```bash
-safe info --safe 0xYourSafe --rpc-url $ETH_RPC_URL [--block <n|hash|tag>]
+safe info [safe] --rpc-url <url> [--block <n|hash|tag>]
 ```
+
+Without an address, `info` shows the signer's default Safe: the one `safe create` deploys for that key when run without options (salt nonce 0, the signer as the only owner). That address depends on the Safe version, so `info` looks for a v1.5.0 Safe first and then for a v1.4.1 one.
+
+```bash
+# The default Safe of the signer
+safe info --rpc-url $ETH_RPC_URL --private-key $PRIVATE_KEY
+
+# Any Safe, no key needed
+safe info 0xYourSafe --rpc-url $ETH_RPC_URL
+```
+
+A Safe created with other options (`--owner`, `--threshold`, `--salt-nonce`, `--fallback-handler`, `--singleton`, `--factory`) has a different address, which must be passed explicitly.
 
 Output:
 ```
@@ -205,7 +217,7 @@ safe create \
 
 ### Wallet Options
 
-All commands that require signing support:
+Commands that sign, and `safe info` when it derives the Safe address from the signer, support:
 
 | Flag | Description |
 |------|-------------|
@@ -450,7 +462,7 @@ All chains use the same contract addresses (deployed via CREATE2):
 | Variable | Description |
 |----------|-------------|
 | `ETH_RPC_URL` | RPC endpoint URL |
-| `SAFE_ADDRESS` | Default Safe address |
+| `SAFE_ADDRESS` | Safe address for `send` and `call` |
 | `PRIVATE_KEY` | Signer private key |
 
 ## Examples
