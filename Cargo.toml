@@ -25,16 +25,30 @@ tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 url = "2"
+scrypt = { version = "0.11", default-features = false, optional = true }
+aes = { version = "0.8", features = ["zeroize"], optional = true }
+ctr = { version = "0.9", optional = true }
+rand = { version = "0.8", optional = true }
+zeroize = { version = "1", optional = true }
+
+[features]
+# Encrypted mnemonic keystores, HD key derivation and the rotating Safe client.
+hd-wallet = ["alloy/signer-mnemonic", "dep:scrypt", "dep:aes", "dep:ctr", "dep:rand", "dep:zeroize"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros"] }
-alloy = { version = "2.5", features = ["full", "signer-local", "rpc-types-trace", "node-bindings"] }
+alloy = { version = "2.5", features = ["full", "signer-local", "signer-keystore", "rpc-types-trace", "node-bindings"] }
 serde_json = "1"
 reqwest = "0.12"
 tempfile = "3"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "rotation"
+path = "tests/rotation.rs"
+required-features = ["hd-wallet"]
 
 [[example]]
 name = "simple_transfer"
@@ -47,6 +61,11 @@ path = "examples/multicall_erc20.rs"
 [[example]]
 name = "simulation_only"
 path = "examples/simulation_only.rs"
+
+[[example]]
+name = "rotating_transfer"
+path = "examples/rotating_transfer.rs"
+required-features = ["hd-wallet"]
 
 [workspace.lints.clippy]
 # Enable pedantic lints for stricter code quality
@@ -165,3 +184,19 @@ match_wildcard_for_single_variants = "allow"
 
 # Nested ifs can be more readable than combined conditions
 collapsible_if = "allow"
+
+# scrypt at N=2^18 takes minutes unoptimized; keep keystore tests usable in debug builds.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.pbkdf2]
+opt-level = 3
+
+[profile.dev.package.hmac]
+opt-level = 3

@@ -61,6 +61,29 @@ impl OuterTxParams {
         }
     }
 
+    /// A plain ETH transfer of `value` from `from` to `to`.
+    pub fn transfer(
+        chain_id: u64,
+        from: Address,
+        to: Address,
+        value: U256,
+        nonce: u64,
+        gas_limit: u64,
+        fees: Eip1559Estimation,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: fees.max_fee_per_gas,
+            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+            to,
+            value,
+            input: Bytes::new(),
+        }
+    }
+
     fn to_tx(&self) -> TxEip1559 {
         TxEip1559 {
             chain_id: self.chain_id,
@@ -79,6 +102,27 @@ impl OuterTxParams {
     pub fn max_cost(&self) -> U256 {
         U256::from(self.gas_limit) * U256::from(self.max_fee_per_gas) + self.value
     }
+}
+
+/// The most a sender with `balance` can transfer while still paying for the
+/// transfer itself: `balance - gas_limit * max_fee_per_gas - reserve`.
+///
+/// Returns `None` when nothing would be left to send. When the transfer is
+/// signed with `maxPriorityFeePerGas == maxFeePerGas` its cost is exactly
+/// `gas_limit * max_fee_per_gas` (if all of `gas_limit` is used, as for a
+/// transfer to an account without code), so the sender ends at `reserve`.
+///
+/// `reserve` covers charges outside the gas fee, such as the L1 data fee some
+/// rollups deduct separately.
+pub fn sweep_value(
+    balance: U256,
+    gas_limit: u64,
+    max_fee_per_gas: u128,
+    reserve: U256,
+) -> Option<U256> {
+    let fee = U256::from(gas_limit).checked_mul(U256::from(max_fee_per_gas))?;
+    let value = balance.checked_sub(fee)?.checked_sub(reserve)?;
+    (!value.is_zero()).then_some(value)
 }
 
 /// A signed, EIP-2718 encoded outer transaction.
@@ -159,6 +203,37 @@ pub fn decode_signed_outer_tx(raw: &[u8]) -> Result<SignedOuterTx> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_value_leaves_exactly_the_fee_and_reserve() {
+        let gwei = 1_000_000_000u128;
+        let fee = U256::from(21_000u64) * U256::from(30 * gwei);
+        let balance = U256::from(10).pow(U256::from(18));
+
+        assert_eq!(
+            sweep_value(balance, 21_000, 30 * gwei, U256::ZERO),
+            Some(balance - fee)
+        );
+        assert_eq!(
+            sweep_value(balance, 21_000, 30 * gwei, U256::from(5)),
+            Some(balance - fee - U256::from(5))
+        );
+        // Nothing to send once the fee and reserve are covered, or not covered.
+        assert_eq!(sweep_value(fee, 21_000, 30 * gwei, U256::ZERO), None);
+        assert_eq!(
+            sweep_value(fee + U256::from(5), 21_000, 30 * gwei, U256::from(5)),
+            None
+        );
+        assert_eq!(
+            sweep_value(fee - U256::from(1), 21_000, 30 * gwei, U256::ZERO),
+            None
+        );
+        assert_eq!(sweep_value(U256::ZERO, 21_000, 30 * gwei, U256::ZERO), None);
+        assert_eq!(
+            sweep_value(fee + U256::from(1), 21_000, 30 * gwei, U256::ZERO),
+            Some(U256::from(1))
+        );
+    }
     use alloy::primitives::address;
     use alloy::signers::local::PrivateKeySigner;
 

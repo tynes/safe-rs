@@ -21,7 +21,7 @@
 //! // Deploy a new Safe and connect to it
 //! let builder = WalletBuilder::new(provider, signer);
 //! let address = builder.deploy(rpc_url, config.clone()).await?;
-//! let wallet = builder.connect(address).await?;
+//! let wallet = builder.connect_with_config(config).await?;
 //!
 //! // Generic function that works with any account type
 //! async fn do_something<A: Account>(wallet: &Wallet<A>) -> Result<()> {
@@ -108,6 +108,9 @@ impl WalletConfig {
 
     /// Uses a specific Safe deployment (singleton, proxy factory, handler) instead
     /// of the canonical v1.4.1 addresses, e.g. for a local test chain.
+    ///
+    /// A wallet from [`WalletBuilder::connect_with_config`] batches through the
+    /// MultiSend contracts of these addresses.
     pub fn with_addresses(mut self, addresses: ChainAddresses) -> Self {
         self.addresses = Some(addresses);
         self
@@ -181,7 +184,7 @@ pub struct SafeDeployment {
 /// // Deploy then connect (builder not consumed by deploy)
 /// let builder = WalletBuilder::new(provider, signer);
 /// let address = builder.deploy(rpc_url, config.clone()).await?;
-/// let wallet = builder.connect(address).await?;
+/// let wallet = builder.connect_with_config(config).await?;
 /// ```
 pub struct WalletBuilder<P> {
     provider: P,
@@ -216,6 +219,10 @@ where
 {
     /// Connects to an existing Safe at the given address.
     ///
+    /// The wallet uses the canonical contracts for the Safe's version (see
+    /// [`Safe::connect`]). For a Safe on other addresses, use
+    /// [`WalletBuilder::connect_with_config`] with [`WalletConfig::with_addresses`].
+    ///
     /// # Arguments
     /// * `address` - The Safe contract address
     ///
@@ -235,6 +242,10 @@ where
     ///
     /// This computes the deterministic Safe address based on the signer and config,
     /// then connects to it. Returns an error if no Safe is deployed at that address.
+    ///
+    /// Addresses set with [`WalletConfig::with_addresses`] are the wallet's
+    /// addresses too, so it batches through their MultiSend contracts. Without
+    /// them the addresses are detected as in [`WalletBuilder::connect`].
     ///
     /// # Arguments
     /// * `config` - Configuration for Safe address computation
@@ -258,7 +269,20 @@ where
             )));
         }
 
-        let safe = Safe::connect(self.provider, self.signer, safe_address).await?;
+        let safe = match config.addresses {
+            // An explicit deployment has no reason to match the canonical one
+            // `Safe::connect` picks, and may be on a chain without it.
+            Some(addresses) => {
+                let chain_id = self
+                    .provider
+                    .get_chain_id()
+                    .await
+                    .map_err(|e| Error::Provider(e.to_string()))?;
+                let chain_config = ChainConfig::with_addresses(chain_id, addresses);
+                Safe::new(self.provider, self.signer, safe_address, chain_config)
+            }
+            None => Safe::connect(self.provider, self.signer, safe_address).await?,
+        };
         Ok(Wallet::from_account(safe))
     }
 
@@ -318,7 +342,9 @@ where
     /// If a Safe already exists at the computed address, returns that address
     /// without deploying. Otherwise, deploys a new Safe.
     ///
-    /// Uses `&self` so the builder can be reused for `connect()` afterward.
+    /// Uses `&self` so the builder can be reused to connect afterward. Connect
+    /// with `connect_with_config(config)`: `connect(address)` does not know the
+    /// addresses of a config built [`with_addresses`](WalletConfig::with_addresses).
     ///
     /// # Arguments
     /// * `rpc_url` - The RPC URL for sending the deployment transaction
@@ -330,7 +356,7 @@ where
     /// let builder = WalletBuilder::new(provider, signer);
     /// let config = WalletConfig::new().with_salt_nonce(U256::from(42));
     /// let address = builder.deploy(rpc_url, config.clone()).await?;
-    /// let wallet = builder.connect(address).await?;
+    /// let wallet = builder.connect_with_config(config).await?;
     /// ```
     pub async fn deploy(&self, rpc_url: Url, config: WalletConfig) -> Result<Address> {
         Ok(self.deploy_detailed(rpc_url, config).await?.address)

@@ -25,7 +25,8 @@ pub enum Error {
     #[error("Safe not deployed at {0}")]
     SafeNotDeployed(Address),
 
-    /// MultiSend contract not deployed
+    /// The contract a batch is sent through (MultiSend or MultiSendCallOnly)
+    /// has no code at this address
     #[error("MultiSend contract not deployed at {0}")]
     MultiSendNotDeployed(Address),
 
@@ -136,6 +137,37 @@ pub enum Error {
     /// The transaction gas limit exceeds the configured per-transaction cap
     #[error("Transaction gas limit {gas_limit} exceeds cap {cap}")]
     GasLimitAboveCap { gas_limit: u64, cap: u64 },
+
+    /// An owner rotation could not be planned, verified or recorded
+    #[error("Owner rotation error: {0}")]
+    Rotation(String),
+
+    /// A transaction was broadcast (or may have been) but is not confirmed
+    #[error("Transaction {tx_hash} is not confirmed: {reason}")]
+    Unconfirmed {
+        tx_hash: alloy::primitives::B256,
+        reason: String,
+    },
+
+    /// The rotation state file is held by another process
+    #[error("Rotation state {0} is locked by another process")]
+    StateLocked(String),
+
+    /// A file could not be read or written
+    #[error("I/O error on {path}: {reason}")]
+    Io { path: String, reason: String },
+
+    /// A keystore file is malformed or uses unsupported parameters
+    #[error("Keystore error: {0}")]
+    Keystore(String),
+
+    /// A recovery phrase is invalid. The message never contains the phrase.
+    #[error("Recovery phrase error: {0}")]
+    Mnemonic(String),
+
+    /// The keystore MAC did not match: the password is wrong or the file is corrupt
+    #[error("Wrong keystore password (or corrupt keystore)")]
+    WrongPassword,
 }
 
 impl From<alloy::transports::RpcError<alloy::transports::TransportErrorKind>> for Error {

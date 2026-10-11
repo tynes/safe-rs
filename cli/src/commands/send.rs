@@ -6,20 +6,21 @@ use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
 use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::{
-    broadcast_raw, is_gs013_revert, safe_outcome_for_receipt, sign_outer_tx, wait_for_receipt,
-    Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig, OuterTxParams,
-    ReceiptWait, Safe, SignedSafeTx, SimTx, SimulationResult, TxChecks,
+    broadcast_raw, detect_addresses, is_gs013_revert, safe_outcome_for_receipt, sign_outer_tx,
+    simulate_exec, wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses,
+    ChainConfig, Error, ExecSimulation, OuterTxParams, ReceiptWait, Safe, SignedSafeTx,
 };
 
 use crate::bundle::load_bundle;
 use crate::cli::SendArgs;
-use crate::commands::{fork_session, http_provider, max_tx_gas, HttpProvider};
+use crate::commands::rotation::{self, RotationRun};
+use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
 use crate::output::{
     calls_summary, confirm_prompt, Console, ExecutionOutput, Report, SignedTxOutput,
     SimulationOutput,
 };
 use crate::sig_parser::{encode_function_call, parse_call_spec};
-use crate::wallet::create_signer;
+use crate::wallet::{create_payer, create_signer, load_hd_wallet, open_state};
 
 /// How often to poll for the receipt after broadcasting.
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -34,6 +35,19 @@ fn emit(report: &impl Report, json: bool, console: Console) {
 }
 
 pub async fn run(args: SendArgs, json: bool) -> Result<()> {
+    if args.rotate {
+        return Box::pin(run_rotating(args, json)).await;
+    }
+    if args.sweep.no_sweep || args.sweep.sweep_reserve.is_some() {
+        bail!("--no-sweep and --sweep-reserve only apply with --rotate");
+    }
+    if args.hd.hd_wallet.is_some() && !args.wallet.is_set() {
+        bail!(
+            "--hd-wallet needs --rotate: sending without rotating would publish an owner \
+             key and leave it in charge of the Safe"
+        );
+    }
+
     let calls = build_calls(&args)?;
     if calls.is_empty() {
         return Err(eyre!("No calls specified"));
@@ -46,12 +60,15 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         .or_else(|| args.no_submit.then(|| "-".to_string()));
     let console = Console::new(json, raw_out.as_deref() == Some("-"));
 
-    let signer = create_signer(&args.wallet)?;
-    let from = signer.address();
+    // The owner signs the Safe transaction; the payer sends the outer
+    // transaction. They are the same key unless a payer was given.
+    let signer = create_signer(&args.wallet, &args.password)?;
+    let payer = create_payer(&args.payer)?.unwrap_or_else(|| signer.clone());
+    let from = payer.address();
     let provider = http_provider(&args.rpc.rpc_url);
     let chain_id = provider.get_chain_id().await?;
     let safe_address = args.safe.safe;
-    let config = ChainConfig::with_addresses(chain_id, chain_addresses(&args));
+    let config = ChainConfig::with_addresses(chain_id, chain_addresses(&provider, &args).await);
     let safe = Safe::new(provider.clone(), signer.clone(), safe_address, config);
 
     // Verify ownership
@@ -72,18 +89,41 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     if let Some(gas) = args.safe_tx_gas {
         builder = builder.with_safe_tx_gas(gas);
     }
-    let prepared = builder.prepare().await?;
+    // The simulation forks from `--block`, so that is where a batch's MultiSend
+    // must have code: without it the simulated batch succeeds and does nothing.
+    if let (false, Some(block)) = (args.skip_simulation, args.sim.block) {
+        builder = builder.with_batch_target_block(block);
+    }
+    let prepared = builder.prepare().await.map_err(|e| match e {
+        Error::MultiSendNotDeployed(_) => {
+            let flag = if args.call_only {
+                "--multi-send-call-only"
+            } else {
+                "--multi-send"
+            };
+            eyre!("{e}; pass the address it has on this chain with {flag}")
+        }
+        e => eyre!(e),
+    })?;
     let signed = prepared.sign(&signer).await?;
 
     console.line(format!("Safe: {}", safe_address));
-    console.line(format!("Signer: {}", from));
+    console.line(format!("Signer: {}", signer.address()));
+    if from != signer.address() {
+        console.line(format!("Payer: {from}"));
+    }
     console.line(format!("Nonce: {}", prepared.params.nonce));
     console.line(format!("Safe Tx Hash: {}", prepared.safe_tx_hash));
     console.line("");
     console.line(calls_summary(&calls));
     console.line("");
 
-    let fees = outer_fees(&provider, &args).await?;
+    let fees = outer_fees(
+        &provider,
+        args.max_fee_per_gas,
+        args.max_priority_fee_per_gas,
+    )
+    .await?;
     let (eoa_nonce, gas_limit) = if args.skip_simulation {
         console.line("Skipping simulation (--skip-simulation)\n");
         let nonce = provider.get_transaction_count(from).await?;
@@ -117,11 +157,11 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         if args.simulate_only {
             return Ok(());
         }
-        (simulated.eoa_nonce, simulated.gas_limit)
+        (simulated.payer_nonce, simulated.gas_limit)
     };
 
     let outer = sign_outer_tx(
-        &signer,
+        &payer,
         OuterTxParams::exec_transaction(&signed, from, eoa_nonce, gas_limit, fees),
     )
     .await?;
@@ -199,18 +239,50 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// The strict simulation of the outer transaction that would be signed.
-struct Simulated {
-    result: SimulationResult,
-    eoa_nonce: u64,
-    gas_limit: u64,
+/// `send --rotate`: the user's calls followed by a swap of the owner for the HD
+/// wallet's next unused key, then a sweep of the old key's ETH.
+async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
+    if args.wallet.is_set() {
+        bail!(
+            "with --rotate the owner key comes from --hd-wallet: remove --private-key, \
+             --keystore and --interactive, and unset PRIVATE_KEY"
+        );
+    }
+    let calls = build_calls(&args)?;
+    if calls.is_empty() {
+        return Err(eyre!("No calls specified"));
+    }
+    let payer = create_payer(&args.payer)?;
+    let wallet = load_hd_wallet(&args.hd, &args.password)?;
+    let store = open_state(&wallet)?;
+    rotation::run(RotationRun {
+        rpc_url: &args.rpc.rpc_url,
+        safe: args.safe.safe,
+        wallet,
+        store,
+        legacy_owner: None,
+        sweep_legacy: false,
+        payer,
+        sweep: &args.sweep,
+        calls,
+        multi_send_call_only: args.multi_send_call_only,
+        sim: &args.sim,
+        gas_limit: args.gas_limit,
+        max_fee_per_gas: args.max_fee_per_gas,
+        max_priority_fee_per_gas: args.max_priority_fee_per_gas,
+        timeout: args.timeout,
+        trace: args.trace,
+        simulate_only: args.simulate_only,
+        raw_out: args.raw_out.clone(),
+        no_submit: args.no_submit,
+        no_confirm: args.no_confirm,
+        json,
+    })
+    .await
 }
 
 /// Simulates the exact outer `execTransaction` the CLI would sign, in the block
 /// after `--block`, with all validity checks (nonce, fees, balance).
-///
-/// Without `--gas-limit`, gas is first measured at the largest allowed limit
-/// (without requiring the sender to afford it) and the limit is that plus 20%.
 ///
 /// Calls are always traced so that a `GS013` failure reports the inner revert
 /// reason; the traces are only printed with `--trace`.
@@ -221,53 +293,9 @@ async fn simulate(
     signed: &SignedSafeTx,
     from: Address,
     fees: Eip1559Estimation,
-) -> Result<Simulated> {
-    let mut session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
-    let eoa_nonce = session.nonce(from)?;
-    let outer =
-        |gas_limit| OuterTxParams::exec_transaction(signed, from, eoa_nonce, gas_limit, fees);
-
-    let gas_limit = if let Some(gas) = args.gas_limit {
-        gas
-    } else {
-        let max = max_tx_gas(&session);
-        let measured = session.transact(SimTx::from_outer(&outer(max), TxChecks::MEASURE))?;
-        if !measured.success {
-            return Ok(Simulated {
-                result: measured,
-                eoa_nonce,
-                gas_limit: max,
-            });
-        }
-        (measured.gas_used + measured.gas_used / 5).min(max)
-    };
-
-    let mut result = session.transact(SimTx::from_outer(&outer(gas_limit), TxChecks::STRICT))?;
-    result.require_safe_success(signed.prepared.safe, signed.prepared.safe_tx_hash);
-    Ok(Simulated {
-        result,
-        eoa_nonce,
-        gas_limit,
-    })
-}
-
-/// EIP-1559 fees for the outer transaction: the node estimate, with any
-/// `--max-fee-per-gas` / `--max-priority-fee-per-gas` override applied.
-async fn outer_fees(provider: &HttpProvider, args: &SendArgs) -> Result<Eip1559Estimation> {
-    let mut fees = match (args.max_fee_per_gas, args.max_priority_fee_per_gas) {
-        (Some(max_fee_per_gas), Some(max_priority_fee_per_gas)) => Eip1559Estimation {
-            max_fee_per_gas,
-            max_priority_fee_per_gas,
-        },
-        _ => provider.estimate_eip1559_fees().await?,
-    };
-    if let Some(max_fee) = args.max_fee_per_gas {
-        fees.max_fee_per_gas = max_fee;
-    }
-    if let Some(priority_fee) = args.max_priority_fee_per_gas {
-        fees.max_priority_fee_per_gas = priority_fee;
-    }
-    Ok(fees)
+) -> Result<ExecSimulation> {
+    let session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
+    Ok(simulate_exec(&session, signed, from, fees, args.gas_limit)?)
 }
 
 /// `eth_estimateGas` for the outer transaction, plus 20%.
@@ -293,9 +321,10 @@ async fn estimate_outer_gas(
     Ok(estimate + estimate / 5)
 }
 
-/// Canonical v1.4.1 addresses with the `--multi-send*` overrides applied.
-fn chain_addresses(args: &SendArgs) -> ChainAddresses {
-    let mut addresses = ChainAddresses::v1_4_1();
+/// Canonical addresses for the Safe's version with the `--multi-send*`
+/// overrides applied.
+async fn chain_addresses(provider: &HttpProvider, args: &SendArgs) -> ChainAddresses {
+    let mut addresses = detect_addresses(provider, args.safe.safe).await;
     if let Some(multi_send) = args.multi_send {
         addresses.multi_send = multi_send;
     }

@@ -7,7 +7,10 @@
 //! - Fluent builder API for multicall transactions
 //! - Local fork simulation using foundry-fork-db + revm
 //! - Seamless integration with alloy's `sol!` macro ecosystem
-//! - Single-owner (1/1 threshold) Safe support
+//! - Single-signer (threshold 1) Safe support
+//! - One-time owner keys: every transaction swaps the signing owner for a
+//!   fresh key ([`rotation`]; the `hd-wallet` feature adds the encrypted
+//!   phrase and `rotation::RotatingSafe`)
 //!
 //! ## Quick Start
 //!
@@ -58,8 +61,14 @@ pub mod encoding;
 pub mod envelope;
 pub mod eoa;
 pub mod error;
+pub mod exec;
+#[cfg(feature = "hd-wallet")]
+pub mod hd;
 pub mod inspect;
+#[cfg(feature = "hd-wallet")]
+pub mod keystore;
 pub mod outer;
+pub mod rotation;
 pub mod safe;
 pub mod signing;
 pub mod simulation;
@@ -78,13 +87,22 @@ pub use create2::{
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
-pub use safe::{is_gs013_revert, is_safe, ExecutionResult, SafeBuilder, Safe, SAFE_SINGLETON_SLOT};
+pub use exec::{simulate_exec, submit_and_wait, ExecSimulation, Submission};
+#[cfg(feature = "hd-wallet")]
+pub use hd::HdWallet;
+pub use safe::{
+    detect_addresses, is_gs013_revert, is_safe, ExecutionResult, Safe, SafeBuilder,
+    SAFE_SINGLETON_SLOT,
+};
 pub use envelope::{
     batch_params, decode_exec_calldata, BatchTarget, DecodedExecTransaction, PreparedSafeTx,
     SafeTxGasPolicy, SignedSafeTx,
 };
 pub use inspect::{is_safe_with, read_safe_state, ModuleList, ReadSafeStateOptions, SafeState};
-pub use outer::{decode_signed_outer_tx, sign_outer_tx, OuterTxParams, SignedOuterTx};
+pub use outer::{
+    decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
+};
+pub use rotation::{OwnerSwap, RotationPlan};
 pub use simulation::{
     AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator, ParentHeader, SimBlockEnv,
     SimTx, SimulationResult, SpecId, TxChecks,

@@ -1,0 +1,246 @@
+//! `safe send` without `--rotate`: batches and the MultiSend contract they go
+//! through.
+//!
+//! Runs against a fresh local Anvil chain with Safe v1.4.1 deployed from the
+//! vendored artifacts, so no RPC URL is needed.
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test harness: setup panics are intended"
+)]
+
+#[allow(dead_code, reason = "the harness is shared with the library's tests")]
+#[path = "../../tests/local/common.rs"]
+mod common;
+
+use std::path::Path;
+use std::process::Command;
+
+use alloy::primitives::{hex, Address, B256, U256};
+use alloy::providers::Provider;
+use common::LocalHarness;
+use safe_rs::ChainAddresses;
+use serde_json::Value;
+
+struct Output {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+}
+
+impl Output {
+    fn json(&self) -> Value {
+        assert!(self.ok, "command failed:\n{}\n{}", self.stdout, self.stderr);
+        serde_json::from_str(&self.stdout)
+            .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{}", self.stdout))
+    }
+
+    /// Asserts the batch was refused because `target` has no code, naming
+    /// `flag` as the way out, and that nothing was written to stdout.
+    fn assert_missing_batch_target(&self, target: Address, flag: &str) {
+        assert!(!self.ok, "expected a refusal:\n{}", self.stdout);
+        let refusal = format!("MultiSend contract not deployed at {target}");
+        assert!(self.stderr.contains(&refusal), "{}", self.stderr);
+        assert!(self.stderr.contains(flag), "{}", self.stderr);
+        assert!(self.stdout.is_empty(), "{}", self.stdout);
+    }
+}
+
+/// Runs `safe send --json` for `safe`, signed and paid for by the harness
+/// owner, with none of the ambient environment variables the CLI reads.
+fn send(h: &LocalHarness, home: &Path, safe: Address, args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_safe"));
+    command
+        .arg("send")
+        .args(args)
+        .args(["--safe", &safe.to_string()])
+        .args(["--rpc-url", h.url().as_str()])
+        .args(["--private-key", &hex::encode_prefixed(h.owner.to_bytes())])
+        .arg("--json")
+        .env("SAFE_RS_HOME", home);
+    for name in [
+        "PRIVATE_KEY",
+        "SAFE_ADDRESS",
+        "ETH_RPC_URL",
+        "SAFE_HD_WALLET",
+        "SAFE_PASSWORD_FILE",
+        "SAFE_PAYER_PRIVATE_KEY",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().expect("run safe");
+    Output {
+        ok: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Writes a bundle of two transfers to `recipient`, 15 wei in total.
+fn write_transfers(path: &Path, recipient: Address) {
+    let bundle = serde_json::json!([
+        { "to": recipient.to_string(), "value": "10" },
+        { "to": recipient.to_string(), "value": "5" },
+    ]);
+    std::fs::write(path, bundle.to_string()).unwrap();
+}
+
+async fn balance(h: &LocalHarness, address: Address) -> U256 {
+    h.provider.get_balance(address).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_is_refused_when_its_multisend_has_no_code() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let safe = h.deploy_safe(600).await;
+    h.fund(safe, U256::from(1_000)).await;
+    let recipient = Address::repeat_byte(0x47);
+    let bundle = dir.path().join("bundle.json");
+    write_transfers(&bundle, recipient);
+    let bundle = bundle.to_str().unwrap();
+
+    // The harness deploys the Safe contracts through another CREATE2 deployer,
+    // so the canonical MultiSend addresses the CLI defaults to are empty here.
+    let canonical = ChainAddresses::v1_4_1();
+    for target in [canonical.multi_send, canonical.multi_send_call_only] {
+        assert!(h.provider.get_code_at(target).await.unwrap().is_empty());
+    }
+
+    // Refused before anything is signed, however far the command would go.
+    for mode in [
+        &[][..],
+        &["--simulate-only"],
+        &["--skip-simulation"],
+        &["--no-submit"],
+    ] {
+        let mut args = vec!["--bundle", bundle, "--call-only"];
+        args.extend_from_slice(mode);
+        send(&h, &home, safe, &args)
+            .assert_missing_batch_target(canonical.multi_send_call_only, "--multi-send-call-only");
+    }
+    send(&h, &home, safe, &["--bundle", bundle])
+        .assert_missing_batch_target(canonical.multi_send, "--multi-send");
+    let owner_nonce = h
+        .provider
+        .get_transaction_count(h.owner.address())
+        .await
+        .unwrap();
+    assert_eq!(owner_nonce, 0, "nothing was broadcast");
+    assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
+
+    // A single call has no batch target and is unaffected.
+    let single = send(&h, &home, safe, &[&recipient.to_string(), "--value", "1"]).json();
+    assert_eq!(single["success"], true);
+    assert_eq!(balance(&h, recipient).await, U256::from(1));
+
+    // Pointed at the deployed MultiSendCallOnly, the batch goes through.
+    let msco = h.addresses.multi_send_call_only.to_string();
+    let sent = send(
+        &h,
+        &home,
+        safe,
+        &[
+            "--bundle",
+            bundle,
+            "--call-only",
+            "--multi-send-call-only",
+            &msco,
+        ],
+    )
+    .json();
+    assert_eq!(sent["success"], true);
+    assert_eq!(sent["outcome"], "success");
+    assert_eq!(balance(&h, recipient).await, U256::from(16));
+    assert_eq!(h.safe_nonce(safe).await, U256::from(2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_batch_target_must_exist_at_the_simulated_block() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let safe = h.deploy_safe(601).await;
+    h.fund(safe, U256::from(1_000)).await;
+    let bundle = dir.path().join("bundle.json");
+    write_transfers(&bundle, Address::repeat_byte(0x48));
+    let bundle = bundle.to_str().unwrap();
+
+    // A MultiSendCallOnly deployed after `before`.
+    let before = h.provider.get_block_number().await.unwrap().to_string();
+    let late = h.deploy_multi_send_call_only(B256::repeat_byte(2)).await;
+    let late_arg = late.to_string();
+    let simulate = |extra: &[&str]| {
+        let mut args = vec![
+            "--bundle",
+            bundle,
+            "--call-only",
+            "--multi-send-call-only",
+            &late_arg,
+            "--simulate-only",
+        ];
+        args.extend_from_slice(extra);
+        send(&h, &home, safe, &args)
+    };
+
+    // Forked from `before`, the batch would run against no code and the
+    // simulation would report a success that did nothing.
+    simulate(&["--block", &before]).assert_missing_batch_target(late, "--multi-send-call-only");
+    assert_eq!(simulate(&[]).json()["success"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_default_multisend_follows_the_safe_version() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let recipient = Address::repeat_byte(0x49);
+    let bundle = dir.path().join("bundle.json");
+    write_transfers(&bundle, recipient);
+    let bundle = bundle.to_str().unwrap();
+    let v1_4_1 = ChainAddresses::v1_4_1();
+    let v1_5_0 = ChainAddresses::v1_5_0();
+
+    // A chain that has the v1.5.0 MultiSendCallOnly and not the v1.4.1 one.
+    h.set_multi_send_call_only(v1_5_0.multi_send_call_only)
+        .await;
+    let singleton = h.deploy_singleton_reporting("1.5.0").await;
+    let new_safe = h
+        .deploy_safe_on(singleton, &[h.owner.address()], 1, 602)
+        .await;
+    let old_safe = h.deploy_safe(602).await;
+    h.fund(new_safe, U256::from(1_000)).await;
+    h.fund(old_safe, U256::from(1_000)).await;
+    let batch_target = |safe, extra: &[&str]| {
+        let mut args = vec!["--bundle", bundle, "--call-only", "--no-submit"];
+        args.extend_from_slice(extra);
+        let signed = send(&h, &home, safe, &args).json();
+        let to: Address = signed["safe_tx"]["to"].as_str().unwrap().parse().unwrap();
+        to
+    };
+
+    // The v1.5.0 Safe batches through the v1.5.0 contract without being told to.
+    assert_eq!(batch_target(new_safe, &[]), v1_5_0.multi_send_call_only);
+    let sent = send(&h, &home, new_safe, &["--bundle", bundle, "--call-only"]).json();
+    assert_eq!(sent["outcome"], "success");
+    assert_eq!(balance(&h, recipient).await, U256::from(15));
+
+    // The v1.4.1 Safe keeps the v1.4.1 one, which this chain does not have.
+    send(&h, &home, old_safe, &["--bundle", bundle, "--call-only"])
+        .assert_missing_batch_target(v1_4_1.multi_send_call_only, "--multi-send-call-only");
+
+    // An override wins over the version, for either Safe.
+    for (safe, target) in [
+        (new_safe, h.addresses.multi_send_call_only),
+        (old_safe, h.addresses.multi_send_call_only),
+        (old_safe, v1_5_0.multi_send_call_only),
+    ] {
+        let chosen = batch_target(safe, &["--multi-send-call-only", &target.to_string()]);
+        assert_eq!(chosen, target);
+    }
+}

@@ -9,7 +9,8 @@ use alloy::eips::eip1559::Eip1559Estimation;
 use alloy::eips::BlockId;
 use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::node_bindings::{Anvil, AnvilInstance};
-use alloy::primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy::primitives::{address, hex, keccak256, Address, Bytes, B256, U256};
+use alloy::providers::ext::AnvilApi;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
@@ -23,11 +24,19 @@ use safe_rs::{
 /// Anvil's default deterministic CREATE2 deployer (Arachnid).
 pub const CREATE2_DEPLOYER: Address = address!("0x4e59b44847b379578588920cA78FbF26c0B4956C");
 
+/// The vendored Safe artifacts. The harness is also compiled into the CLI
+/// crate's tests, whose manifest is one directory down.
+fn fixtures_dir() -> std::path::PathBuf {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    [manifest.to_path_buf(), manifest.join("..")]
+        .into_iter()
+        .map(|dir| dir.join("tests/fixtures/safe-1.4.1"))
+        .find(|dir| dir.is_dir())
+        .expect("Safe fixtures directory")
+}
+
 fn artifact_bytecode(name: &str) -> Bytes {
-    let path = format!(
-        "{}/tests/fixtures/safe-1.4.1/{name}.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let path = fixtures_dir().join(format!("{name}.json"));
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("read artifact"))
             .expect("parse artifact");
@@ -136,17 +145,30 @@ impl LocalHarness {
 
     /// A `Safe` client for `safe`, signing and sending as the owner.
     pub fn safe_client(&self, safe: Address) -> Safe<DynProvider<AnyNetwork>> {
-        let wallet_provider = ProviderBuilder::new()
+        self.safe_client_with(safe, self.addresses.clone())
+    }
+
+    /// A `Safe` client for `safe` that batches through `addresses`.
+    pub fn safe_client_with(
+        &self,
+        safe: Address,
+        addresses: ChainAddresses,
+    ) -> Safe<DynProvider<AnyNetwork>> {
+        Safe::new(
+            self.owner_provider(),
+            self.owner.clone(),
+            safe,
+            ChainConfig::with_addresses(self.chain_id, addresses),
+        )
+    }
+
+    /// A provider that signs and sends as the owner.
+    pub fn owner_provider(&self) -> DynProvider<AnyNetwork> {
+        ProviderBuilder::new()
             .network::<AnyNetwork>()
             .wallet(EthereumWallet::from(self.owner.clone()))
             .connect_http(self.url())
-            .erased();
-        Safe::new(
-            wallet_provider,
-            self.owner.clone(),
-            safe,
-            ChainConfig::with_addresses(self.chain_id, self.addresses.clone()),
-        )
+            .erased()
     }
 
     pub fn url(&self) -> url::Url {
@@ -177,6 +199,40 @@ impl LocalHarness {
         expected
     }
 
+    /// Deploys another copy of `MultiSendCallOnly`, at an address set by `salt`.
+    pub async fn deploy_multi_send_call_only(&self, salt: B256) -> Address {
+        self.create2_salted(salt, artifact_bytecode("MultiSendCallOnly"))
+            .await
+    }
+
+    /// Gives `address` the code of `MultiSendCallOnly`, as on a chain where
+    /// the contract is deployed there.
+    pub async fn set_multi_send_call_only(&self, address: Address) {
+        let code = self
+            .provider
+            .get_code_at(self.addresses.multi_send_call_only)
+            .await
+            .expect("code");
+        self.provider
+            .anvil_set_code(address, code)
+            .await
+            .expect("set code");
+    }
+
+    /// Deploys a Safe singleton whose `VERSION()` reports `version`.
+    ///
+    /// The code is v1.4.1's with only that string replaced: enough for
+    /// whatever reads the version to choose contracts or gate a feature.
+    pub async fn deploy_singleton_reporting(&self, version: &str) -> Address {
+        assert_eq!(version.len(), "1.4.1".len(), "same length as 1.4.1");
+        let initcode = hex::encode(artifact_bytecode("Safe"));
+        let reported = hex::encode("1.4.1");
+        assert_eq!(initcode.matches(&reported).count(), 1);
+        let patched = initcode.replace(&reported, &hex::encode(version));
+        self.create2(patched.parse().expect("patched bytecode"))
+            .await
+    }
+
     /// Deploys a strict 1/1 Safe for the owner through the factory.
     pub async fn deploy_safe(&self, salt_nonce: u64) -> Address {
         self.deploy_safe_with(&[self.owner.address()], 1, salt_nonce)
@@ -189,24 +245,33 @@ impl LocalHarness {
         threshold: u64,
         salt_nonce: u64,
     ) -> Address {
+        self.deploy_safe_on(self.addresses.safe_singleton, owners, threshold, salt_nonce)
+            .await
+    }
+
+    /// Deploys a Safe that is a proxy for `singleton`.
+    pub async fn deploy_safe_on(
+        &self,
+        singleton: Address,
+        owners: &[Address],
+        threshold: u64,
+        salt_nonce: u64,
+    ) -> Address {
         let creation_code =
             safe_rs::fetch_proxy_creation_code(&self.provider, self.addresses.proxy_factory)
                 .await
                 .expect("creation code");
         let (predicted, initializer) = safe_rs::predict_safe_address(
             self.addresses.proxy_factory,
-            self.addresses.safe_singleton,
+            singleton,
             owners,
             threshold,
             self.addresses.fallback_handler,
             U256::from(salt_nonce),
             &creation_code,
         );
-        let data = safe_rs::encode_create_proxy_with_nonce(
-            self.addresses.safe_singleton,
-            initializer,
-            U256::from(salt_nonce),
-        );
+        let data =
+            safe_rs::encode_create_proxy_with_nonce(singleton, initializer, U256::from(salt_nonce));
         let tx = TransactionRequest::default()
             .to(self.addresses.proxy_factory)
             .input(data.into());
@@ -261,12 +326,12 @@ impl LocalHarness {
 
     /// Signs the outer `execTransaction` from the owner with a fixed gas limit.
     pub async fn sign_exec(&self, prepared: &PreparedSafeTx, gas_limit: u64) -> SignedOuterTx {
-        let signed = prepared.sign(&self.owner).await.expect("sign safe tx");
-        let nonce = self
-            .provider
-            .get_transaction_count(self.owner.address())
+        self.sign_exec_with(prepared, &self.owner, &self.owner, gas_limit)
             .await
-            .expect("eoa nonce");
+    }
+
+    /// EIP-1559 fees that clear the next block's base fee.
+    pub async fn fees(&self) -> Eip1559Estimation {
         let base_fee = self
             .provider
             .get_block(BlockId::latest())
@@ -276,15 +341,40 @@ impl LocalHarness {
             .header
             .base_fee_per_gas
             .unwrap_or(1);
-        let fees = Eip1559Estimation {
+        Eip1559Estimation {
             max_fee_per_gas: u128::from(base_fee) * 2 + 1_000_000_000,
             max_priority_fee_per_gas: 1_000_000_000,
-        };
-        let params =
-            OuterTxParams::exec_transaction(&signed, self.owner.address(), nonce, gas_limit, fees);
-        sign_outer_tx(&self.owner, params)
+        }
+    }
+
+    /// Signs the Safe transaction with `owner` and the outer `execTransaction`
+    /// with `payer`, with a fixed gas limit.
+    pub async fn sign_exec_with(
+        &self,
+        prepared: &PreparedSafeTx,
+        owner: &PrivateKeySigner,
+        payer: &PrivateKeySigner,
+        gas_limit: u64,
+    ) -> SignedOuterTx {
+        let signed = prepared.sign(owner).await.expect("sign safe tx");
+        let nonce = self
+            .provider
+            .get_transaction_count(payer.address())
             .await
-            .expect("sign outer")
+            .expect("eoa nonce");
+        let fees = self.fees().await;
+        let params =
+            OuterTxParams::exec_transaction(&signed, payer.address(), nonce, gas_limit, fees);
+        sign_outer_tx(payer, params).await.expect("sign outer")
+    }
+
+    /// The Safe's owners, in list order.
+    pub async fn owners(&self, safe: Address) -> Vec<Address> {
+        ISafe::new(safe, &self.provider)
+            .getOwners()
+            .call()
+            .await
+            .expect("owners")
     }
 
     /// Broadcasts a signed outer transaction and waits for its receipt.

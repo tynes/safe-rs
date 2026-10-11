@@ -71,6 +71,25 @@ pub enum BatchTarget {
     MultiSend(Address),
 }
 
+impl BatchTarget {
+    /// The address of the batch contract.
+    pub fn address(self) -> Address {
+        match self {
+            Self::CallOnly(address) | Self::MultiSend(address) => address,
+        }
+    }
+
+    /// The contract [`batch_params`] sends `calls` through, or `None` for a
+    /// single call, which the Safe executes directly.
+    ///
+    /// A DELEGATECALL to an address without code succeeds and does nothing, so
+    /// this address must have code before the batch is signed (see
+    /// [`require_batch_target`](crate::inspect::require_batch_target)).
+    pub fn address_for(self, calls: &[Call]) -> Option<Address> {
+        (calls.len() > 1).then(|| self.address())
+    }
+}
+
 /// Encodes `calls` as the fields of one Safe transaction.
 ///
 /// One call is executed directly. Two or more calls are packed into
@@ -465,6 +484,28 @@ mod tests {
             batch_params(&[call(SAFE), call(MSCO)], BatchTarget::CallOnly(MSCO)).unwrap();
         assert!(IMultiSendCallOnly::multiSendCall::abi_decode(&batch.data).is_ok());
         assert!(batch.safe_tx_gas.is_zero() && batch.nonce.is_zero());
+    }
+
+    #[test]
+    fn only_a_batch_of_two_or_more_goes_through_the_batch_target() {
+        for target in [BatchTarget::CallOnly(MSCO), BatchTarget::MultiSend(MSCO)] {
+            assert_eq!(target.address(), MSCO);
+            let mut calls = Vec::new();
+            assert_eq!(target.address_for(&calls), None);
+
+            // A single call is executed directly, even one to the batch contract.
+            calls.push(call(MSCO));
+            assert_eq!(target.address_for(&calls), None);
+            assert_eq!(
+                batch_params(&calls, target).unwrap().operation,
+                Operation::Call
+            );
+
+            calls.push(call(SAFE));
+            let params = batch_params(&calls, target).unwrap();
+            assert_eq!(target.address_for(&calls), Some(params.to));
+            assert_eq!(params.operation, Operation::DelegateCall);
+        }
     }
 
     #[test]

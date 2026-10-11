@@ -224,6 +224,28 @@ pub async fn read_safe_state<P: Provider<N>, N: Network>(
     })
 }
 
+/// Fails with [`Error::MultiSendNotDeployed`] if `target` has no code at `block`.
+///
+/// A DELEGATECALL to an address without code succeeds and does nothing: a Safe
+/// sent a batch through such a target emits `ExecutionSuccess`, in simulation
+/// and on chain, while none of the batched calls ran. A read that fails is an
+/// error too, never "deployed".
+pub async fn require_batch_target<P: Provider<N>, N: Network>(
+    provider: &P,
+    target: Address,
+    block: BlockId,
+) -> Result<()> {
+    let code = provider
+        .get_code_at(target)
+        .block_id(block)
+        .await
+        .map_err(incomplete("batch target code"))?;
+    if code.is_empty() {
+        return Err(Error::MultiSendNotDeployed(target));
+    }
+    Ok(())
+}
+
 /// Returns true if `address` is a proxy whose singleton (slot 0) is one of `singletons`.
 pub async fn is_safe_with<P: Provider<N>, N: Network>(
     provider: &P,

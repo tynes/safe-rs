@@ -94,6 +94,7 @@ sol! {
         function setGuard(address guard) external;
         function setFallbackHandler(address handler) external;
         function addOwnerWithThreshold(address owner, uint256 _threshold) external;
+        function removeOwner(address prevOwner, address owner, uint256 _threshold) external;
         function swapOwner(address prevOwner, address oldOwner, address newOwner) external;
         function changeThreshold(uint256 _threshold) external;
 
@@ -113,6 +114,9 @@ sol! {
         );
         event EnabledModule(address indexed module);
         event ChangedGuard(address indexed guard);
+        event AddedOwner(address indexed owner);
+        event RemovedOwner(address indexed owner);
+        event ChangedThreshold(uint256 threshold);
         event ChangedFallbackHandler(address indexed handler);
     }
 
@@ -159,6 +163,15 @@ sol! {
         function proxyCreationCode() external pure returns (bytes memory);
 
         event ProxyCreation(address indexed proxy, address singleton);
+    }
+
+    /// OP-stack gas price oracle predeploy, for fees charged outside gas
+    #[sol(rpc)]
+    interface IGasPriceOracle {
+        /// L1 data fee for an unsigned RLP-encoded transaction
+        function getL1Fee(bytes memory _data) external view returns (uint256);
+        /// Operator fee for a given gas usage (zero before Isthmus)
+        function getOperatorFee(uint256 _gasUsed) external view returns (uint256);
     }
 
     /// Safe setup interface for initialization

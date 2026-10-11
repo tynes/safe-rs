@@ -8,9 +8,9 @@ anvil_env := "ANVIL_COMPUTE_UNITS_PER_SECOND=" + anvil_compute_units + " ANVIL_R
 default:
     @just --list
 
-# Run all tests
+# Run all tests (library, CLI and feature-gated suites)
 test:
-    cargo test
+    cargo test --workspace --all-features
 
 # Run E2E tests with rate-limited Anvil config (requires ETH_RPC_URL)
 test-e2e:
