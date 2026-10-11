@@ -163,7 +163,7 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 
 `--rotate` cannot be combined with `--skip-simulation`, `--safe-tx-gas`, `--nonce` or `--multi-send`: the rotation has to succeed or fail together with the calls, and its result is checked in simulation.
 
-Two or more calls go through a MultiSend contract: by default the canonical one for the Safe's version (v1.5.0 for a v1.5.0 Safe, v1.4.1 for any other), with or without `--rotate`. Pass another with `--multi-send` or `--multi-send-call-only`. A Safe sent a batch through an address without code reports success while none of the calls ran, so if the contract has no code on the chain (at `--block`, when simulating from one) the command stops before signing anything and names the address. With `--rotate` the same mistake fails the simulation instead, as an owner list that did not change.
+Two or more calls go through a MultiSend contract: by default the canonical one for the Safe's version (v1.5.0 for a v1.5.0 Safe, v1.4.1 for any other), with or without `--rotate`. Pass another with `--multi-send` or `--multi-send-call-only`. A Safe sent a batch through an address without code reports success while none of the calls ran, so if the contract has no code on the chain (at `--block`, when simulating from one) the command stops before signing anything and names the address. That holds with `--rotate` too, where the calls and the owner swap are the batch.
 
 The `--raw-out` document contains `chain_id`, `safe`, `safe_nonce`, `safe_tx_hash`, the Safe transaction fields (`safe_tx`), the owner `signer` and `signature`, the outer transaction fields (`outer`), the EIP-2718 `raw` bytes and their `tx_hash`. `raw` can be rebroadcast as is with `cast publish`. With `--rotate` it also has a `rotation` object naming the old and new owner, the payer and the planned sweep.
 
@@ -512,6 +512,8 @@ println!("new owner: {:?}", safe.binding()?.current);
 ```
 
 `execute` is `prepare` (reserve the next key, sign, simulate, check the resulting owner list) followed by `submit` (record the signed transaction, broadcast, read the owner list at the receipt's block, sweep). Call them separately to inspect a transaction before it leaves the process; `rotate()` sends a swap with no other calls, and `sync()` rebuilds the state from the chain. `RotationConfig` sets a separate payer, the sweep, and a legacy owner key for moving an existing Safe onto the wallet.
+
+Calls sent with the swap are batched through `RotationConfig::addresses.multi_send_call_only`. `prepare` fails with `Error::MultiSendNotDeployed` before signing if that address has no code; a rotation with no other calls is a direct call to the Safe and needs no batch contract.
 
 Without the feature, `safe_rs::rotation` still has the parts that need no key material: `plan_rotation` builds the Safe transaction for any `(old owner, new owner)` pair, `check_post_state` verifies it against a simulation, and `RotationState` tracks used keys.
 

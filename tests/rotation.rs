@@ -30,7 +30,7 @@ use safe_rs::rotation::{
 };
 use safe_rs::{
     broadcast_raw, sign_outer_tx, wait_for_receipt, BroadcastOutcome, Call, Error, HdWallet,
-    OuterTxParams, ReceiptWait,
+    Operation, OuterTxParams, ReceiptWait,
 };
 
 /// A BIP-39 test vector, deliberately not Anvil's own phrase.
@@ -728,6 +728,48 @@ async fn a_failing_simulation_signs_nothing_off() {
     let outcome = rotating.rotate().await.unwrap();
     assert_eq!(outcome.status, RotationStatus::Rotated);
     assert_eq!(h.owners(safe).await, vec![reserved.address]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_whose_target_has_no_code_is_refused_before_signing() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 120, &state).await;
+    let recipient = Address::repeat_byte(0x42);
+    let codeless = Address::repeat_byte(0x99);
+    assert!(h.provider.get_code_at(codeless).await.unwrap().is_empty());
+    let mut missing = config(&h);
+    missing.addresses.multi_send_call_only = codeless;
+
+    // A call and the swap are a batch. Sent through an address without code it
+    // would report success while neither ran, so it is refused by name instead
+    // of as a simulated owner list that did not change.
+    let mut rotating = open_with(&h, safe, &state, missing).await;
+    let refused = rotating
+        .prepare(&[pay(recipient, 5)], ExecOptions::default())
+        .await;
+    assert!(
+        matches!(&refused, Err(Error::MultiSendNotDeployed(target)) if *target == codeless),
+        "{refused:?}"
+    );
+    let binding = rotating.binding().unwrap();
+    assert_eq!(binding.exposed, None, "no signature left the process");
+    assert_eq!(binding.pending, None);
+    let reserved = binding.reserved.expect("the reservation survives");
+    assert_eq!(eoa_nonce(&h, key(1)).await, 0);
+    assert_eq!(h.owners(safe).await, vec![key(1)]);
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
+
+    // A rotation on its own is a direct self-call: it has no batch target, and
+    // goes through with the same configuration.
+    let tx = rotating.prepare(&[], ExecOptions::default()).await.unwrap();
+    assert_eq!(tx.plan.prepared.params.to, safe);
+    assert_eq!(tx.plan.prepared.params.operation, Operation::Call);
+    let outcome = rotating.submit(tx).await.unwrap();
+    assert_eq!(outcome.status, RotationStatus::Rotated);
+    assert_eq!(h.owners(safe).await, vec![reserved.address]);
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
 }
 
 #[tokio::test(flavor = "multi_thread")]

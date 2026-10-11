@@ -194,6 +194,10 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
             emit(&report, run.json, console);
             bail!("simulation failed: {reason}");
         }
+        Err(e @ Error::MultiSendNotDeployed(_)) => {
+            print_warnings(&rotating.take_warnings());
+            bail!("{e}; pass the address it has on this chain with --multi-send-call-only");
+        }
         Err(e) => return Err(eyre!(e)),
     };
     print_warnings(&rotating.take_warnings());

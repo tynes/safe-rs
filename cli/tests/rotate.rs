@@ -690,3 +690,71 @@ async fn a_rotating_send_defaults_to_the_multisend_of_the_safe_version() {
     assert_eq!(h.owners(safe).await, vec![owner]);
     assert_eq!(balance(&h, recipient).await, U256::from(5));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotating_send_names_a_multisend_that_has_no_code() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli {
+        h: &h,
+        home: dir.path().join("home"),
+        password_file: dir.path().join("password"),
+    };
+    write(&cli.password_file, "pw");
+    let phrase_file = dir.path().join("phrase");
+    write(&phrase_file, PHRASE);
+    cli.run(&[
+        "wallet",
+        "import",
+        "demo",
+        "--phrase-file",
+        phrase_file.to_str().unwrap(),
+        "--password-file",
+        cli.password_file.to_str().unwrap(),
+        "--json",
+    ])
+    .json();
+
+    // The harness deploys the Safe contracts through another CREATE2 deployer,
+    // so the canonical MultiSendCallOnly the CLI defaults to is empty here.
+    let canonical = ChainAddresses::v1_4_1().multi_send_call_only;
+    assert!(h.provider.get_code_at(canonical).await.unwrap().is_empty());
+    let safe = h.deploy_safe_with(&[key(1)], 1, 503).await;
+    h.fund(key(1), eth(1)).await;
+    h.fund(safe, U256::from(1_000)).await;
+    let safe_arg = safe.to_string();
+    let recipient = Address::repeat_byte(0x42);
+
+    // The call and the swap are a batch: refused before anything is signed,
+    // naming the address and the option that sets it.
+    let refused = cli.wallet_command(&[
+        "send",
+        &recipient.to_string(),
+        "--value",
+        "5",
+        "--safe",
+        &safe_arg,
+        "--rotate",
+    ]);
+    assert!(!refused.ok, "expected a refusal:\n{}", refused.stdout);
+    let refusal = format!("MultiSend contract not deployed at {canonical}");
+    assert!(refused.stderr.contains(&refusal), "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("--multi-send-call-only"),
+        "{}",
+        refused.stderr
+    );
+    assert!(refused.stdout.is_empty(), "{}", refused.stdout);
+    assert_eq!(h.owners(safe).await, vec![key(1)]);
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
+
+    // A rotation with no other calls is a direct self-call and needs no batch
+    // contract.
+    let rotated = cli.wallet_command(&["rotate", "--safe", &safe_arg]).json();
+    assert_eq!(rotated["status"], "rotated");
+    assert_eq!(rotated["old_owner"]["index"], 1);
+    let owner = address(&rotated["owner"]["address"]);
+    assert_ne!(owner, key(1));
+    assert_eq!(h.owners(safe).await, vec![owner]);
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
+}
