@@ -16,6 +16,7 @@ use revm::primitives::hardfork::SpecId;
 use revm::state::EvmState;
 use revm::{Context, DatabaseCommit, ExecuteEvm, InspectEvm, MainBuilder, MainContext};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
+use tokio::runtime::Handle;
 
 use crate::error::{Error, Result};
 use crate::simulation::fork::{build_state_diff, decode_revert_reason, SimulationResult};
@@ -27,13 +28,32 @@ pub(crate) fn canonical_hash(hash: B256) -> BlockId {
 }
 
 /// Forked database backed by `provider`, pinned at `pin`.
+///
+/// The backend that fetches state runs as a task on the caller's runtime. It
+/// must not get a runtime of its own: an HTTP provider spawns its connection
+/// drivers on whichever runtime sends a request, and the connections go back
+/// to the pool the caller's clone of the provider shares. A runtime that ends
+/// with the fork takes those drivers with it, and a request the caller sends
+/// while it is torn down can be queued on a dying connection and never answered.
+///
+/// Outside a runtime the backend falls back to a thread and runtime of its own,
+/// which end with the fork. That is only safe while nothing else uses the
+/// provider's connections.
 pub(crate) fn fork_db<P>(provider: P, chain_id: u64, pin: BlockId) -> CacheDB<SharedBackend>
 where
     P: Provider<AnyNetwork> + 'static,
 {
     let meta = BlockchainDbMeta::new(Default::default(), format!("fork-{chain_id}"));
     let db = BlockchainDb::new(meta, None);
-    let backend = SharedBackend::spawn_backend_thread(Arc::new(provider), db, Some(pin));
+    let provider = Arc::new(provider);
+    let backend = match Handle::try_current() {
+        Ok(runtime) => {
+            let (backend, handler) = SharedBackend::new(provider, db, Some(pin));
+            runtime.spawn(handler);
+            backend
+        }
+        Err(_) => SharedBackend::spawn_backend_thread(provider, db, Some(pin)),
+    };
     CacheDB::new(backend)
 }
 
