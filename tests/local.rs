@@ -12,15 +12,20 @@
 #[path = "local/common.rs"]
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::eips::eip1559::BaseFeeParams;
 use alloy::eips::BlockId;
+use alloy::network::{AnyNetwork, EthereumWallet, Network};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::ext::AnvilApi;
-use alloy::providers::Provider;
+use alloy::providers::fillers::NonceManager;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolValue;
+use alloy::transports::TransportResult;
 use common::{
     enable_module_call, one_shot_initcode, reverter_initcode, set_guard_call, LocalHarness,
 };
@@ -960,6 +965,66 @@ async fn connect_batches_through_the_contracts_of_the_safe_version() {
         safe.addresses().multi_send_call_only,
         v1_4_1.multi_send_call_only
     );
+}
+
+/// A nonce manager that counts the nonces it hands out.
+#[derive(Clone, Debug, Default)]
+struct CountingNonces(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl NonceManager for CountingNonces {
+    async fn get_next_nonce<P, N>(&self, provider: &P, address: Address) -> TransportResult<u64>
+    where
+        P: Provider<N>,
+        N: Network,
+    {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        provider.get_transaction_count(address).pending().await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_execute_takes_no_nonce_from_the_provider() {
+    let h = LocalHarness::new().await;
+    let safe_address = h.deploy_safe(13).await;
+    let reverter = h.create2(reverter_initcode()).await;
+    let nonces = CountingNonces::default();
+    let provider = ProviderBuilder::<_, _, AnyNetwork>::default()
+        .with_gas_estimation()
+        .with_nonce_management(nonces.clone())
+        .fetch_chain_id()
+        .wallet(EthereumWallet::from(h.owner.clone()))
+        .connect_http(h.url())
+        .erased();
+    let safe = Safe::new(
+        provider,
+        h.owner.clone(),
+        safe_address,
+        ChainConfig::with_addresses(h.chain_id, h.addresses.clone()),
+    );
+
+    // alloy's default nonce filler counts a nonce as used once it is handed out.
+    // One taken for a transaction that then fails gas estimation leaves a gap,
+    // and the next transaction waits behind it for a receipt that never comes.
+    let err = safe
+        .batch()
+        .add(Call::call(reverter, Bytes::new()))
+        .execute()
+        .await;
+    assert!(
+        matches!(err, Err(Error::InnerTransactionReverted { .. })),
+        "{err:?}"
+    );
+    assert_eq!(nonces.0.load(Ordering::SeqCst), 0);
+
+    let result = safe
+        .batch()
+        .add(Call::call(safe_address, Bytes::new()))
+        .execute()
+        .await
+        .unwrap();
+    assert!(result.success);
+    assert_eq!(nonces.0.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

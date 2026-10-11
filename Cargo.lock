@@ -4855,6 +4855,7 @@ dependencies = [
  "alloy",
  "alloy-primitives",
  "alloy-sol-types",
+ "async-trait",
  "chrono",
  "ctr",
  "foundry-fork-db",
