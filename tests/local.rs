@@ -512,6 +512,65 @@ async fn wallet_builder_address_override_predicts_and_deploys() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn connect_with_config_batches_through_the_config_addresses() {
+    let h = LocalHarness::new().await;
+    let builder = WalletBuilder::new(h.owner_provider(), h.owner.clone());
+    let config = WalletConfig::new()
+        .with_salt_nonce(U256::from(4321))
+        .with_addresses(h.addresses.clone());
+    let safe_address = builder.deploy(h.url(), config.clone()).await.unwrap();
+    h.fund(safe_address, U256::from(1_000)).await;
+    let recipient = Address::repeat_byte(0x4a);
+    let canonical = ChainAddresses::v1_4_1();
+
+    // connect(address) has no config to take addresses from: it picks the
+    // canonical contracts for the Safe's version, which this chain lacks.
+    let detected = WalletBuilder::new(h.owner_provider(), h.owner.clone())
+        .connect(safe_address)
+        .await
+        .unwrap();
+    assert_eq!(
+        detected.config().addresses.multi_send_call_only,
+        canonical.multi_send_call_only
+    );
+
+    // The config's deployment is the one the wallet batches through.
+    let wallet = builder.connect_with_config(config).await.unwrap();
+    assert_eq!(wallet.address(), safe_address);
+    assert_eq!(wallet.config().chain_id, h.chain_id);
+    let addresses = &wallet.config().addresses;
+    assert_eq!(addresses.safe_singleton, h.addresses.safe_singleton);
+    assert_eq!(addresses.multi_send, h.addresses.multi_send);
+    assert_eq!(
+        addresses.multi_send_call_only,
+        h.addresses.multi_send_call_only
+    );
+    assert_ne!(
+        addresses.multi_send_call_only,
+        canonical.multi_send_call_only
+    );
+
+    let result = wallet
+        .batch()
+        .call_only()
+        .add(Call::new(recipient, U256::from(10), Bytes::new()))
+        .add(Call::new(recipient, U256::from(5), Bytes::new()))
+        .simulate()
+        .await
+        .unwrap()
+        .simulation_success()
+        .unwrap()
+        .execute()
+        .await
+        .unwrap();
+    assert!(result.success);
+    assert_eq!(
+        h.provider.get_balance(recipient).await.unwrap(),
+        U256::from(15)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn broadcast_then_timeout_returns_hash_then_mined() {
     let h = LocalHarness::new().await;
     let safe = h.deploy_safe(12).await;
