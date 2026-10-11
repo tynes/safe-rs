@@ -163,6 +163,8 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 
 `--rotate` cannot be combined with `--skip-simulation`, `--safe-tx-gas`, `--nonce` or `--multi-send`: the rotation has to succeed or fail together with the calls, and its result is checked in simulation.
 
+Two or more calls go through a MultiSend contract. If it has no code on the chain (at `--block`, when simulating from one), the command stops before signing anything and names the address: the Safe would otherwise report success for a batch that never ran. Pass the chain's deployment with `--multi-send` or `--multi-send-call-only`.
+
 The `--raw-out` document contains `chain_id`, `safe`, `safe_nonce`, `safe_tx_hash`, the Safe transaction fields (`safe_tx`), the owner `signer` and `signature`, the outer transaction fields (`outer`), the EIP-2718 `raw` bytes and their `tx_hash`. `raw` can be rebroadcast as is with `cast publish`. With `--rotate` it also has a `rotation` object naming the old and new owner, the payer and the planned sweep.
 
 A broadcast the node rejects, a broadcast with an unclear result, a receipt that doesn't arrive in time, and a Safe transaction without `ExecutionSuccess` all exit non-zero with the transaction hash.
@@ -412,6 +414,8 @@ let builder = safe.batch()
     .add_typed(token2, transfer2)
     .call_only();  // Use MultiSendCallOnly for safety
 ```
+
+Two or more calls are sent through the MultiSend contract in the Safe's `ChainConfig`. `prepare()`, `simulate()` and `execute()` fail with `Error::MultiSendNotDeployed` before signing if that address has no code: the Safe's DELEGATECALL to it would report success without running any of the calls.
 
 ### Simulation
 

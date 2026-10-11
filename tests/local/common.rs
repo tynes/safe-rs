@@ -144,6 +144,15 @@ impl LocalHarness {
 
     /// A `Safe` client for `safe`, signing and sending as the owner.
     pub fn safe_client(&self, safe: Address) -> Safe<DynProvider<AnyNetwork>> {
+        self.safe_client_with(safe, self.addresses.clone())
+    }
+
+    /// A `Safe` client for `safe` that batches through `addresses`.
+    pub fn safe_client_with(
+        &self,
+        safe: Address,
+        addresses: ChainAddresses,
+    ) -> Safe<DynProvider<AnyNetwork>> {
         let wallet_provider = ProviderBuilder::new()
             .network::<AnyNetwork>()
             .wallet(EthereumWallet::from(self.owner.clone()))
@@ -153,7 +162,7 @@ impl LocalHarness {
             wallet_provider,
             self.owner.clone(),
             safe,
-            ChainConfig::with_addresses(self.chain_id, self.addresses.clone()),
+            ChainConfig::with_addresses(self.chain_id, addresses),
         )
     }
 
@@ -183,6 +192,12 @@ impl LocalHarness {
         let code = self.provider.get_code_at(expected).await.expect("code");
         assert!(!code.is_empty(), "create2 deployment produced no code");
         expected
+    }
+
+    /// Deploys another copy of `MultiSendCallOnly`, at an address set by `salt`.
+    pub async fn deploy_multi_send_call_only(&self, salt: B256) -> Address {
+        self.create2_salted(salt, artifact_bytecode("MultiSendCallOnly"))
+            .await
     }
 
     /// Deploys a strict 1/1 Safe for the owner through the factory.

@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use alloy::eips::BlockId;
 use alloy::network::primitives::ReceiptResponse;
 use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, TxHash, U256};
@@ -13,7 +14,7 @@ use crate::chain::{ChainAddresses, ChainConfig};
 use crate::contracts::ISafe;
 use crate::envelope::{batch_params, BatchTarget, PreparedSafeTx, SafeTxGasPolicy};
 use crate::error::{Error, Result};
-use crate::inspect::is_safe_with;
+use crate::inspect::{is_safe_with, require_batch_target};
 use crate::simulation::{ForkSimulator, SimulationResult};
 use crate::submit::{decode_safe_outcome, receipt_logs};
 use crate::types::{Call, CallBuilder, Operation};
@@ -197,6 +198,8 @@ pub struct SafeBuilder<'a, P> {
     use_call_only: bool,
     gas: SafeTxGasPolicy,
     nonce: Option<U256>,
+    /// Block the batch target must have code at
+    batch_target_block: BlockId,
     /// The Safe transaction `simulate()` ran, which `execute()` must match
     simulated: Option<PreparedSafeTx>,
     simulation_result: Option<SimulationResult>,
@@ -213,6 +216,7 @@ where
             use_call_only: false,
             gas: SafeTxGasPolicy::Zero,
             nonce: None,
+            batch_target_block: BlockId::latest(),
             simulated: None,
             simulation_result: None,
         }
@@ -266,6 +270,17 @@ where
         self.with_safe_tx_gas(U256::from(gas_limit))
     }
 
+    /// Checks the batch target's code at `block` instead of the latest block.
+    ///
+    /// Pass the block a simulation of the prepared transaction forks from: a
+    /// batch target deployed after it has no code there, and the simulated
+    /// batch would do nothing. This moves neither the nonce read nor the fork
+    /// `simulate()` runs on.
+    pub fn with_batch_target_block(mut self, block: BlockId) -> Self {
+        self.batch_target_block = block;
+        self
+    }
+
     fn batch_target(&self) -> BatchTarget {
         let addresses = self.safe.addresses();
         if self.use_call_only {
@@ -275,14 +290,32 @@ where
         }
     }
 
+    /// Fails with [`Error::MultiSendNotDeployed`] if the calls are batched
+    /// through a contract without code: the Safe's DELEGATECALL to it would
+    /// succeed without running any of them. A single call has no batch target.
+    async fn require_batch_target(&self) -> Result<()> {
+        match self.batch_target().address_for(&self.calls) {
+            Some(target) => {
+                require_batch_target(&self.safe.provider, target, self.batch_target_block).await
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Freezes the batch into the Safe transaction that `simulate()` and
     /// `execute()` sign.
     ///
     /// The nonce is the one set with [`SafeBuilder::with_nonce`] (checked against
     /// the chain) or the current on-chain nonce. `safeTxGas` is the explicit value
     /// or 0, and no gas refund is paid.
+    ///
+    /// Two or more calls need the batch target (`MultiSend`, or
+    /// `MultiSendCallOnly` with [`SafeBuilder::call_only`]) to have code, and
+    /// fail with [`Error::MultiSendNotDeployed`] otherwise.
     pub async fn prepare(&self) -> Result<PreparedSafeTx> {
-        self.prepare_at(self.nonce).await
+        let prepared = self.prepare_at(self.nonce).await?;
+        self.require_batch_target().await?;
+        Ok(prepared)
     }
 
     async fn prepare_at(&self, nonce: Option<U256>) -> Result<PreparedSafeTx> {
@@ -400,7 +433,8 @@ where
     /// `simulate()` it is exactly the simulated transaction: the same fields and
     /// the same nonce. If the on-chain nonce moved since the simulation this fails
     /// with [`Error::NonceMismatch`], and if calls were added after the simulation
-    /// it fails with [`Error::InvalidConfig`].
+    /// it fails with [`Error::InvalidConfig`]. A batch whose target has no code
+    /// fails with [`Error::MultiSendNotDeployed`] before anything is signed.
     ///
     /// # `safeTxGas`
     ///
@@ -433,6 +467,7 @@ where
                 ));
             }
         }
+        self.require_batch_target().await?;
 
         let signed = prepared.sign(&self.safe.signer).await?;
         let tx = <AnyNetwork as Network>::TransactionRequest::default()

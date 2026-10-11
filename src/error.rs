@@ -25,7 +25,8 @@ pub enum Error {
     #[error("Safe not deployed at {0}")]
     SafeNotDeployed(Address),
 
-    /// MultiSend contract not deployed
+    /// The contract a batch is sent through (MultiSend or MultiSendCallOnly)
+    /// has no code at this address
     #[error("MultiSend contract not deployed at {0}")]
     MultiSendNotDeployed(Address),
 

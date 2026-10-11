@@ -8,7 +8,7 @@ use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::{
     broadcast_raw, is_gs013_revert, safe_outcome_for_receipt, sign_outer_tx, simulate_exec,
     wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig,
-    ExecSimulation, OuterTxParams, ReceiptWait, Safe, SignedSafeTx,
+    Error, ExecSimulation, OuterTxParams, ReceiptWait, Safe, SignedSafeTx,
 };
 
 use crate::bundle::load_bundle;
@@ -89,7 +89,22 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     if let Some(gas) = args.safe_tx_gas {
         builder = builder.with_safe_tx_gas(gas);
     }
-    let prepared = builder.prepare().await?;
+    // The simulation forks from `--block`, so that is where a batch's MultiSend
+    // must have code: without it the simulated batch succeeds and does nothing.
+    if let (false, Some(block)) = (args.skip_simulation, args.sim.block) {
+        builder = builder.with_batch_target_block(block);
+    }
+    let prepared = builder.prepare().await.map_err(|e| match e {
+        Error::MultiSendNotDeployed(_) => {
+            let flag = if args.call_only {
+                "--multi-send-call-only"
+            } else {
+                "--multi-send"
+            };
+            eyre!("{e}; pass the address it has on this chain with {flag}")
+        }
+        e => eyre!(e),
+    })?;
     let signed = prepared.sign(&signer).await?;
 
     console.line(format!("Safe: {}", safe_address));
