@@ -244,12 +244,16 @@ With `--hd-wallet <name>` the Safe is a 1/1 owned by a wallet key that has never
 Swap the Safe's owner for the HD wallet's next unused key, with no other calls. See [One-time owner keys](#one-time-owner-keys).
 
 ```bash
-# Retire the current owner key (for example after a failed transaction)
-safe rotate --safe 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury
+# Retire the current owner of the wallet's sole Safe on this chain
+safe rotate --rpc-url $ETH_RPC_URL --hd-wallet treasury
 
 # Move an existing Safe from an ordinary key onto the wallet
-safe rotate --safe 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury --from-interactive
+safe rotate 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury --from-interactive
 ```
+
+The Safe address is optional: `safe rotate [SAFE]`. Without an address, the command selects the HD wallet's sole recorded Safe on the connected chain. If none are recorded, supply an address or recover the state with `safe wallet sync`; if several are recorded, the command lists them and asks for an explicit address.
+
+With `--from-*` and no address, it instead discovers that legacy signer's default Safe, just like `info` (v1.5.0 first, then v1.4.1). Safes created with other options need an explicit address. `rotate` does not accept `--safe` or read `SAFE_ADDRESS`.
 
 **Options:**
 | Flag | Description |
@@ -336,7 +340,7 @@ safe wallet status --hd-wallet treasury
 To move an existing Safe onto a wallet, sign one rotation with its current key:
 
 ```bash
-safe rotate --safe 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury --from-interactive
+safe rotate 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury --from-interactive
 ```
 
 The prompt shows how much ETH the old key holds; all of it moves to the new owner unless you pass `--no-sweep`.

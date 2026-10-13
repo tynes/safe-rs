@@ -366,8 +366,10 @@ pub struct CreateArgs {
 
 #[derive(Parser, Clone)]
 pub struct RotateArgs {
-    #[command(flatten)]
-    pub safe: SafeArgs,
+    /// Safe contract address (default: the wallet's sole recorded Safe on this
+    /// chain, or the legacy signer's default Safe with --from-*)
+    #[arg(value_name = "SAFE")]
+    pub safe: Option<Address>,
 
     #[command(flatten)]
     pub rpc: RpcArgs,
@@ -735,7 +737,6 @@ mod tests {
     fn rotate(extra: &[&str]) -> Result<Cli, clap::Error> {
         let mut args = vec![
             "rotate",
-            "--safe",
             SAFE,
             "--rpc-url",
             "http://localhost:8545",
@@ -744,6 +745,28 @@ mod tests {
         ];
         args.extend_from_slice(extra);
         parse(&args)
+    }
+
+    #[test]
+    fn rotate_takes_the_safe_as_an_optional_positional() {
+        let base = [
+            "rotate",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--hd-wallet",
+            "w",
+        ];
+        let Commands::Rotate(args) = parse(&base).unwrap().command else {
+            unreachable!()
+        };
+        assert_eq!(args.safe, None);
+        let Commands::Rotate(args) = rotate(&[]).unwrap().command else {
+            unreachable!()
+        };
+        assert_eq!(args.safe, Some(SAFE.parse().unwrap()));
+        let mut flagged = base.to_vec();
+        flagged.extend(["--safe", SAFE]);
+        assert!(parse(&flagged).is_err());
     }
 
     #[test]

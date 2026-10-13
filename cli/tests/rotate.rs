@@ -20,8 +20,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use alloy::primitives::{Address, U256};
+use alloy::providers::ext::AnvilApi;
 use alloy::providers::Provider;
 use common::LocalHarness;
+use safe_rs::rotation::{binding_key, OwnerRef, RotationState, StateFile};
 use safe_rs::{ChainAddresses, HdWallet};
 use serde_json::Value;
 
@@ -121,6 +123,260 @@ async fn balance(h: &LocalHarness, address: Address) -> U256 {
 
 fn write(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
+}
+
+/// A cheap test keystore: password handling is covered by the lifecycle test.
+fn discovery_wallet<'a>(h: &'a LocalHarness, dir: &Path) -> Cli<'a> {
+    use safe_rs::keystore::{encrypt_mnemonic_keystore, ScryptParams};
+
+    let cli = Cli {
+        h,
+        home: dir.join("home"),
+        password_file: dir.join("password"),
+    };
+    write(&cli.password_file, "pw");
+    std::fs::create_dir_all(cli.home.join("wallets")).unwrap();
+    let json = encrypt_mnemonic_keystore(
+        PHRASE,
+        b"pw",
+        ScryptParams {
+            log_n: 4,
+            r: 8,
+            p: 1,
+        },
+        &mut rand::rngs::OsRng,
+    )
+    .unwrap();
+    write(&cli.home.join("wallets/demo.json"), &json);
+    cli
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rotate_discovers_only_an_unambiguous_recorded_safe() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cli = discovery_wallet(&h, dir.path());
+    let wallet = HdWallet::from_phrase(PHRASE).unwrap();
+    let path = cli
+        .home
+        .join("state")
+        .join(format!("{}.json", wallet.id().to_string().to_lowercase()));
+    let safe = h.deploy_safe_with(&[key(1)], 1, 600).await;
+    let other = h.deploy_safe_with(&[key(2)], 1, 601).await;
+    let mut store = StateFile::open(&path, wallet.id()).unwrap();
+    let owner = |index| OwnerRef::Derived {
+        index,
+        address: key(index),
+    };
+    // A Safe on another chain must not be selected, even at the same address.
+    store
+        .state
+        .bind(&binding_key(h.chain_id + 1, safe), owner(1))
+        .unwrap();
+    store.save().unwrap();
+    drop(store);
+    let before = std::fs::read(&path).unwrap();
+    let missing = cli.wallet_command(&["rotate"]);
+    assert!(!missing.ok);
+    assert!(
+        missing.stderr.contains("No Safe recorded"),
+        "{}",
+        missing.stderr
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let mut store = StateFile::open(&path, wallet.id()).unwrap();
+    store
+        .state
+        .bind(&binding_key(h.chain_id, safe), owner(1))
+        .unwrap();
+    store
+        .state
+        .bind(&binding_key(h.chain_id, other), owner(2))
+        .unwrap();
+    store.save().unwrap();
+    drop(store);
+    let before = std::fs::read(&path).unwrap();
+    let ambiguous = cli.wallet_command(&["rotate"]);
+    assert!(!ambiguous.ok);
+    assert!(
+        ambiguous.stderr.contains("Multiple Safes"),
+        "{}",
+        ambiguous.stderr
+    );
+    assert!(ambiguous.stderr.contains(&safe.to_string()));
+    assert!(ambiguous.stderr.contains(&other.to_string()));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(h.owners(safe).await, vec![key(1)]);
+    assert_eq!(h.owners(other).await, vec![key(2)]);
+    assert_eq!(h.provider.get_transaction_count(key(1)).await.unwrap(), 0);
+
+    // An explicit address overrides ambiguity and ignores SAFE_ADDRESS.
+    h.fund(key(1), eth(1)).await;
+    let msco = h.addresses.multi_send_call_only.to_string();
+    let explicit = cli
+        .run_with_env(
+            &[
+                "rotate",
+                &safe.to_string(),
+                "--hd-wallet",
+                "demo",
+                "--password-file",
+                cli.password_file.to_str().unwrap(),
+                "--rpc-url",
+                h.url().as_str(),
+                "--multi-send-call-only",
+                &msco,
+                "--json",
+            ],
+            &[("SAFE_ADDRESS", &other.to_string())],
+        )
+        .json();
+    assert_eq!(explicit["status"], "rotated");
+    assert_eq!(h.owners(other).await, vec![key(2)]);
+
+    // With only one binding on this chain, subsequent rotations need no address.
+    let mut store = StateFile::open(&path, wallet.id()).unwrap();
+    store.state.safes.remove(&binding_key(h.chain_id, other));
+    store.save().unwrap();
+    drop(store);
+    let rotated = cli
+        .wallet_command(&["rotate", "--multi-send-call-only", &msco])
+        .json();
+    assert_eq!(rotated["status"], "rotated");
+    assert_eq!(
+        h.owners(safe).await,
+        vec![address(&rotated["owner"]["address"])]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rotate_and_info_share_legacy_default_discovery() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cli = discovery_wallet(&h, dir.path());
+    let legacy = alloy::signers::local::PrivateKeySigner::random();
+    let legacy_key = alloy::primitives::hex::encode_prefixed(legacy.to_bytes());
+    h.fund(legacy.address(), eth(2)).await;
+    let wallet = HdWallet::from_phrase(PHRASE).unwrap();
+    let path = cli
+        .home
+        .join("state")
+        .join(format!("{}.json", wallet.id().to_string().to_lowercase()));
+    // Legacy discovery takes precedence even when the HD wallet tracks a Safe.
+    let unrelated = h.deploy_safe_with(&[key(1)], 1, 602).await;
+    let mut store = StateFile::open(&path, wallet.id()).unwrap();
+    store
+        .state
+        .bind(
+            &binding_key(h.chain_id, unrelated),
+            OwnerRef::Derived {
+                index: 1,
+                address: key(1),
+            },
+        )
+        .unwrap();
+    store.save().unwrap();
+    drop(store);
+    let before = std::fs::read(&path).unwrap();
+    let discover = |extra: &[&str]| {
+        let mut args = vec!["rotate", "--from-private-key", &legacy_key, "--no-sweep"];
+        args.extend_from_slice(extra);
+        cli.wallet_command(&args)
+    };
+    let missing = discover(&[]);
+    assert!(!missing.ok);
+    assert!(
+        missing.stderr.contains("no known Safe proxy factory"),
+        "{}",
+        missing.stderr
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    // Install canonical contracts using local fixture code. v1.5.0's singleton
+    // reports that version; the fixture otherwise implements v1.4.1 behavior.
+    let newer_singleton = h.deploy_singleton_reporting("1.5.0").await;
+    for (addresses, singleton) in [
+        (ChainAddresses::v1_4_1(), h.addresses.safe_singleton),
+        (ChainAddresses::v1_5_0(), newer_singleton),
+    ] {
+        for (target, source) in [
+            (addresses.proxy_factory, h.addresses.proxy_factory),
+            (addresses.safe_singleton, singleton),
+            (addresses.fallback_handler, h.addresses.fallback_handler),
+            (
+                addresses.multi_send_call_only,
+                h.addresses.multi_send_call_only,
+            ),
+        ] {
+            let code = h.provider.get_code_at(source).await.unwrap();
+            h.provider.anvil_set_code(target, code).await.unwrap();
+        }
+    }
+    let missing = discover(&[]);
+    assert!(!missing.ok);
+    assert!(
+        missing.stderr.contains("nothing is deployed"),
+        "{}",
+        missing.stderr
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        h.provider
+            .get_transaction_count(legacy.address())
+            .await
+            .unwrap(),
+        0
+    );
+
+    let create = |version: &str| {
+        cli.run(&[
+            "create",
+            "--private-key",
+            &legacy_key,
+            "--safe-version",
+            version,
+            "--rpc-url",
+            h.url().as_str(),
+            "--no-confirm",
+            "--json",
+        ])
+        .json()
+    };
+    let info = || {
+        cli.run(&[
+            "info",
+            "--private-key",
+            &legacy_key,
+            "--rpc-url",
+            h.url().as_str(),
+            "--json",
+        ])
+        .json()
+    };
+    let old = address(&create("1.4.1")["safe_address"]);
+    assert_eq!(address(&info()["address"]), old);
+    let preview = discover(&["--simulate-only"]).json();
+    assert_eq!(
+        address(&preview["rotation"]["old_owner"]["address"]),
+        legacy.address()
+    );
+    let state: RotationState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(state.safes.contains_key(&binding_key(h.chain_id, old)));
+    assert_eq!(h.owners(old).await, vec![legacy.address()]);
+
+    let new = address(&create("1.5.0")["safe_address"]);
+    assert_eq!(address(&info()["address"]), new);
+    let moved = discover(&[]).json();
+    assert_eq!(moved["status"], "rotated");
+    assert_eq!(
+        h.owners(new).await,
+        vec![address(&moved["owner"]["address"])]
+    );
+    assert_eq!(h.owners(old).await, vec![legacy.address()]);
+    assert_eq!(h.owners(unrelated).await, vec![key(1)]);
+    let state: RotationState = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(state.safes.contains_key(&binding_key(h.chain_id, new)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -296,13 +552,7 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
 
     // --- A rotation with no other calls. ---
     let rotated = cli
-        .wallet_command(&[
-            "rotate",
-            "--safe",
-            &safe_arg,
-            "--multi-send-call-only",
-            &msco,
-        ])
+        .wallet_command(&["rotate", &safe_arg, "--multi-send-call-only", &msco])
         .json();
     assert_eq!(rotated["status"], "rotated");
     assert_eq!(rotated["owner"]["index"], 4);
@@ -441,7 +691,6 @@ async fn an_existing_safe_moves_onto_the_wallet() {
     let onboard = |extra: &[&str]| {
         let mut args = vec![
             "rotate",
-            "--safe",
             safe_arg.as_str(),
             "--multi-send-call-only",
             msco.as_str(),
@@ -750,7 +999,7 @@ async fn a_rotating_send_names_a_multisend_that_has_no_code() {
 
     // A rotation with no other calls is a direct self-call and needs no batch
     // contract.
-    let rotated = cli.wallet_command(&["rotate", "--safe", &safe_arg]).json();
+    let rotated = cli.wallet_command(&["rotate", &safe_arg]).json();
     assert_eq!(rotated["status"], "rotated");
     assert_eq!(rotated["old_owner"]["index"], 1);
     let owner = address(&rotated["owner"]["address"]);
