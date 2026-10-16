@@ -67,6 +67,8 @@ pub mod hd;
 pub mod inspect;
 #[cfg(feature = "hd-wallet")]
 pub mod keystore;
+#[cfg(feature = "ledger")]
+pub mod ledger;
 pub mod outer;
 pub mod rotation;
 pub mod safe;
@@ -90,6 +92,8 @@ pub use error::{Error, Result};
 pub use exec::{simulate_exec, submit_and_wait, ExecSimulation, Submission};
 #[cfg(feature = "hd-wallet")]
 pub use hd::HdWallet;
+#[cfg(feature = "ledger")]
+pub use ledger::LedgerKeys;
 pub use safe::{
     detect_addresses, is_gs013_revert, is_safe, ExecutionResult, Safe, SafeBuilder,
     SAFE_SINGLETON_SLOT,
