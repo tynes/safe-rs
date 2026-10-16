@@ -9,8 +9,8 @@
 use alloy::consensus::{SignableTransaction, TxEip1559, TxEnvelope};
 use alloy::eips::eip1559::Eip1559Estimation;
 use alloy::eips::eip2718::{Decodable2718, Encodable2718};
-use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
-use alloy::signers::Signer;
+use alloy::network::TxSigner;
+use alloy::primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 
 use crate::envelope::SignedSafeTx;
 use crate::error::{Error, Result};
@@ -84,6 +84,12 @@ impl OuterTxParams {
         }
     }
 
+    /// The unsigned EIP-2718 encoding: what a signer signs, and what fee
+    /// oracles that price calldata (such as OP-stack's `getL1Fee`) expect.
+    pub fn unsigned_encoding(&self) -> Bytes {
+        Bytes::from(self.to_tx().encoded_for_signing())
+    }
+
     fn to_tx(&self) -> TxEip1559 {
         TxEip1559 {
             chain_id: self.chain_id,
@@ -138,8 +144,10 @@ pub struct SignedOuterTx {
 
 /// Signs an EIP-1559 outer transaction.
 ///
-/// Fails if `params.from` is not the signer's address.
-pub async fn sign_outer_tx<S: Signer + Sync>(
+/// Any [`TxSigner`] works, including hardware wallets that sign the
+/// transaction on the device. Fails if `params.from` is not the signer's
+/// address, or if the signature does not recover to it.
+pub async fn sign_outer_tx<S: TxSigner<Signature> + Sync + ?Sized>(
     signer: &S,
     params: OuterTxParams,
 ) -> Result<SignedOuterTx> {
@@ -149,12 +157,19 @@ pub async fn sign_outer_tx<S: Signer + Sync>(
             recovered: signer.address(),
         });
     }
-    let tx = params.to_tx();
-    let signature = signer.sign_hash(&tx.signature_hash()).await?;
+    let mut tx = params.to_tx();
+    let signature = signer.sign_transaction(&mut tx).await?;
     let signed = tx.into_signed(signature);
     let tx_hash = *signed.hash();
     let envelope = TxEnvelope::Eip1559(signed);
     let raw = Bytes::from(envelope.encoded_2718());
+    let recovered = decode_signed_outer_tx(&raw)?.params.from;
+    if recovered != params.from {
+        return Err(Error::SignatureMismatch {
+            expected: params.from,
+            recovered,
+        });
+    }
     Ok(SignedOuterTx {
         params,
         raw,

@@ -1,6 +1,8 @@
 //! EIP-712 signing support for Safe transactions
 
 use alloy::primitives::{keccak256, Address, Bytes, B256, U256};
+use alloy::sol;
+use alloy::sol_types::Eip712Domain;
 
 use crate::contracts::{DOMAIN_SEPARATOR_TYPEHASH, SAFE_TX_TYPEHASH};
 use crate::types::Operation;
@@ -58,6 +60,55 @@ impl SafeTxParams {
         self.nonce = nonce;
         self
     }
+}
+
+sol! {
+    /// The struct a Safe owner signs, as EIP-712 typed data.
+    ///
+    /// Signers that cannot sign a raw hash (hardware wallets) sign this
+    /// instead; its signing hash equals [`compute_safe_transaction_hash`].
+    #[derive(Debug, PartialEq, Eq)]
+    struct SafeTx {
+        address to;
+        uint256 value;
+        bytes data;
+        uint8 operation;
+        uint256 safeTxGas;
+        uint256 baseGas;
+        uint256 gasPrice;
+        address gasToken;
+        address refundReceiver;
+        uint256 nonce;
+    }
+}
+
+impl SafeTxParams {
+    /// These parameters as the EIP-712 struct owners sign.
+    pub fn typed(&self) -> SafeTx {
+        SafeTx {
+            to: self.to,
+            value: self.value,
+            data: self.data.clone(),
+            operation: self.operation.as_u8(),
+            safeTxGas: self.safe_tx_gas,
+            baseGas: self.base_gas,
+            gasPrice: self.gas_price,
+            gasToken: self.gas_token,
+            refundReceiver: self.refund_receiver,
+            nonce: self.nonce,
+        }
+    }
+}
+
+/// The EIP-712 domain of a Safe: `EIP712Domain(uint256 chainId,address verifyingContract)`.
+pub fn safe_domain(chain_id: u64, safe_address: Address) -> Eip712Domain {
+    Eip712Domain::new(
+        None,
+        None,
+        Some(U256::from(chain_id)),
+        Some(safe_address),
+        None,
+    )
 }
 
 /// Computes the domain separator for a Safe
@@ -213,6 +264,35 @@ mod tests {
             .collect::<Vec<u8>>();
 
         assert_eq!(hash, keccak256(&expected_input));
+    }
+
+    #[test]
+    fn typed_data_hashes_like_the_hand_rolled_encoding() {
+        use alloy::sol_types::SolStruct;
+
+        let safe = address!("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd");
+        let params = SafeTxParams {
+            to: address!("0x1234567890123456789012345678901234567890"),
+            value: U256::from(1000),
+            data: Bytes::from(vec![0x01, 0x02, 0x03]),
+            operation: Operation::DelegateCall,
+            safe_tx_gas: U256::from(100_000),
+            base_gas: U256::from(21000),
+            gas_price: U256::from(7),
+            gas_token: address!("0x2222222222222222222222222222222222222222"),
+            refund_receiver: address!("0x3333333333333333333333333333333333333333"),
+            nonce: U256::from(5),
+        };
+        let domain = safe_domain(10, safe);
+        assert_eq!(domain.separator(), compute_domain_separator(10, safe));
+        assert_eq!(
+            params.typed().eip712_hash_struct(),
+            compute_safe_tx_hash(&params)
+        );
+        assert_eq!(
+            params.typed().eip712_signing_hash(&domain),
+            compute_safe_transaction_hash(10, safe, &params)
+        );
     }
 
     #[test]

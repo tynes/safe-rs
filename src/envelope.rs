@@ -11,12 +11,14 @@
 
 use alloy::primitives::{Address, Bytes, Signature, B256, U256};
 use alloy::signers::Signer;
-use alloy::sol_types::SolCall;
+use alloy::sol_types::{SolCall, SolStruct};
 
 use crate::contracts::{IMultiSend, IMultiSendCallOnly, ISafe};
-use crate::encoding::{compute_safe_transaction_hash, encode_multisend_data, SafeTxParams};
+use crate::encoding::{
+    compute_safe_transaction_hash, encode_multisend_data, safe_domain, SafeTxParams,
+};
 use crate::error::{Error, Result};
-use crate::signing::{encode_pre_validated_signature, sign_hash};
+use crate::signing::{encode_pre_validated_signature, encode_signature};
 use crate::types::{Call, Operation};
 
 /// How `safeTxGas` is set on a prepared Safe transaction.
@@ -230,14 +232,29 @@ impl PreparedSafeTx {
             && self.params.refund_receiver == Address::ZERO
     }
 
-    /// Signs the Safe transaction hash with an owner key.
+    /// Signs the Safe transaction with an owner key, as EIP-712 typed data.
+    ///
+    /// Signing the typed struct rather than its hash is what hardware wallets
+    /// support; for a local key the signature is the same. The struct is checked
+    /// to hash to [`PreparedSafeTx::safe_tx_hash`] before the signer sees it, and
+    /// the signature is checked to recover to the signer afterwards, so a signer
+    /// that hashed something else is caught here.
     pub async fn sign<S: Signer + Sync>(&self, signer: &S) -> Result<SignedSafeTx> {
-        let signature = sign_hash(signer, self.safe_tx_hash).await?;
-        Ok(SignedSafeTx {
+        let typed = self.params.typed();
+        let domain = safe_domain(self.chain_id, self.safe);
+        if typed.eip712_signing_hash(&domain) != self.safe_tx_hash {
+            return Err(Error::Eip712(
+                "the typed SafeTx does not hash to this Safe transaction".to_string(),
+            ));
+        }
+        let signature = signer.sign_typed_data(&typed, &domain).await?;
+        let signed = SignedSafeTx {
             prepared: self.clone(),
             owner: signer.address(),
-            signature,
-        })
+            signature: encode_signature(&signature),
+        };
+        signed.verify()?;
+        Ok(signed)
     }
 
     /// Builds a pre-validated (`v = 1`) signature for `owner`.
@@ -539,6 +556,36 @@ mod tests {
             compute_safe_transaction_hash(10, SAFE, &params),
             p.safe_tx_hash
         );
+    }
+
+    #[tokio::test]
+    async fn typed_data_signing_matches_signing_the_hash() {
+        let signer = PrivateKeySigner::random();
+        let p = PreparedSafeTx::call_only_batch(
+            10,
+            SAFE,
+            MSCO,
+            &[call(SAFE), call(MSCO)],
+            U256::from(7),
+            SafeTxGasPolicy::Zero,
+        )
+        .unwrap();
+        let typed = p.sign(&signer).await.unwrap();
+        let raw = crate::signing::sign_hash(&signer, p.safe_tx_hash)
+            .await
+            .unwrap();
+        assert_eq!(typed.signature, raw, "same key, same hash, same bytes");
+    }
+
+    #[tokio::test]
+    async fn a_struct_that_does_not_hash_to_the_transaction_is_not_signed() {
+        let signer = PrivateKeySigner::random();
+        let mut p =
+            PreparedSafeTx::single_call(1, SAFE, &call(MSCO), U256::ZERO, SafeTxGasPolicy::Zero)
+                .unwrap();
+        // A stale hash: the fields no longer produce it.
+        p.params.nonce = U256::from(1);
+        assert!(matches!(p.sign(&signer).await, Err(Error::Eip712(_))));
     }
 
     #[test]

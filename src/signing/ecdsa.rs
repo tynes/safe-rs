@@ -1,9 +1,24 @@
 //! ECDSA signature generation for Safe transactions
 
-use alloy::primitives::{Bytes, B256};
+use alloy::primitives::{Bytes, Signature, B256};
 use alloy::signers::Signer;
 
 use crate::error::{Error, Result};
+
+/// Formats an ECDSA signature the way Safe expects it for an EOA owner:
+/// r (32 bytes) || s (32 bytes) || v (1 byte), with v 27 or 28.
+pub fn encode_signature(signature: &Signature) -> Bytes {
+    // v is a bool (y_parity) in alloy - true means odd (28), false means even (27)
+    let v_byte = if signature.v() { 28u8 } else { 27u8 };
+
+    // Format: r || s || v
+    let mut sig_bytes = Vec::with_capacity(65);
+    sig_bytes.extend_from_slice(&signature.r().to_be_bytes::<32>());
+    sig_bytes.extend_from_slice(&signature.s().to_be_bytes::<32>());
+    sig_bytes.push(v_byte);
+
+    Bytes::from(sig_bytes)
+}
 
 /// Signs a message hash and formats it for Safe
 ///
@@ -11,23 +26,7 @@ use crate::error::{Error, Result};
 /// where v is adjusted to be 27 or 28
 pub async fn sign_hash<S: Signer>(signer: &S, hash: B256) -> Result<Bytes> {
     let signature = signer.sign_hash(&hash).await?;
-
-    // Get r, s, v from the signature
-    let r = signature.r();
-    let s = signature.s();
-    let v = signature.v();
-
-    // Safe expects v to be 27 or 28 for EOA signatures
-    // v is a bool (y_parity) in alloy - true means odd (28), false means even (27)
-    let v_byte = if v { 28u8 } else { 27u8 };
-
-    // Format: r || s || v
-    let mut sig_bytes = Vec::with_capacity(65);
-    sig_bytes.extend_from_slice(&r.to_be_bytes::<32>());
-    sig_bytes.extend_from_slice(&s.to_be_bytes::<32>());
-    sig_bytes.push(v_byte);
-
-    Ok(Bytes::from(sig_bytes))
+    Ok(encode_signature(&signature))
 }
 
 /// Signs a message using eth_sign (personal_sign) and formats for Safe

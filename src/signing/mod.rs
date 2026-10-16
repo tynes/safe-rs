@@ -2,4 +2,6 @@
 
 mod ecdsa;
 
-pub use ecdsa::{encode_pre_validated_signature, eth_sign_hash, sign_hash, validate_signature};
+pub use ecdsa::{
+    encode_pre_validated_signature, encode_signature, eth_sign_hash, sign_hash, validate_signature,
+};

@@ -177,6 +177,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-type-parser",
  "alloy-sol-types",
+ "derive_more",
  "itoa",
  "serde",
  "serde_json",
@@ -690,7 +691,9 @@ version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7de6fd34b5ba1789d482fa800dd97219b34765d6b07633a989a24d2dace770e"
 dependencies = [
+ "alloy-dyn-abi",
  "alloy-primitives",
+ "alloy-sol-types",
  "async-trait",
  "auto_impl",
  "either",
@@ -4854,6 +4857,7 @@ dependencies = [
  "aes",
  "alloy",
  "alloy-primitives",
+ "alloy-signer",
  "alloy-sol-types",
  "async-trait",
  "chrono",

@@ -864,19 +864,22 @@ where
 
     /// What an OP-stack chain charges for `draft` outside gas, with a margin
     /// for the L1 fee moving before inclusion. Zero on any other chain.
-    async fn fee_reserve(&self, draft: &SignedOuterTx) -> U256 {
+    ///
+    /// The oracle prices the unsigned transaction, so nothing is signed here:
+    /// on a hardware wallet that would be an extra confirmation.
+    async fn fee_reserve(&self, draft: &OuterTxParams) -> U256 {
         match self.provider.get_code_at(GAS_PRICE_ORACLE).await {
             Ok(code) if !code.is_empty() => {}
             _ => return U256::ZERO,
         }
         let oracle = IGasPriceOracle::new(GAS_PRICE_ORACLE, &self.provider);
         let l1_fee = oracle
-            .getL1Fee(draft.raw.clone())
+            .getL1Fee(draft.unsigned_encoding())
             .call()
             .await
             .unwrap_or_default();
         let operator_fee = oracle
-            .getOperatorFee(U256::from(draft.params.gas_limit))
+            .getOperatorFee(U256::from(draft.gas_limit))
             .call()
             .await
             .unwrap_or_default();
@@ -976,10 +979,7 @@ where
         let reserve = match self.config.sweep_reserve {
             Some(reserve) => reserve,
             None => match sweep_value(balance, gas, exact.max_fee_per_gas, U256::ZERO) {
-                Some(amount) => {
-                    let draft = sign_outer_tx(&signer, transfer(amount)).await?;
-                    self.fee_reserve(&draft).await
-                }
+                Some(amount) => self.fee_reserve(&transfer(amount)).await,
                 None => U256::ZERO,
             },
         };
