@@ -5,12 +5,16 @@ use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::utils::format_ether;
 use alloy::primitives::{Address, TxHash, U256};
 use alloy::providers::Provider;
+use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{bail, eyre, Result};
-use safe_rs::rotation::{binding_key, CreationParams, OwnerRef, Reserved, RotatingSafe, StateFile};
+use safe_rs::rotation::{
+    binding_key, CreationParams, KeySource, Keyring, OwnerRef, Reserved, RotatingSafe,
+    SETUP_LOOKAHEAD,
+};
 use safe_rs::{
     encode_create_proxy_with_nonce, fetch_proxy_creation_code, is_safe_with, predict_safe_address,
-    sign_outer_tx, submit_and_wait, ChainAddresses, HdWallet, OuterTxParams, SpecId, Submission,
-    WalletBuilder, WalletConfig,
+    sign_outer_tx, submit_and_wait, ChainAddresses, HdWallet, OuterTxParams, SignedOuterTx, SpecId,
+    Submission, WalletBuilder, WalletConfig,
 };
 use serde::Serialize;
 
@@ -18,7 +22,7 @@ use crate::cli::CreateArgs;
 use crate::commands::rotation::{print_warnings, rotation_config};
 use crate::commands::{http_provider, HttpProvider};
 use crate::output::{confirm_prompt, CreateOutput, OwnerOutput, Report, SweepOutput};
-use crate::wallet::{create_payer, create_signer, load_hd_wallet, open_state};
+use crate::wallet::{create_payer, create_signer, open_wallet};
 
 /// Seconds to wait for the deployment receipt.
 const DEPLOY_TIMEOUT: u64 = 120;
@@ -184,28 +188,19 @@ fn same_as_key(value: &str) -> Result<String> {
 /// out; without it the state is left alone and the address is only a preview.
 async fn fresh_owner(
     provider: &HttpProvider,
-    wallet: &HdWallet,
-    store: &mut StateFile,
+    ring: &mut Keyring<HdWallet>,
     commit: bool,
 ) -> Result<Reserved> {
     if !commit {
-        let index = store.state.next_index;
+        let index = ring.state().next_index;
         return Ok(Reserved {
             index,
-            address: wallet.owner_address(index)?,
+            address: ring.keys().address(index).await?,
         });
     }
-    loop {
-        let candidate = store.state.allocate(|index| wallet.owner_address(index))?;
-        store.save()?;
-        if provider.get_transaction_count(candidate.address).await? == 0 {
-            return Ok(candidate);
-        }
-        eprintln!(
-            "warning: skipping key {}: {} was already used on this chain",
-            candidate.index, candidate.address
-        );
-    }
+    let (owner, skipped) = ring.take_unused(provider).await?;
+    print_warnings(&skipped);
+    Ok(owner)
 }
 
 /// `safe create --hd-wallet`: a 1/1 Safe owned by a wallet key that has never
@@ -226,28 +221,29 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
     }
 
     let explicit_payer = create_payer(&args.payer)?;
-    let wallet = load_hd_wallet(&args.hd, &args.password)?;
-    let mut store = open_state(&wallet)?;
+    let mut ring = open_wallet(&args.hd, &args.password).await?;
     let provider = http_provider(&args.rpc.rpc_url);
     let chain_id = provider.get_chain_id().await?;
     let funded_by_wallet = explicit_payer.is_none();
-    let payer = explicit_payer.unwrap_or_else(|| wallet.funding().clone());
+    let payer = explicit_payer
+        .as_ref()
+        .map_or_else(|| ring.id(), PrivateKeySigner::address);
 
     let creation = if let Some(same_as) = &args.same_as {
         let key = same_as_key(same_as)?;
-        let params = store.state.binding(&key)?.creation.ok_or_else(|| {
+        let params = ring.state().binding(&key)?.creation.ok_or_else(|| {
             eyre!("{key} was not created by this wallet, so its creation parameters are unknown")
         })?;
         Creation {
             owner: Reserved {
                 index: params.owner_index,
-                address: wallet.owner_address(params.owner_index)?,
+                address: ring.address(params.owner_index).await?,
             },
             params,
         }
     } else {
         let defaults = ChainAddresses::from(args.safe_version);
-        let owner = fresh_owner(&provider, &wallet, &mut store, !args.compute_only).await?;
+        let owner = fresh_owner(&provider, &mut ring, !args.compute_only).await?;
         Creation {
             owner,
             params: CreationParams {
@@ -280,7 +276,7 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
         println!("  Singleton: {}", params.singleton);
         println!("  Salt Nonce: {}", params.salt_nonce);
         println!("  Owner: {}", OwnerOutput::from(owner));
-        println!("  Payer: {}", payer.address());
+        println!("  Payer: {payer}");
         println!("  Safe Address: {safe}");
         println!();
     }
@@ -290,7 +286,7 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
         owner: owner.into(),
         threshold: 1,
         already_deployed,
-        payer: payer.address(),
+        payer,
         sweep,
         warnings,
     };
@@ -315,38 +311,47 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
     let tx_hash = if already_deployed {
         None
     } else {
-        Some(deploy(&provider, chain_id, &payer, &params, initializer, safe).await?)
+        let params = deployment(&provider, chain_id, payer, &params, initializer).await?;
+        let outer = match &explicit_payer {
+            Some(key) => sign_outer_tx(key, params).await?,
+            None => ring.sign_outer_tx(0, ring.id(), params).await?,
+        };
+        Some(submit_deployment(&provider, &outer, safe).await?)
     };
     if !is_safe_with(&provider, safe, &[params.singleton]).await? {
         bail!("the deployment was mined but there is no Safe at {safe}");
     }
 
     // Record the Safe only now that it exists.
-    if !store.state.safes.contains_key(&key) {
-        store.state.bind(
+    let state = &mut ring.store.state;
+    if !state.safes.contains_key(&key) {
+        state.bind(
             &key,
             OwnerRef::Derived {
                 index: owner.index,
                 address: owner.address,
             },
         )?;
-        store.state.set_creation(&key, params)?;
+        state.set_creation(&key, params)?;
         if sweep && tx_hash.is_some() {
-            store.state.schedule_sweep(
+            let funding = state.wallet_id;
+            state.schedule_sweep(
                 &key,
                 OwnerRef::Derived {
                     index: 0,
-                    address: wallet.id(),
+                    address: funding,
                 },
             )?;
         }
     }
-    let mut warnings = store.state.cross_check();
-    store.save()?;
+    let mut warnings = state.cross_check();
+    ring.save()?;
+    // Set up the Safe with the next keys at hand.
+    ring.look_ahead(SETUP_LOOKAHEAD).await?;
 
     let mut config = rotation_config(None, SpecId::OSAKA, 12, DEPLOY_TIMEOUT);
     config.sweep_reserve = args.sweep.sweep_reserve;
-    let mut rotating = RotatingSafe::open_with(provider, safe, wallet, store, config).await?;
+    let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     let report = rotating.sweep_all().await?;
     for (from, error) in &report.failed {
         warnings.push(format!("a sweep from {from} is still owed: {error}"));
@@ -360,16 +365,14 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Sends `createProxyWithNonce` from `payer` and waits for it to be mined.
-async fn deploy(
+/// The unsigned `createProxyWithNonce` transaction, sent by `from`.
+async fn deployment(
     provider: &HttpProvider,
     chain_id: u64,
-    payer: &alloy::signers::local::PrivateKeySigner,
+    from: Address,
     params: &CreationParams,
     initializer: alloy::primitives::Bytes,
-    safe: Address,
-) -> Result<TxHash> {
-    let from = payer.address();
+) -> Result<OuterTxParams> {
     let input = encode_create_proxy_with_nonce(params.singleton, initializer, params.salt_nonce);
     let request = <AnyNetwork as Network>::TransactionRequest::default()
         .with_from(from)
@@ -380,24 +383,28 @@ async fn deploy(
         .await
         .map_err(|e| eyre!("cannot estimate the deployment ({from} may need ETH): {e}"))?;
     let fees = provider.estimate_eip1559_fees().await?;
-    let outer = sign_outer_tx(
-        payer,
-        OuterTxParams {
-            chain_id,
-            from,
-            nonce: provider.get_transaction_count(from).await?,
-            gas_limit: estimate + estimate / 5,
-            max_fee_per_gas: fees.max_fee_per_gas,
-            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
-            to: params.factory,
-            value: U256::ZERO,
-            input,
-        },
-    )
-    .await?;
+    Ok(OuterTxParams {
+        chain_id,
+        from,
+        nonce: provider.get_transaction_count(from).await?,
+        gas_limit: estimate + estimate / 5,
+        max_fee_per_gas: fees.max_fee_per_gas,
+        max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+        to: params.factory,
+        value: U256::ZERO,
+        input,
+    })
+}
+
+/// Broadcasts the signed deployment and waits for it to be mined.
+async fn submit_deployment(
+    provider: &HttpProvider,
+    outer: &SignedOuterTx,
+    safe: Address,
+) -> Result<TxHash> {
     let submission = submit_and_wait(
         provider,
-        &outer,
+        outer,
         Duration::from_secs(DEPLOY_TIMEOUT),
         Duration::from_millis(500),
     )

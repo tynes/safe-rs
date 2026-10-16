@@ -9,7 +9,7 @@ use rand::rngs::OsRng;
 use safe_rs::hd::normalize_phrase;
 use safe_rs::keystore::{encrypt_mnemonic_keystore, keystore_address, ScryptParams};
 use safe_rs::rotation::store::write_private;
-use safe_rs::rotation::{Binding, Exposure, RotatingSafe, RotationState, StateFile};
+use safe_rs::rotation::{Binding, Exposure, RotatingSafe, RotationState};
 use safe_rs::{HdWallet, SpecId};
 use serde::Serialize;
 use zeroize::Zeroizing;
@@ -22,7 +22,7 @@ use crate::commands::http_provider;
 use crate::commands::rotation::{print_warnings, rotation_config};
 use crate::output::{OwnerOutput, Report, SweepOutput};
 use crate::paths;
-use crate::wallet::{hd_wallet_id, load_hd_wallet, new_password, open_state};
+use crate::wallet::{hd_wallet_id, load_hd_wallet, new_password, open_state, open_wallet};
 
 pub async fn run(command: WalletCommand, json: bool) -> Result<()> {
     match command {
@@ -125,7 +125,7 @@ fn import(args: &WalletImportArgs, json: bool) -> Result<()> {
         if start == 0 {
             bail!("--start-index must be at least 1: index 0 is the funding key");
         }
-        let mut store = open_state(&wallet)?;
+        let mut store = open_state(wallet.id())?;
         store.state.note_used(start - 1);
         store.save()?;
     }
@@ -424,13 +424,11 @@ impl Report for WalletSyncOutput {
 }
 
 async fn sync(args: WalletSyncArgs, json: bool) -> Result<()> {
-    let wallet = load_hd_wallet(&args.hd, &args.password)?;
-    let store: StateFile = open_state(&wallet)?;
+    let ring = open_wallet(&args.hd, &args.password).await?;
     let mut config = rotation_config(args.multi_send_call_only, SpecId::OSAKA, 12, 120);
     config.scan_limit = args.scan_limit;
     let provider = http_provider(&args.rpc.rpc_url);
-    let mut rotating =
-        RotatingSafe::open_with(provider, args.safe.safe, wallet, store, config).await?;
+    let mut rotating = RotatingSafe::with_keyring(provider, args.safe.safe, ring, config).await?;
     let report = rotating.sync(args.from_block, args.chunk).await?;
     let warnings = rotating.take_warnings();
     if !json {
@@ -449,13 +447,11 @@ async fn sync(args: WalletSyncArgs, json: bool) -> Result<()> {
 }
 
 async fn sweep(args: WalletSweepArgs, json: bool) -> Result<()> {
-    let wallet = load_hd_wallet(&args.hd, &args.password)?;
-    let store = open_state(&wallet)?;
+    let ring = open_wallet(&args.hd, &args.password).await?;
     let mut config = rotation_config(None, SpecId::OSAKA, 12, args.timeout);
     config.sweep_reserve = args.sweep_reserve;
     let provider = http_provider(&args.rpc.rpc_url);
-    let mut rotating =
-        RotatingSafe::open_with(provider, args.safe.safe, wallet, store, config).await?;
+    let mut rotating = RotatingSafe::with_keyring(provider, args.safe.safe, ring, config).await?;
     rotating.schedule_retired_sweeps().await?;
     let report = rotating.sweep_all().await?;
     print_warnings(&rotating.take_warnings());

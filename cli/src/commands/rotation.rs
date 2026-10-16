@@ -8,7 +8,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::rotation::{
-    ExecOptions, OwnerRef, RotatingSafe, RotationConfig, RotationStatus, StateFile,
+    ExecOptions, Keyring, OwnerRef, RotatingSafe, RotationConfig, RotationStatus,
 };
 use safe_rs::{detect_addresses, Call, ChainAddresses, Error, HdWallet, SpecId};
 use url::Url;
@@ -27,8 +27,8 @@ const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub struct RotationRun<'a> {
     pub rpc_url: &'a Url,
     pub safe: Address,
-    pub wallet: HdWallet,
-    pub store: StateFile,
+    /// The wallet's keys and their locked state
+    pub ring: Keyring<HdWallet>,
     /// Key of a current owner the wallet cannot derive (`safe rotate --from-*`)
     pub legacy_owner: Option<PrivateKeySigner>,
     /// `--sweep-legacy`: the legacy key's whole balance may move without a prompt
@@ -147,7 +147,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
     config.legacy_owner = run.legacy_owner;
 
     let mut rotating =
-        RotatingSafe::open_with(provider.clone(), run.safe, run.wallet, run.store, config).await?;
+        RotatingSafe::with_keyring(provider.clone(), run.safe, run.ring, config).await?;
     print_warnings(&rotating.take_warnings());
     if let (true, OwnerRef::Derived { index, .. }) = (onboarding, rotating.binding()?.current) {
         bail!(

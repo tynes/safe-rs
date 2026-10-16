@@ -4,7 +4,7 @@ use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{bail, eyre, Result, WrapErr};
 use safe_rs::keystore::{decrypt_keystore, keystore_address};
-use safe_rs::rotation::StateFile;
+use safe_rs::rotation::{Keyring, StateFile};
 use safe_rs::HdWallet;
 use zeroize::Zeroizing;
 
@@ -158,16 +158,23 @@ pub fn load_hd_wallet(hd: &HdArgs, password: &PasswordArgs) -> Result<HdWallet> 
         .wrap_err_with(|| format!("cannot open HD wallet {}", path.display()))
 }
 
-/// Opens and locks the rotation state of `wallet`.
-pub fn open_state(wallet: &HdWallet) -> Result<StateFile> {
-    let path = paths::state_file(&paths::home()?, wallet.id());
-    StateFile::open(&path, wallet.id()).map_err(|e| match e {
+/// Opens and locks the rotation state of the wallet whose key 0 is `wallet_id`.
+pub fn open_state(wallet_id: Address) -> Result<StateFile> {
+    let path = paths::state_file(&paths::home()?, wallet_id);
+    StateFile::open(&path, wallet_id).map_err(|e| match e {
         safe_rs::Error::StateLocked(_) => eyre!(
             "another safe command is using this HD wallet ({} is locked); wait for it to finish",
             path.display()
         ),
         other => eyre!(other),
     })
+}
+
+/// The HD wallet `--hd-wallet` refers to, paired with its locked state.
+pub async fn open_wallet(hd: &HdArgs, password: &PasswordArgs) -> Result<Keyring<HdWallet>> {
+    let wallet = load_hd_wallet(hd, password)?;
+    let store = open_state(wallet.id())?;
+    Ok(Keyring::open(wallet, store).await?)
 }
 
 #[cfg(test)]

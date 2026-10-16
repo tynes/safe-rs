@@ -20,7 +20,7 @@ use crate::output::{
     SimulationOutput,
 };
 use crate::sig_parser::{encode_function_call, parse_call_spec};
-use crate::wallet::{create_payer, create_signer, load_hd_wallet, open_state};
+use crate::wallet::{create_payer, create_signer, open_wallet};
 
 /// How often to poll for the receipt after broadcasting.
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -253,13 +253,11 @@ async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
         return Err(eyre!("No calls specified"));
     }
     let payer = create_payer(&args.payer)?;
-    let wallet = load_hd_wallet(&args.hd, &args.password)?;
-    let store = open_state(&wallet)?;
+    let ring = open_wallet(&args.hd, &args.password).await?;
     rotation::run(RotationRun {
         rpc_url: &args.rpc.rpc_url,
         safe: args.safe.safe,
-        wallet,
-        store,
+        ring,
         legacy_owner: None,
         sweep_legacy: false,
         payer,

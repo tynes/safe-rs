@@ -257,6 +257,10 @@ pub struct RotationState {
     pub next_index: u32,
     /// Bindings by [`binding_key`]
     pub safes: BTreeMap<String, Binding>,
+    /// Addresses of the wallet's keys by index, as far as they were looked up.
+    /// A cache: before a key signs, its source must still agree
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub addresses: BTreeMap<u32, Address>,
 }
 
 impl RotationState {
@@ -270,6 +274,7 @@ impl RotationState {
             wallet_id,
             next_index: first_index.max(1),
             safes: BTreeMap::new(),
+            addresses: BTreeMap::new(),
         }
     }
 
@@ -311,19 +316,18 @@ impl RotationState {
 
     /// Hands out the next never-used index.
     ///
-    /// The counter is advanced before the address is returned and never moves
+    /// The counter is advanced before the index is returned and never moves
     /// back, so an index is handed out at most once per state. Save the state
     /// before using the key.
-    pub fn allocate(&mut self, derive: impl Fn(u32) -> Result<Address>) -> Result<Reserved> {
+    pub fn allocate(&mut self) -> Result<u32> {
         let index = self.next_index;
         if index >= MAX_INDEX {
             return Err(Error::Rotation(
                 "the wallet has no unused key indices left".to_string(),
             ));
         }
-        let address = derive(index)?;
         self.next_index = index + 1;
-        Ok(Reserved { index, address })
+        Ok(index)
     }
 
     /// Fixes `reserved` as the next owner of `key`.
@@ -557,8 +561,13 @@ mod tests {
         Address::left_padding_from(&(0x1000 + index).to_be_bytes())
     }
 
-    fn derive(index: u32) -> Result<Address> {
-        Ok(addr(index))
+    /// Allocates the next index, with its test address.
+    fn take(state: &mut RotationState) -> Reserved {
+        let index = state.allocate().unwrap();
+        Reserved {
+            index,
+            address: addr(index),
+        }
     }
 
     fn lookup(address: Address) -> Option<u32> {
@@ -587,10 +596,10 @@ mod tests {
     /// A state tracking `KEY` with owner 1 and index 2 reserved.
     fn reserved_state() -> RotationState {
         let mut state = RotationState::new(addr(0), 1);
-        let first = state.allocate(derive).unwrap();
+        let first = take(&mut state);
         assert_eq!(first.index, 1);
         state.bind(KEY, derived(1)).unwrap();
-        let next = state.allocate(derive).unwrap();
+        let next = take(&mut state);
         state.reserve(KEY, next).unwrap();
         state
     }
@@ -600,12 +609,12 @@ mod tests {
         let mut state = RotationState::new(addr(0), 0);
         assert_eq!(state.next_index, 1, "index 0 is never an owner");
         state.bind(KEY, derived(5)).unwrap();
-        assert_eq!(state.allocate(derive).unwrap().index, 6);
-        assert_eq!(state.allocate(derive).unwrap().index, 7);
+        assert_eq!(take(&mut state).index, 6);
+        assert_eq!(take(&mut state).index, 7);
         assert!(state.bind(KEY, derived(9)).is_err(), "already tracked");
 
         state.next_index = MAX_INDEX;
-        assert!(state.allocate(derive).is_err());
+        assert!(state.allocate().is_err());
     }
 
     #[test]
@@ -613,7 +622,7 @@ mod tests {
         let mut state = reserved_state();
         let reserved = state.binding(KEY).unwrap().reserved.unwrap();
         state.reserve(KEY, reserved).unwrap();
-        let other = state.allocate(derive).unwrap();
+        let other = take(&mut state);
         assert!(state.reserve(KEY, other).is_err());
     }
 
@@ -772,7 +781,7 @@ mod tests {
             .unwrap();
 
         // Key 2 rotates to key 3 while the sweep from key 1 is still owed.
-        let next = state.allocate(derive).unwrap();
+        let next = take(&mut state);
         state.reserve(KEY, next).unwrap();
         state.observe(KEY, &[addr(3)], None, lookup, true).unwrap();
         let due = &state.binding(KEY).unwrap().sweep_due;
@@ -799,7 +808,7 @@ mod tests {
         state.bind(OTHER, derived(1)).unwrap();
         assert!(state.cross_check().is_empty());
 
-        let next = state.allocate(derive).unwrap();
+        let next = take(&mut state);
         state.reserve(KEY, next).unwrap();
         state.observe(KEY, &[addr(2)], None, lookup, false).unwrap();
 
@@ -813,12 +822,49 @@ mod tests {
     }
 
     #[test]
+    fn a_state_file_from_before_the_address_cache_still_loads() {
+        // As written before key addresses were recorded.
+        let json = r#"{
+          "version": 1,
+          "wallet_id": "0x0000000000000000000000000000000000001000",
+          "next_index": 3,
+          "safes": {
+            "1:0x00000000000000000000000000000000000005AF": {
+              "current": { "kind": "derived", "index": 2, "address": "0x0000000000000000000000000000000000001002" },
+              "reserved": null,
+              "exposed": null,
+              "pending": null,
+              "sweep_due": [],
+              "history": [
+                {
+                  "owner": { "kind": "derived", "index": 1, "address": "0x0000000000000000000000000000000000001001" },
+                  "replaced_by": { "kind": "derived", "index": 2, "address": "0x0000000000000000000000000000000000001002" },
+                  "observed_block": 9,
+                  "swept": null
+                }
+              ],
+              "creation": null
+            }
+          }
+        }"#;
+        let state: RotationState = serde_json::from_str(json).unwrap();
+        assert!(state.addresses.is_empty());
+        assert_eq!(state.next_index, 3);
+        assert_eq!(state.binding(KEY).unwrap().current, derived(2));
+        // An empty cache is not written, so the file stays readable by builds
+        // that predate it.
+        assert!(!serde_json::to_string(&state).unwrap().contains("addresses"));
+    }
+
+    #[test]
     fn state_round_trips_through_json() {
         let mut state = reserved_state();
         state.arm(KEY, pending()).unwrap();
         state
             .bind(OTHER, OwnerRef::External { address: addr(40) })
             .unwrap();
+        state.addresses.insert(0, addr(0));
+        state.addresses.insert(7, addr(7));
         let json = serde_json::to_string_pretty(&state).unwrap();
         assert!(!json.contains("xpub"));
         let back: RotationState = serde_json::from_str(&json).unwrap();

@@ -24,6 +24,14 @@ use crate::error::{Error, Result};
 /// Derivation path of the funding key (index 0).
 pub const FUNDING_PATH: &str = "m/44'/60'/0'/0/0";
 
+/// Derivation path of key `index`: `m/44'/60'/0'/0/{index}`.
+///
+/// Every key source uses this path, so a device seeded with a phrase derives
+/// the same keys as the phrase itself, and shares its state.
+pub fn key_path(index: u32) -> String {
+    format!("m/44'/60'/0'/0/{index}")
+}
+
 /// BIP-32 non-hardened child indices end here.
 const MAX_INDEX: u32 = 1 << 31;
 
@@ -198,18 +206,6 @@ impl HdWallet {
     pub fn owner_address(&self, index: u32) -> Result<Address> {
         Ok(self.owner(index)?.address())
     }
-
-    /// The first owner key, among indices `1..=limit`, whose address is in
-    /// `owners`.
-    pub fn find_owner(&self, owners: &[Address], limit: u32) -> Result<Option<(u32, Address)>> {
-        for index in 1..=limit.min(MAX_INDEX - 1) {
-            let address = self.owner_address(index)?;
-            if owners.contains(&address) {
-                return Ok(Some((index, address)));
-            }
-        }
-        Ok(None)
-    }
 }
 
 #[cfg(test)]
@@ -304,16 +300,9 @@ mod tests {
     }
 
     #[test]
-    fn find_owner_scans_up_to_the_limit() {
-        let wallet = HdWallet::from_phrase(TEST_PHRASE).unwrap();
-        let third = wallet.owner_address(3).unwrap();
-        let stranger = Address::repeat_byte(0xEE);
-        assert_eq!(
-            wallet.find_owner(&[stranger, third], 8).unwrap(),
-            Some((3, third))
-        );
-        assert_eq!(wallet.find_owner(&[stranger, third], 2).unwrap(), None);
-        assert_eq!(wallet.find_owner(&[wallet.id()], 8).unwrap(), None);
+    fn key_paths_follow_bip44() {
+        assert_eq!(key_path(0), FUNDING_PATH);
+        assert_eq!(key_path(7), "m/44'/60'/0'/0/7");
     }
 
     #[test]

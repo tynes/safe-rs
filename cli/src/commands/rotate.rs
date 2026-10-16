@@ -9,7 +9,7 @@ use crate::cli::RotateArgs;
 use crate::commands::default_safe::read_default_safe;
 use crate::commands::http_provider;
 use crate::commands::rotation::{self, RotationRun};
-use crate::wallet::{create_payer, legacy_signer, load_hd_wallet, open_state};
+use crate::wallet::{create_payer, legacy_signer, open_wallet};
 
 /// `safe rotate`: swap the Safe's owner for the HD wallet's next unused key,
 /// with no other calls.
@@ -23,8 +23,7 @@ pub async fn run(args: RotateArgs, json: bool) -> Result<()> {
         args.from_interactive,
     )?;
     let payer = create_payer(&args.payer)?;
-    let wallet = load_hd_wallet(&args.hd, &args.password)?;
-    let store = open_state(&wallet)?;
+    let ring = open_wallet(&args.hd, &args.password).await?;
     let safe = if let Some(safe) = args.safe {
         safe
     } else {
@@ -35,14 +34,13 @@ pub async fn run(args: RotateArgs, json: bool) -> Result<()> {
                 .await?
                 .address
         } else {
-            recorded_safe(&store.state, provider.get_chain_id().await?)?
+            recorded_safe(ring.state(), provider.get_chain_id().await?)?
         }
     };
     rotation::run(RotationRun {
         rpc_url: &args.rpc.rpc_url,
         safe,
-        wallet,
-        store,
+        ring,
         legacy_owner,
         sweep_legacy: args.sweep_legacy,
         payer,
