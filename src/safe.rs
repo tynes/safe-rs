@@ -460,16 +460,16 @@ where
     /// `with_gas_limit()`, or `0`. It is never estimated. With `gasPrice == 0`
     /// (this library never pays refunds) the Safe forwards all remaining gas to
     /// the inner call, so `safeTxGas` does not cap it; the outer `execTransaction`
-    /// gas is estimated by the provider when sending.
+    /// gas is estimated with `eth_estimateGas` before sending.
     ///
     /// # Consequence for failing transactions
     ///
     /// With `safeTxGas == 0` a failing inner transaction reverts the whole outer
     /// `execTransaction` with `GS013` rather than mining a successful receipt
     /// carrying an `ExecutionFailure` event. This usually surfaces before
-    /// broadcast, as [`Error::InnerTransactionReverted`], when the provider
-    /// estimates gas. The on-chain revert does not carry the inner reason, so use
-    /// `simulate()` to find out why a transaction fails.
+    /// broadcast, as [`Error::InnerTransactionReverted`], when gas is estimated,
+    /// and then no account nonce is used. The on-chain revert does not carry the
+    /// inner reason, so use `simulate()` to find out why a transaction fails.
     ///
     /// `success` in the result requires both a successful receipt and the Safe's
     /// `ExecutionSuccess` event for this Safe transaction.
@@ -493,12 +493,23 @@ where
             .with_to(self.safe.address)
             .with_input(signed.exec_calldata());
 
-        // The GS013 revert normally surfaces here: the provider estimates gas on
-        // send, so the failing `execTransaction` is caught before broadcast.
+        // The GS013 revert normally surfaces here, before anything is broadcast.
+        // Gas is estimated here rather than by the provider's fillers: those fetch
+        // the nonce while they estimate, and alloy's default nonce filler counts a
+        // nonce as used once it has handed it out. A failed estimate would leave
+        // the provider one nonce ahead, so the next transaction would sit in the
+        // mempool behind the gap and its receipt would never arrive.
+        let gas_limit = self
+            .safe
+            .provider
+            .estimate_gas(tx.clone())
+            .await
+            .map_err(|e| map_execution_error(e.to_string()))?;
+
         let pending_tx = self
             .safe
             .provider
-            .send_transaction(tx)
+            .send_transaction(tx.with_gas_limit(gas_limit))
             .await
             .map_err(|e| map_execution_error(e.to_string()))?;
 

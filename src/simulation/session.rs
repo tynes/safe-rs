@@ -9,7 +9,8 @@
 //!
 //! All state reads go through a `foundry-fork-db` backend, which blocks the
 //! calling thread while it fetches from the RPC. Use a multi-threaded tokio
-//! runtime.
+//! runtime and create the session inside it: the backend runs there as a task,
+//! which keeps the provider's connections on the runtime that uses the provider.
 
 use alloy::eips::eip1559::BaseFeeParams;
 use alloy::eips::BlockId;

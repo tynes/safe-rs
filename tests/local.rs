@@ -12,15 +12,20 @@
 #[path = "local/common.rs"]
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy::eips::eip1559::BaseFeeParams;
 use alloy::eips::BlockId;
+use alloy::network::{AnyNetwork, EthereumWallet, Network};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::ext::AnvilApi;
-use alloy::providers::Provider;
+use alloy::providers::fillers::NonceManager;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolValue;
+use alloy::transports::TransportResult;
 use common::{
     enable_module_call, one_shot_initcode, reverter_initcode, set_guard_call, LocalHarness,
 };
@@ -29,10 +34,11 @@ use safe_rs::rotation::{check_post_state, plan_rotation};
 use safe_rs::{
     broadcast_raw, decode_safe_outcome, sign_outer_tx, simulate_exec, submit_and_wait,
     wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig,
-    Eoa, Error, ForkSession, ISafe, OuterTxParams, ParentHeader, PreparedSafeTx, ReceiptWait, Safe,
-    SafeExecutionOutcome, SafeTxGasPolicy, SimTx, SpecId, Submission, TxChecks, WalletBuilder,
-    WalletConfig,
+    Eoa, Error, ForkSession, ForkSimulator, ISafe, Operation, OuterTxParams, ParentHeader,
+    PreparedSafeTx, ReceiptWait, Safe, SafeExecutionOutcome, SafeTxGasPolicy, SimTx, SpecId,
+    Submission, TxChecks, WalletBuilder, WalletConfig,
 };
+use tokio::net::{TcpListener, TcpStream};
 
 /// Gas limit used for outer transactions in these tests (fixed so that failing
 /// transactions can still be mined).
@@ -960,6 +966,152 @@ async fn connect_batches_through_the_contracts_of_the_safe_version() {
         safe.addresses().multi_send_call_only,
         v1_4_1.multi_send_call_only
     );
+}
+
+/// A nonce manager that counts the nonces it hands out.
+#[derive(Clone, Debug, Default)]
+struct CountingNonces(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl NonceManager for CountingNonces {
+    async fn get_next_nonce<P, N>(&self, provider: &P, address: Address) -> TransportResult<u64>
+    where
+        P: Provider<N>,
+        N: Network,
+    {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        provider.get_transaction_count(address).pending().await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_execute_takes_no_nonce_from_the_provider() {
+    let h = LocalHarness::new().await;
+    let safe_address = h.deploy_safe(13).await;
+    let reverter = h.create2(reverter_initcode()).await;
+    let nonces = CountingNonces::default();
+    let provider = ProviderBuilder::<_, _, AnyNetwork>::default()
+        .with_gas_estimation()
+        .with_nonce_management(nonces.clone())
+        .fetch_chain_id()
+        .wallet(EthereumWallet::from(h.owner.clone()))
+        .connect_http(h.url())
+        .erased();
+    let safe = Safe::new(
+        provider,
+        h.owner.clone(),
+        safe_address,
+        ChainConfig::with_addresses(h.chain_id, h.addresses.clone()),
+    );
+
+    // alloy's default nonce filler counts a nonce as used once it is handed out.
+    // One taken for a transaction that then fails gas estimation leaves a gap,
+    // and the next transaction waits behind it for a receipt that never comes.
+    let err = safe
+        .batch()
+        .add(Call::call(reverter, Bytes::new()))
+        .execute()
+        .await;
+    assert!(
+        matches!(err, Err(Error::InnerTransactionReverted { .. })),
+        "{err:?}"
+    );
+    assert_eq!(nonces.0.load(Ordering::SeqCst), 0);
+
+    let result = safe
+        .batch()
+        .add(Call::call(safe_address, Bytes::new()))
+        .execute()
+        .await
+        .unwrap();
+    assert!(result.success);
+    assert_eq!(nonces.0.load(Ordering::SeqCst), 1);
+}
+
+/// A TCP forwarder to the node on `port` that counts the connections it accepts.
+async fn counting_proxy(port: u16) -> (url::Url, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+    let url = format!("http://{}", listener.local_addr().expect("proxy address"))
+        .parse()
+        .expect("proxy url");
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    tokio::spawn(async move {
+        while let Ok((mut inbound, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                if let Ok(mut outbound) = TcpStream::connect(("127.0.0.1", port)).await {
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                }
+            });
+        }
+    });
+    (url, accepted)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connections_opened_by_a_simulation_outlive_it() {
+    let h = LocalHarness::new().await;
+    let block = h.provider.get_block_number().await.unwrap();
+    let (url, accepted) = counting_proxy(h.anvil.port()).await;
+    let provider = ProviderBuilder::new()
+        .network::<AnyNetwork>()
+        .connect_http(url)
+        .erased();
+
+    // The block is pinned, so the caller sends nothing through `provider` and
+    // every connection in its pool is one the fork backend opened.
+    let result = ForkSimulator::new(provider.clone(), h.chain_id)
+        .at_block(block)
+        .simulate_call(
+            h.owner.address(),
+            Address::repeat_byte(0x44),
+            U256::ZERO,
+            Bytes::new(),
+            Operation::Call,
+        )
+        .await
+        .unwrap();
+    assert!(result.success);
+
+    // A backend with a runtime of its own takes the connection drivers with it
+    // when the fork is dropped. Give that teardown time to close the sockets: a
+    // request racing it can be queued on a dying connection and never answered.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let opened = accepted.load(Ordering::SeqCst);
+    assert!(opened > 0);
+    provider.get_block_number().await.unwrap();
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        opened,
+        "the pooled connections did not survive the simulation"
+    );
+}
+
+/// The fork backend is a task on the caller's runtime, and the caller blocks
+/// its thread on every state read. The two must not need the same worker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn simulation_runs_in_a_task_on_a_single_worker() {
+    let h = LocalHarness::new().await;
+    let simulator = ForkSimulator::new(h.provider.clone(), h.chain_id);
+    let from = h.owner.address();
+    let simulation = tokio::spawn(async move {
+        simulator
+            .simulate_call(
+                from,
+                Address::repeat_byte(0x44),
+                U256::ZERO,
+                Bytes::new(),
+                Operation::Call,
+            )
+            .await
+    });
+    let result = tokio::time::timeout(Duration::from_secs(30), simulation)
+        .await
+        .expect("simulation finishes")
+        .unwrap()
+        .unwrap();
+    assert!(result.success);
 }
 
 #[tokio::test(flavor = "multi_thread")]
