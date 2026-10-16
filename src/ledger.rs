@@ -33,7 +33,7 @@ use crate::envelope::{PreparedSafeTx, SignedSafeTx};
 use crate::error::{Error, Result};
 use crate::hd::key_path;
 use crate::outer::{sign_outer_tx, OuterTxParams, SignedOuterTx};
-use crate::rotation::KeySource;
+use crate::rotation::{KeySource, REBUILD_MARGIN, SETUP_LOOKAHEAD};
 
 fn device_error(e: impl std::fmt::Display) -> Error {
     Error::Device(format!(
@@ -73,9 +73,18 @@ impl LedgerKeys {
     }
 }
 
+/// How far a Ledger is searched for an owner that is not on record: the keys
+/// a set-up Safe has recorded, and a margin past them. The device answers one
+/// address at a time.
+pub const LEDGER_SCAN_LIMIT: u32 = SETUP_LOOKAHEAD + 2 * REBUILD_MARGIN;
+
 impl KeySource for LedgerKeys {
     async fn address(&self, index: u32) -> Result<Address> {
         Ok(Signer::address(&self.signer(index).await?))
+    }
+
+    fn scan_limit(&self) -> u32 {
+        LEDGER_SCAN_LIMIT
     }
 
     async fn sign_safe_tx(&self, index: u32, tx: &PreparedSafeTx) -> Result<SignedSafeTx> {

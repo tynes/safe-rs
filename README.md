@@ -547,8 +547,9 @@ use safe_rs::LedgerKeys;
 
 let keys = LedgerKeys::connect().await?;
 let store = StateFile::open(state_path, keys.address(0).await?)?;
-let config = RotationConfig { scan_limit: 52, ..RotationConfig::default() };
-let mut safe = RotatingSafe::open_with(provider, safe_address, keys, store, config).await?;
+// A Ledger is searched for 52 keys rather than 1000: it answers one at a time.
+let mut safe =
+    RotatingSafe::open_with(provider, safe_address, keys, store, RotationConfig::default()).await?;
 safe.rotate().await?; // confirm on the device
 ```
 

@@ -33,6 +33,10 @@ pub const SETUP_LOOKAHEAD: u32 = 20;
 /// Keys kept looked ahead of the next unused one on every send.
 pub const SEND_LOOKAHEAD: u32 = 5;
 
+/// How many keys a source is searched by default for an owner that is not on
+/// record. Local derivation is fast; a device overrides this.
+pub const DEFAULT_SCAN_LIMIT: u32 = 1_000;
+
 /// One seed's keys at `m/44'/60'/0'/0/i`.
 ///
 /// Implementations only derive and sign; recording addresses, checking them
@@ -40,6 +44,12 @@ pub const SEND_LOOKAHEAD: u32 = 5;
 pub trait KeySource: Send + Sync {
     /// The address of key `index`, from the source itself.
     fn address(&self, index: u32) -> impl Future<Output = Result<Address>> + Send;
+
+    /// How many keys to search for an owner that is not on record. A source
+    /// that answers slowly (a device) keeps this small.
+    fn scan_limit(&self) -> u32 {
+        DEFAULT_SCAN_LIMIT
+    }
 
     /// Signs a Safe transaction with key `index`.
     fn sign_safe_tx(
@@ -153,32 +163,28 @@ impl<K: KeySource> Keyring<K> {
         Ok(asked)
     }
 
-    /// Every owner key among `1..=limit`, address to index: the recorded ones,
-    /// plus the rest asked of the source for this call only (a search far
-    /// ahead is not worth keeping).
+    /// Every owner key known, address to index: all recorded ones, plus the
+    /// rest of `1..=limit` asked of the source for this call only (a search far
+    /// ahead is not worth keeping). `limit` bounds the questions, not the
+    /// record.
     pub async fn scan(&self, limit: u32) -> Result<HashMap<Address, u32>> {
-        let mut found = HashMap::new();
+        let mut found: HashMap<Address, u32> = self.recorded_owner_keys().collect();
         for index in 1..=limit {
-            let address = match self.store.state.addresses.get(&index) {
-                Some(address) => *address,
-                None => self.keys.address(index).await?,
-            };
-            found.insert(address, index);
+            if !self.store.state.addresses.contains_key(&index) {
+                found.insert(self.keys.address(index).await?, index);
+            }
         }
         Ok(found)
     }
 
-    /// The first owner key among `1..=limit` that is in `owners`, looking at
-    /// recorded addresses before asking the source.
+    /// The first owner key in `owners`: among all recorded ones, then among
+    /// the rest of `1..=limit`, asked of the source.
     pub async fn find(&self, owners: &[Address], limit: u32) -> Result<Option<(u32, Address)>> {
         let recorded = self
-            .store
-            .state
-            .addresses
-            .iter()
-            .find(|(index, address)| (1..=limit).contains(*index) && owners.contains(address));
-        if let Some((index, address)) = recorded {
-            return Ok(Some((*index, *address)));
+            .recorded_owner_keys()
+            .find(|(address, _)| owners.contains(address));
+        if let Some((address, index)) = recorded {
+            return Ok(Some((index, address)));
         }
         for index in 1..=limit {
             if self.store.state.addresses.contains_key(&index) {
@@ -190,6 +196,16 @@ impl<K: KeySource> Keyring<K> {
             }
         }
         Ok(None)
+    }
+
+    /// Recorded owner keys (index 1 and up), address first.
+    fn recorded_owner_keys(&self) -> impl Iterator<Item = (Address, u32)> + '_ {
+        self.store
+            .state
+            .addresses
+            .iter()
+            .filter(|(index, _)| **index > 0)
+            .map(|(index, address)| (*address, *index))
     }
 
     /// Takes the next key that has never been handed out and whose address
@@ -340,6 +356,10 @@ mod tests {
             None,
             "beyond the limit"
         );
+        // A recorded key is found whatever the limit.
+        let second = ring.state().addresses[&2];
+        assert_eq!(ring.find(&[second], 1).await.unwrap(), Some((2, second)));
+        assert_eq!(ring.scan(1).await.unwrap()[&second], 2);
         assert_eq!(
             ring.find(&[ring.id()], 20).await.unwrap(),
             None,

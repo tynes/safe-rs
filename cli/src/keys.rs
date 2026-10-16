@@ -3,19 +3,8 @@
 use alloy::primitives::Address;
 use safe_rs::rotation::KeySource;
 #[cfg(feature = "ledger")]
-use safe_rs::rotation::{REBUILD_MARGIN, SETUP_LOOKAHEAD};
-#[cfg(feature = "ledger")]
 use safe_rs::LedgerKeys;
 use safe_rs::{HdWallet, OuterTxParams, PreparedSafeTx, SignedOuterTx, SignedSafeTx};
-
-/// How far to search for a Safe's owner among a phrase's keys. Derivation is
-/// local and fast.
-const PHRASE_SCAN_LIMIT: u32 = 1_000;
-
-/// How far to search on a Ledger, which answers one address at a time: the
-/// keys a set-up Safe has on record, and a margin past them.
-#[cfg(feature = "ledger")]
-const LEDGER_SCAN_LIMIT: u32 = SETUP_LOOKAHEAD + 2 * REBUILD_MARGIN;
 
 /// Owner keys from `--hd-wallet` or `--ledger`.
 pub enum CliKeys {
@@ -27,15 +16,6 @@ pub enum CliKeys {
 }
 
 impl CliKeys {
-    /// How many keys to search when looking for a Safe's owner.
-    pub fn scan_limit(&self) -> u32 {
-        match self {
-            Self::Phrase(_) => PHRASE_SCAN_LIMIT,
-            #[cfg(feature = "ledger")]
-            Self::Ledger(_) => LEDGER_SCAN_LIMIT,
-        }
-    }
-
     /// True for a hardware wallet, where each signature is confirmed on the device.
     pub fn is_device(&self) -> bool {
         !matches!(self, Self::Phrase(_))
@@ -48,6 +28,14 @@ impl KeySource for CliKeys {
             Self::Phrase(keys) => keys.address(index).await,
             #[cfg(feature = "ledger")]
             Self::Ledger(keys) => keys.address(index).await,
+        }
+    }
+
+    fn scan_limit(&self) -> u32 {
+        match self {
+            Self::Phrase(keys) => keys.scan_limit(),
+            #[cfg(feature = "ledger")]
+            Self::Ledger(keys) => keys.scan_limit(),
         }
     }
 

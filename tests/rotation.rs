@@ -51,7 +51,7 @@ fn config(h: &LocalHarness) -> RotationConfig {
         addresses: h.addresses.clone(),
         timeout: Duration::from_secs(10),
         poll_interval: Duration::from_millis(50),
-        scan_limit: 24,
+        scan_limit: Some(24),
         ..RotationConfig::default()
     }
 }
@@ -1120,4 +1120,46 @@ async fn every_send_keeps_a_few_keys_ahead() {
     for index in 1..=4 {
         assert!(rotating.wallet().asked(index) > 1, "key {index} signed");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_small_search_limit_never_hides_recorded_keys() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 122, &state).await;
+    // A source asked about very few keys, like a slow device.
+    let mut narrow = config(&h);
+    narrow.scan_limit = Some(3);
+
+    let mut rotating = open_with(&h, safe, &state, narrow).await;
+    for _ in 0..5 {
+        rotating.rotate().await.unwrap();
+    }
+    assert_eq!(rotating.binding().unwrap().current.index(), Some(6));
+
+    // Rebuilding the history from the logs keeps every retired key the
+    // wallet's own, although most are past the configured limit.
+    let report = rotating.sync(Some(0), 1_000).await.unwrap();
+    assert_eq!(report.used, vec![1, 2, 3, 4, 5, 6]);
+    let history = &rotating.binding().unwrap().history;
+    assert_eq!(history.len(), 5);
+    for (position, retired) in history.iter().enumerate() {
+        let index = u32::try_from(position).unwrap() + 1;
+        assert_eq!(
+            retired.owner,
+            OwnerRef::Derived {
+                index,
+                address: key(index)
+            }
+        );
+    }
+    drop(rotating);
+
+    // And an owner far past the limit is recognised when the Safe is opened
+    // again, from the record.
+    let mut narrow = config(&h);
+    narrow.scan_limit = Some(1);
+    let rotating = open_with(&h, safe, &state, narrow).await;
+    assert_eq!(rotating.binding().unwrap().current.index(), Some(6));
 }

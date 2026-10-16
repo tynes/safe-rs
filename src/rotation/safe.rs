@@ -85,8 +85,9 @@ pub struct RotationConfig {
     pub timeout: Duration,
     /// How often to poll for a receipt
     pub poll_interval: Duration,
-    /// How many wallet indices to search for an owner the state does not know
-    pub scan_limit: u32,
+    /// How many wallet indices to search for an owner the state does not know.
+    /// `None`: the key source's own limit ([`KeySource::scan_limit`])
+    pub scan_limit: Option<u32>,
 }
 
 impl Default for RotationConfig {
@@ -101,7 +102,7 @@ impl Default for RotationConfig {
             block_time: 12,
             timeout: Duration::from_mins(2),
             poll_interval: Duration::from_millis(500),
-            scan_limit: 1_000,
+            scan_limit: None,
         }
     }
 }
@@ -414,7 +415,7 @@ where
     /// Starts tracking a Safe from what the chain shows.
     async fn adopt(&mut self) -> Result<()> {
         let owners = self.owners_at(BlockId::latest()).await?;
-        let found = self.ring.find(&owners, self.config.scan_limit).await?;
+        let found = self.ring.find(&owners, self.scan_limit()).await?;
         let current = if let Some((index, address)) = found {
             OwnerRef::Derived { index, address }
         } else if let Some(legacy) = self
@@ -430,7 +431,8 @@ where
             return Err(Error::Rotation(format!(
                 "none of the wallet's first {} keys owns Safe {}; \
                  supply the current owner's key to move the Safe onto this wallet",
-                self.config.scan_limit, self.safe
+                self.scan_limit(),
+                self.safe
             )));
         };
         self.ring.store.state.bind(&self.key, current)?;
@@ -457,7 +459,7 @@ where
         let found = if known {
             None
         } else {
-            self.ring.find(owners, self.config.scan_limit).await?
+            self.ring.find(owners, self.scan_limit()).await?
         };
         self.ring.store.state.observe(
             &self.key,
@@ -468,11 +470,24 @@ where
         )
     }
 
+    /// How many keys to ask the source about when searching for an owner:
+    /// the configured or the source's limit, and never less than the range the
+    /// wallet has handed out (plus the setup look-ahead), so a long-used wallet
+    /// does not outgrow its own search.
+    fn scan_limit(&self) -> u32 {
+        let limit = self
+            .config
+            .scan_limit
+            .unwrap_or_else(|| self.ring.keys().scan_limit());
+        limit.max(self.ring.state().next_index.saturating_add(SETUP_LOOKAHEAD))
+    }
+
     fn lost(&self) -> Error {
         Error::Rotation(format!(
             "neither the recorded owner nor any of the wallet's first {} keys owns Safe {}; \
              rebuild the state from the Safe's history, or supply the current owner's key",
-            self.config.scan_limit, self.safe
+            self.scan_limit(),
+            self.safe
         ))
     }
 
@@ -1038,7 +1053,7 @@ where
     /// payer on a Safe that is not scanned here: run this for every Safe and
     /// chain the phrase was used with.
     pub async fn sync(&mut self, from_block: Option<u64>, chunk: u64) -> Result<SyncReport> {
-        let limit = self.config.scan_limit;
+        let limit = self.scan_limit();
         let index_of = self.ring.scan(limit).await?;
         let address_of: BTreeMap<u32, Address> = index_of
             .iter()

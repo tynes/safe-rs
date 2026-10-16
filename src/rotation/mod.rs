@@ -21,7 +21,7 @@ pub mod store;
 
 pub use history::{owner_history, OwnerEvent, OwnerEventKind};
 #[cfg(feature = "hd-wallet")]
-pub use keys::{KeySource, Keyring, SEND_LOOKAHEAD, SETUP_LOOKAHEAD};
+pub use keys::{KeySource, Keyring, DEFAULT_SCAN_LIMIT, SEND_LOOKAHEAD, SETUP_LOOKAHEAD};
 pub use plan::{
     check_post_state, expected_owners_after, plan_rotation, plan_swaps, prev_owner, OwnerSwap,
     RotationPlan,
