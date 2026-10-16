@@ -426,8 +426,16 @@ impl Report for WalletSyncOutput {
 
 async fn sync(args: WalletSyncArgs, json: bool) -> Result<()> {
     let ring = open_wallet(&args.hd, &args.password).await?;
-    let mut config = rotation_config(args.multi_send_call_only, SpecId::OSAKA, 12, 120);
-    config.scan_limit = args.scan_limit.unwrap_or_else(|| ring.keys().scan_limit());
+    let mut config = rotation_config(
+        ring.keys(),
+        args.multi_send_call_only,
+        SpecId::OSAKA,
+        12,
+        120,
+    );
+    if let Some(limit) = args.scan_limit {
+        config.scan_limit = limit;
+    }
     let provider = http_provider(&args.rpc.rpc_url);
     let mut rotating = RotatingSafe::with_keyring(provider, args.safe.safe, ring, config).await?;
     let report = rotating.sync(args.from_block, args.chunk).await?;
@@ -449,7 +457,7 @@ async fn sync(args: WalletSyncArgs, json: bool) -> Result<()> {
 
 async fn sweep(args: WalletSweepArgs, json: bool) -> Result<()> {
     let ring = open_wallet(&args.hd, &args.password).await?;
-    let mut config = rotation_config(None, SpecId::OSAKA, 12, args.timeout);
+    let mut config = rotation_config(ring.keys(), None, SpecId::OSAKA, 12, args.timeout);
     config.sweep_reserve = args.sweep_reserve;
     let provider = http_provider(&args.rpc.rpc_url);
     let mut rotating = RotatingSafe::with_keyring(provider, args.safe.safe, ring, config).await?;

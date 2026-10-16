@@ -53,8 +53,10 @@ pub struct RotationRun<'a> {
     pub json: bool,
 }
 
-/// The configuration shared by every command that opens a rotating Safe.
+/// The configuration shared by every command that opens a rotating Safe with
+/// `keys`.
 pub fn rotation_config(
+    keys: &CliKeys,
     multi_send_call_only: Option<Address>,
     spec: SpecId,
     block_time: u64,
@@ -70,6 +72,7 @@ pub fn rotation_config(
         block_time,
         timeout: Duration::from_secs(timeout),
         poll_interval: RECEIPT_POLL_INTERVAL,
+        scan_limit: keys.scan_limit(),
         ..RotationConfig::default()
     }
 }
@@ -137,12 +140,12 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         }
     };
     let mut config = rotation_config(
+        run.ring.keys(),
         Some(multi_send_call_only),
         SpecId::from(run.sim.spec),
         run.sim.block_time,
         run.timeout,
     );
-    config.scan_limit = run.ring.keys().scan_limit();
     let on_device = run.ring.keys().is_device();
     config.payer = run.payer;
     config.sweep = !run.sweep.no_sweep;

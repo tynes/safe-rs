@@ -355,7 +355,7 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
     // Set up the Safe with the next keys at hand.
     ring.look_ahead(SETUP_LOOKAHEAD).await?;
 
-    let mut config = rotation_config(None, SpecId::OSAKA, 12, DEPLOY_TIMEOUT);
+    let mut config = rotation_config(ring.keys(), None, SpecId::OSAKA, 12, DEPLOY_TIMEOUT);
     config.sweep_reserve = args.sweep.sweep_reserve;
     let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     let report = rotating.sweep_all().await?;
