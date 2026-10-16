@@ -32,6 +32,12 @@ url = "2"
 rand = "0.8"
 zeroize = "1"
 
+[features]
+default = ["ledger"]
+# Owner keys on a Ledger (`--ledger`). Builds libusb from source on Linux when
+# the system has none.
+ledger = ["safe-rs/ledger"]
+
 [dev-dependencies]
 alloy = { version = "2.5", features = ["full", "signer-local", "node-bindings"] }
 tempfile = "3"

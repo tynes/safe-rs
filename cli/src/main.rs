@@ -7,6 +7,7 @@
 mod bundle;
 mod cli;
 mod commands;
+mod keys;
 mod output;
 mod paths;
 mod sig_parser;

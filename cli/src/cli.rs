@@ -345,7 +345,7 @@ pub struct CreateArgs {
     /// Deploy the same Safe an HD wallet created on another chain, given as
     /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
     /// must be rotated right away
-    #[arg(long, value_name = "CHAIN_ID:SAFE", requires = "hd_wallet", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
+    #[arg(long, value_name = "CHAIN_ID:SAFE", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
     pub same_as: Option<String>,
 
     #[command(flatten)]
@@ -524,9 +524,10 @@ pub struct WalletSyncArgs {
     #[command(flatten)]
     pub rpc: RpcArgs,
 
-    /// How many wallet indices to derive and compare
-    #[arg(long, default_value_t = 1000)]
-    pub scan_limit: u32,
+    /// How many wallet indices to derive and compare (default: 1000 for an HD
+    /// wallet file, 52 for a Ledger, which answers one address at a time)
+    #[arg(long)]
+    pub scan_limit: Option<u32>,
 
     /// Also read the Safe's owner events from this block on, to restore its
     /// history and find keys that never paid for gas. Use the Safe's
@@ -610,6 +611,18 @@ pub struct HdArgs {
     /// HD wallet: a name under ~/.safe-rs/wallets, or the path of a mnemonic keystore
     #[arg(long, env = "SAFE_HD_WALLET", value_name = "NAME|PATH")]
     pub hd_wallet: Option<String>,
+
+    /// Take the owner keys from a connected Ledger (Ethereum app open) instead
+    /// of an HD wallet file. Overrides SAFE_HD_WALLET
+    #[arg(long)]
+    pub ledger: bool,
+}
+
+impl HdArgs {
+    /// Whether an HD wallet or a Ledger was chosen.
+    pub fn is_set(&self) -> bool {
+        self.ledger || self.hd_wallet.is_some()
+    }
 }
 
 /// What happens to a retired owner key's ETH.
@@ -811,10 +824,9 @@ mod tests {
         };
         let same_as = format!("10:{SAFE}");
         assert!(with(&["--hd-wallet", "w", "--same-as", &same_as]).is_ok());
-        assert!(
-            with(&["--same-as", &same_as]).is_err(),
-            "--same-as needs --hd-wallet"
-        );
+        assert!(with(&["--ledger", "--same-as", &same_as]).is_ok());
+        // Without a wallet it parses, and `create` refuses it.
+        assert!(with(&["--same-as", &same_as]).is_ok());
         assert!(
             with(&[
                 "--hd-wallet",

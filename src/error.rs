@@ -161,6 +161,10 @@ pub enum Error {
     #[error("Keystore error: {0}")]
     Keystore(String),
 
+    /// A hardware wallet could not be reached or refused an operation
+    #[error("{0}")]
+    Device(String),
+
     /// A recovery phrase is invalid. The message never contains the phrase.
     #[error("Recovery phrase error: {0}")]
     Mnemonic(String),

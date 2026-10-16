@@ -6,9 +6,10 @@ use std::path::Path;
 use alloy::primitives::{Address, TxHash};
 use color_eyre::eyre::{bail, eyre, Result, WrapErr};
 use rand::rngs::OsRng;
-use safe_rs::hd::normalize_phrase;
+use safe_rs::hd::{key_path, normalize_phrase};
 use safe_rs::keystore::{encrypt_mnemonic_keystore, keystore_address, ScryptParams};
 use safe_rs::rotation::store::write_private;
+use safe_rs::rotation::KeySource;
 use safe_rs::rotation::{Binding, Exposure, RotatingSafe, RotationState};
 use safe_rs::{HdWallet, SpecId};
 use serde::Serialize;
@@ -22,15 +23,15 @@ use crate::commands::http_provider;
 use crate::commands::rotation::{print_warnings, rotation_config};
 use crate::output::{OwnerOutput, Report, SweepOutput};
 use crate::paths;
-use crate::wallet::{hd_wallet_id, load_hd_wallet, new_password, open_state, open_wallet};
+use crate::wallet::{new_password, open_keys, open_state, open_wallet, wallet_id};
 
 pub async fn run(command: WalletCommand, json: bool) -> Result<()> {
     match command {
         WalletCommand::New(args) => new(&args, json),
         WalletCommand::Import(args) => import(&args, json),
         WalletCommand::List => list(json),
-        WalletCommand::Address(args) => address(&args, json),
-        WalletCommand::Status(args) => status(&args, json),
+        WalletCommand::Address(args) => address(&args, json).await,
+        WalletCommand::Status(args) => status(&args, json).await,
         WalletCommand::Sync(args) => sync(args, json).await,
         WalletCommand::Sweep(args) => sweep(args, json).await,
     }
@@ -234,18 +235,18 @@ impl Report for WalletAddressOutput {
     }
 }
 
-fn address(args: &WalletAddressArgs, json: bool) -> Result<()> {
+async fn address(args: &WalletAddressArgs, json: bool) -> Result<()> {
     let (index, address) = match args.index {
-        None | Some(0) => (0, hd_wallet_id(&args.hd)?),
+        None | Some(0) => (0, wallet_id(&args.hd).await?),
         Some(index) => {
-            let wallet = load_hd_wallet(&args.hd, &args.password)?;
-            (index, wallet.owner_address(index)?)
+            let keys = open_keys(&args.hd, &args.password).await?;
+            (index, keys.address(index).await?)
         }
     };
     WalletAddressOutput {
         index,
         address,
-        path: format!("m/44'/60'/0'/0/{index}"),
+        path: key_path(index),
     }
     .print(json);
     Ok(())
@@ -365,8 +366,8 @@ impl Report for WalletStatusOutput {
     }
 }
 
-fn status(args: &WalletStatusArgs, json: bool) -> Result<()> {
-    let wallet = hd_wallet_id(&args.hd)?;
+async fn status(args: &WalletStatusArgs, json: bool) -> Result<()> {
+    let wallet = wallet_id(&args.hd).await?;
     let state =
         read_state(&paths::home()?, wallet)?.unwrap_or_else(|| RotationState::new(wallet, 1));
     let only = args.safe.map(|safe| safe.to_string());
@@ -426,7 +427,7 @@ impl Report for WalletSyncOutput {
 async fn sync(args: WalletSyncArgs, json: bool) -> Result<()> {
     let ring = open_wallet(&args.hd, &args.password).await?;
     let mut config = rotation_config(args.multi_send_call_only, SpecId::OSAKA, 12, 120);
-    config.scan_limit = args.scan_limit;
+    config.scan_limit = args.scan_limit.unwrap_or_else(|| ring.keys().scan_limit());
     let provider = http_provider(&args.rpc.rpc_url);
     let mut rotating = RotatingSafe::with_keyring(provider, args.safe.safe, ring, config).await?;
     let report = rotating.sync(args.from_block, args.chunk).await?;

@@ -41,10 +41,10 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     if args.sweep.no_sweep || args.sweep.sweep_reserve.is_some() {
         bail!("--no-sweep and --sweep-reserve only apply with --rotate");
     }
-    if args.hd.hd_wallet.is_some() && !args.wallet.is_set() {
+    if args.hd.is_set() && !args.wallet.is_set() {
         bail!(
-            "--hd-wallet needs --rotate: sending without rotating would publish an owner \
-             key and leave it in charge of the Safe"
+            "--hd-wallet or --ledger needs --rotate: sending without rotating would publish \
+             an owner key and leave it in charge of the Safe"
         );
     }
 
@@ -244,7 +244,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
 async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
     if args.wallet.is_set() {
         bail!(
-            "with --rotate the owner key comes from --hd-wallet: remove --private-key, \
+            "with --rotate the owner key comes from --hd-wallet or --ledger: remove --private-key, \
              --keystore and --interactive, and unset PRIVATE_KEY"
         );
     }

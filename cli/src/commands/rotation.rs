@@ -7,14 +7,16 @@ use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{bail, eyre, Result};
+use safe_rs::encoding::compute_domain_separator;
 use safe_rs::rotation::{
     ExecOptions, Keyring, OwnerRef, RotatingSafe, RotationConfig, RotationStatus,
 };
-use safe_rs::{detect_addresses, Call, ChainAddresses, Error, HdWallet, SpecId};
+use safe_rs::{detect_addresses, Call, ChainAddresses, Error, SpecId};
 use url::Url;
 
 use crate::cli::{SimArgs, SweepArgs};
 use crate::commands::{http_provider, outer_fees};
+use crate::keys::CliKeys;
 use crate::output::{
     confirm_prompt, rotation_summary, Console, Report, RotationOutput, RotationPlanOutput,
     SignedTxOutput, SimulationOutput,
@@ -28,7 +30,7 @@ pub struct RotationRun<'a> {
     pub rpc_url: &'a Url,
     pub safe: Address,
     /// The wallet's keys and their locked state
-    pub ring: Keyring<HdWallet>,
+    pub ring: Keyring<CliKeys>,
     /// Key of a current owner the wallet cannot derive (`safe rotate --from-*`)
     pub legacy_owner: Option<PrivateKeySigner>,
     /// `--sweep-legacy`: the legacy key's whole balance may move without a prompt
@@ -140,6 +142,8 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         run.sim.block_time,
         run.timeout,
     );
+    config.scan_limit = run.ring.keys().scan_limit();
+    let on_device = run.ring.keys().is_device();
     config.payer = run.payer;
     config.sweep = !run.sweep.no_sweep;
     config.sweep_reserve = run.sweep.sweep_reserve;
@@ -180,6 +184,15 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         fees: Some(fees),
         gas_limit: run.gas_limit,
     };
+    if on_device {
+        // The device shows the Safe signature as two hashes; the domain one is
+        // known now.
+        console.line(format!(
+            "Confirm each signature on the Ledger: the Safe transaction (EIP-712; domain hash \
+             {}), then the transaction that submits it, then the transfer of the old key's ETH.",
+            compute_domain_separator(rotating.chain_id(), run.safe)
+        ));
+    }
     let tx = match rotating.prepare(&run.calls, options).await {
         Ok(tx) => tx,
         Err(Error::SimulationReverted { reason }) => {

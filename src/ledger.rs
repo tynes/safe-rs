@@ -36,7 +36,7 @@ use crate::outer::{sign_outer_tx, OuterTxParams, SignedOuterTx};
 use crate::rotation::KeySource;
 
 fn device_error(e: impl std::fmt::Display) -> Error {
-    Error::Signing(format!(
+    Error::Device(format!(
         "Ledger: {e} (is it connected and unlocked, with the Ethereum app open?)"
     ))
 }

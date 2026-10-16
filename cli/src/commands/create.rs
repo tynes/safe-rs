@@ -13,7 +13,7 @@ use safe_rs::rotation::{
 };
 use safe_rs::{
     encode_create_proxy_with_nonce, fetch_proxy_creation_code, is_safe_with, predict_safe_address,
-    sign_outer_tx, submit_and_wait, ChainAddresses, HdWallet, OuterTxParams, SignedOuterTx, SpecId,
+    sign_outer_tx, submit_and_wait, ChainAddresses, OuterTxParams, SignedOuterTx, SpecId,
     Submission, WalletBuilder, WalletConfig,
 };
 use serde::Serialize;
@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::cli::CreateArgs;
 use crate::commands::rotation::{print_warnings, rotation_config};
 use crate::commands::{http_provider, HttpProvider};
+use crate::keys::CliKeys;
 use crate::output::{confirm_prompt, CreateOutput, OwnerOutput, Report, SweepOutput};
 use crate::wallet::{create_payer, create_signer, open_wallet};
 
@@ -28,14 +29,19 @@ use crate::wallet::{create_payer, create_signer, open_wallet};
 const DEPLOY_TIMEOUT: u64 = 120;
 
 pub async fn run(args: CreateArgs, json: bool) -> Result<()> {
-    if args.hd.hd_wallet.is_some() {
+    if args.hd.is_set() {
         return run_hd(args, json).await;
     }
+    if args.same_as.is_some() {
+        bail!("--same-as needs --hd-wallet or --ledger");
+    }
     if args.sweep.no_sweep || args.sweep.sweep_reserve.is_some() {
-        bail!("--no-sweep and --sweep-reserve only apply with --hd-wallet");
+        bail!("--no-sweep and --sweep-reserve only apply with --hd-wallet or --ledger");
     }
     if args.payer.payer_private_key.is_some() {
-        eprintln!("note: the payer key is ignored without --hd-wallet; the signer deploys");
+        eprintln!(
+            "note: the payer key is ignored without --hd-wallet or --ledger; the signer deploys"
+        );
     }
 
     let signer = create_signer(&args.wallet, &args.password)?;
@@ -188,7 +194,7 @@ fn same_as_key(value: &str) -> Result<String> {
 /// out; without it the state is left alone and the address is only a preview.
 async fn fresh_owner(
     provider: &HttpProvider,
-    ring: &mut Keyring<HdWallet>,
+    ring: &mut Keyring<CliKeys>,
     commit: bool,
 ) -> Result<Reserved> {
     if !commit {
@@ -203,8 +209,8 @@ async fn fresh_owner(
     Ok(owner)
 }
 
-/// `safe create --hd-wallet`: a 1/1 Safe owned by a wallet key that has never
-/// signed anything.
+/// `safe create --hd-wallet` / `--ledger`: a 1/1 Safe owned by a wallet key
+/// that has never signed anything.
 ///
 /// The funding key (or `--payer-private-key`) sends the deployment, so the
 /// owner's public key stays unpublished; the funding key's remaining ETH then
@@ -212,12 +218,12 @@ async fn fresh_owner(
 async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
     if args.wallet.is_set() {
         bail!(
-            "with --hd-wallet the owner key comes from the wallet: remove --private-key, \
+            "the owner key comes from the HD wallet or Ledger: remove --private-key, \
              --keystore and --interactive, and unset PRIVATE_KEY"
         );
     }
     if !args.owners.is_empty() || args.threshold != 1 {
-        bail!("a Safe created with --hd-wallet has one owner and threshold 1");
+        bail!("a Safe created with --hd-wallet or --ledger has one owner and threshold 1");
     }
 
     let explicit_payer = create_payer(&args.payer)?;
