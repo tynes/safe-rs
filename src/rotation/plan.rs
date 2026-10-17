@@ -2,7 +2,8 @@
 //!
 //! Nothing here holds key material or talks to the network. A plan is built
 //! from a block-pinned [`SafeState`] and is checked against the simulated
-//! post-state with [`check_post_state`] before anything is broadcast.
+//! post-state with `check_post_state` (the `simulation` feature) before
+//! anything is broadcast.
 
 use alloy::primitives::{Address, U256};
 use alloy::sol_types::SolCall;
@@ -11,6 +12,7 @@ use crate::contracts::ISafe;
 use crate::envelope::{PreparedSafeTx, SafeTxGasPolicy};
 use crate::error::{Error, Result};
 use crate::inspect::{SafeState, SENTINEL};
+#[cfg(feature = "simulation")]
 use crate::simulation::ForkSession;
 use crate::types::Call;
 
@@ -215,6 +217,7 @@ pub fn plan_rotation(
     })
 }
 
+#[cfg(feature = "simulation")]
 fn read<C: SolCall>(post: &mut ForkSession, safe: Address, call: &C) -> Result<C::Return> {
     let out = post.call(Address::ZERO, safe, call.abi_encode().into())?;
     C::abi_decode_returns(&out).map_err(|e| Error::Abi(e.to_string()))
@@ -227,6 +230,7 @@ fn read<C: SolCall>(post: &mut ForkSession, safe: Address, call: &C) -> Result<C
 /// This is the guard against anything in the batch that touches owner
 /// configuration, and against a batch target with no code (a DELEGATECALL to
 /// it succeeds and changes nothing).
+#[cfg(feature = "simulation")]
 pub fn check_post_state(post: &mut ForkSession, plan: &RotationPlan) -> Result<()> {
     let safe = plan.safe();
     let owners = read(post, safe, &ISafe::getOwnersCall {})?;

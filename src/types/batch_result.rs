@@ -4,6 +4,7 @@ use alloy::primitives::TxHash;
 
 use crate::eoa::EoaBatchResult;
 use crate::safe::ExecutionResult;
+#[cfg(feature = "simulation")]
 use crate::simulation::SimulationResult;
 
 /// Unified result of executing a batch of transactions
@@ -57,6 +58,7 @@ impl BatchResult {
 ///
 /// This provides a common interface for simulation results from both
 /// Safe (single multicall simulation) and EOA (multiple individual simulations).
+#[cfg(feature = "simulation")]
 #[derive(Debug, Clone)]
 pub struct BatchSimulationResult {
     /// Individual simulation results for each call
@@ -67,6 +69,7 @@ pub struct BatchSimulationResult {
     pub atomic: bool,
 }
 
+#[cfg(feature = "simulation")]
 impl BatchSimulationResult {
     /// Creates a BatchSimulationResult from a Safe simulation result
     pub fn from_safe(result: SimulationResult) -> Self {
@@ -154,6 +157,7 @@ mod tests {
         assert!(!result.atomic);
     }
 
+    #[cfg(feature = "simulation")]
     #[test]
     fn test_batch_simulation_result_from_safe() {
         let sim_result = SimulationResult {
@@ -173,6 +177,7 @@ mod tests {
         assert!(result.atomic);
     }
 
+    #[cfg(feature = "simulation")]
     #[test]
     fn test_batch_simulation_result_from_eoa() {
         let sim_results = vec![

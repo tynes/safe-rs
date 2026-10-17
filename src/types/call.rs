@@ -2,10 +2,13 @@
 
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::sol_types::SolCall;
+#[cfg(feature = "simulation")]
 use std::future::Future;
 
 use super::Operation;
+#[cfg(feature = "simulation")]
 use crate::error::Result;
+#[cfg(feature = "simulation")]
 use crate::simulation::SimulationResult;
 
 /// Trait for builders that construct and execute batches of calls.
@@ -86,9 +89,11 @@ pub trait CallBuilder: Sized {
     ///
     /// After simulation, you can inspect the results via `simulation_result()`
     /// and then call `execute()` which will use the simulation gas values.
+    #[cfg(feature = "simulation")]
     fn simulate(self) -> impl Future<Output = Result<Self>> + Send;
 
     /// Returns the simulation result if simulation was performed.
+    #[cfg(feature = "simulation")]
     fn simulation_result(&self) -> Option<&SimulationResult>;
 
     /// Checks that simulation was performed and succeeded.
@@ -101,6 +106,7 @@ pub trait CallBuilder: Sized {
     /// ```ignore
     /// builder.simulate().await?.simulation_success()?.execute().await?
     /// ```
+    #[cfg(feature = "simulation")]
     fn simulation_success(self) -> Result<Self>;
 }
 

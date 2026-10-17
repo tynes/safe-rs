@@ -57,6 +57,10 @@ pub trait Account {
 
     /// Executes a single transaction.
     ///
+    /// With the `simulation` feature (on by default) the call is simulated
+    /// first, and a revert fails with `Error::SimulationReverted`. Without it a
+    /// revert fails when gas is estimated. Either way nothing is broadcast.
+    ///
     /// # Arguments
     /// * `to` - Target address
     /// * `value` - ETH value to send
