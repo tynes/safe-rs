@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "safe-rs"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 description = "Rust library for Safe smart account interaction (v1.5.0 and v1.4.1)"
 license = "MIT"

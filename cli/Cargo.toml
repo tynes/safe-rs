@@ -1,6 +1,6 @@
 [package]
 name = "safe-rs-cli"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 description = "Cast-like CLI for Safe transactions"
 license = "MIT"
@@ -14,7 +14,7 @@ name = "safe"
 path = "src/main.rs"
 
 [dependencies]
-safe-rs = { path = "..", version = "0.12", default-features = false, features = ["simulation", "hd-wallet"] }
+safe-rs = { path = "..", version = "0.13", default-features = false, features = ["simulation", "hd-wallet"] }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 alloy = "2.5"
