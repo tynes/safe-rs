@@ -1,0 +1,125 @@
+# Pushing a version tag (`v0.13.0`) that points at a commit on master
+# publishes safe-rs and then safe-rs-cli to crates.io and creates the GitHub
+# release. The tag must match the version of both crates.
+#
+# Publishing uses the `CARGO_REGISTRY_TOKEN` secret of the `release`
+# environment. Actions are pinned to commits and nothing is cached, since the
+# publish job holds that token.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check the tag and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: Check that the tag is on master and matches both crates
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::$GITHUB_REF_NAME does not point at a commit on master"
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          for crate in safe-rs safe-rs-cli; do
+            actual=$(cargo metadata --no-deps --format-version 1 --locked \
+              | jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version')
+            if [ "$actual" != "$version" ]; then
+              echo "::error::$crate is at $actual, but the tag is $GITHUB_REF_NAME"
+              exit 1
+            fi
+          done
+
+      # The CLI's default `ledger` feature builds against libusb.
+      - name: Install libusb and libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+
+      # Per package and without dev-dependencies, so that one feature set
+      # cannot borrow a feature that another enables.
+      - name: Build each library feature set
+        run: |
+          cargo check -p safe-rs --lib --locked --no-default-features
+          cargo check -p safe-rs --lib --locked
+          cargo check -p safe-rs --lib --locked --no-default-features --features hd-wallet
+          cargo check -p safe-rs --lib --locked --no-default-features --features ledger
+          cargo check -p safe-rs-cli --bins --locked --no-default-features
+
+      # The e2e tests skip themselves without ETH_RPC_URL; the local ones run
+      # against Anvil.
+      - name: Test
+        run: cargo test --workspace --all-features --locked
+
+  publish:
+    name: Publish to crates.io
+    needs: check
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: Install libusb and libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
+      # safe-rs goes first: the CLI depends on the version just published, and
+      # `cargo publish` returns once that version is in the index. A rerun after
+      # a partial publish skips the crate that is already up.
+      - name: Publish safe-rs, then safe-rs-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for crate in safe-rs safe-rs-cli; do
+            if curl -fsS -o /dev/null -A "safe-rs release (https://github.com/tynes/safe-rs)" \
+              "https://crates.io/api/v1/crates/$crate/$version"; then
+              echo "$crate $version is already on crates.io"
+            else
+              cargo publish -p "$crate" --locked
+            fi
+          done
+
+  github-release:
+    name: Create the GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the release unless it exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          fi
