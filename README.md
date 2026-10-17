@@ -24,12 +24,20 @@ Built for single-signer (threshold 1) Safes with a focus on simplicity, safety, 
 
 ## Installation
 
+safe-rs ships as two crates, so a library user never compiles the CLI's dependencies and a CLI user never needs a Rust project.
+
 ### CLI
 
 The `safe-rs-cli` crate installs the `safe` binary:
 
 ```bash
 cargo install safe-rs-cli --locked
+```
+
+Ledger support is on by default. Leave it out, and with it the libusb build, with:
+
+```bash
+cargo install safe-rs-cli --locked --no-default-features
 ```
 
 Or from a local clone:
@@ -42,7 +50,20 @@ cargo install --path cli --locked
 
 ```toml
 [dependencies]
-safe-rs = "0.12"
+safe-rs = "0.13"
+```
+
+| Feature | Default | Adds |
+|---------|---------|------|
+| `simulation` | yes | Fork simulation with revm: `simulate()` on the builders, `ForkSession`, `simulate_exec*` |
+| `hd-wallet` | no | Encrypted mnemonic keystores, HD keys and `RotatingSafe` (implies `simulation`) |
+| `ledger` | no | Owner keys on a Ledger (implies `hd-wallet`) |
+
+To build, sign and execute Safe transactions without compiling revm, turn off the default features. The builders still execute, with gas estimated over RPC, so a reverting call fails before anything is broadcast:
+
+```toml
+[dependencies]
+safe-rs = { version = "0.13", default-features = false }
 ```
 
 ## Quick Start
@@ -365,7 +386,7 @@ safe send 0xRecipient --value 1000000000000000000 \
 - **What the device must allow:** the Ethereum app 1.6.0 or later (Safe transactions are signed as EIP-712 typed data and shown as a domain hash and a message hash), and blind signing turned on in its settings, because `execTransaction` calldata cannot be decoded on the device.
 - No password is asked for, and `--ledger` takes precedence over `SAFE_HD_WALLET`.
 
-Ledger support is a default feature of the CLI (`cargo install safe-rs-cli --no-default-features` leaves it out). On Linux it uses the system libusb if pkg-config finds it, and builds libusb from source otherwise.
+Ledger support is a default feature of the CLI (`cargo install safe-rs-cli --locked --no-default-features` leaves it out). On Linux it uses the system libusb if pkg-config finds it, and builds libusb from source otherwise.
 
 ### When something goes wrong
 
@@ -447,7 +468,7 @@ Two or more calls are sent through the MultiSend contract in the Safe's `ChainCo
 
 ### Simulation
 
-Simulation runs the transaction against a fork of the current blockchain state:
+Simulation runs the transaction against a fork of the current blockchain state. It needs the `simulation` feature, which is on by default:
 
 ```rust
 let builder = builder.simulate().await?;
@@ -521,7 +542,7 @@ With the `hd-wallet` feature, `RotatingSafe` sends every transaction as your cal
 
 ```toml
 [dependencies]
-safe-rs = { version = "0.12", features = ["hd-wallet"] }
+safe-rs = { version = "0.13", features = ["hd-wallet"] }
 ```
 
 ```rust

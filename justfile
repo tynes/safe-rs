@@ -28,6 +28,16 @@ test-e2e-rpc-filter filter:
 lint:
     cargo clippy --all-targets --all-features
 
+# Lint each library feature set and the CLI on its own. Per package and
+# without dev-dependencies, so another crate's features cannot hide a missing one.
+check-features:
+    cargo clippy -p safe-rs --lib --no-default-features -- -D warnings
+    cargo clippy -p safe-rs --lib -- -D warnings
+    cargo clippy -p safe-rs --lib --no-default-features --features hd-wallet -- -D warnings
+    cargo clippy -p safe-rs --lib --no-default-features --features ledger -- -D warnings
+    cargo clippy -p safe-rs-cli --bins -- -D warnings
+    cargo clippy -p safe-rs-cli --bins --no-default-features -- -D warnings
+
 # Format code
 fmt:
     cargo fmt
