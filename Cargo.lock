@@ -4954,10 +4954,8 @@ version = "0.12.0"
 dependencies = [
  "aes",
  "alloy",
- "alloy-primitives",
  "alloy-signer",
  "alloy-signer-ledger",
- "alloy-sol-types",
  "async-trait",
  "chrono",
  "ctr",
@@ -4983,8 +4981,6 @@ version = "0.12.0"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
- "alloy-primitives",
- "alloy-sol-types",
  "clap",
  "color-eyre",
  "dialoguer",

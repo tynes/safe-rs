@@ -13,15 +13,15 @@ keywords = ["ethereum", "safe", "multisig", "smart-account"]
 categories = ["cryptography", "web-programming"]
 
 [dependencies]
-alloy = { version = "2.5", features = ["full", "signer-local", "rpc-types-trace"] }
-alloy-primitives = "1.6"
-alloy-sol-types = "1.6"
+# Default features (HTTP provider over rustls, contract, local signer) plus
+# k256, which recovering the sender of a signed outer transaction needs.
+alloy = { version = "2.5", features = ["k256", "rpc-types-trace"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 foundry-fork-db = "0.27"
 revm = { version = "41", default-features = false, features = ["std", "optional_eip3607", "optional_no_base_fee", "optional_balance_check"] }
 revm-inspectors = { version = "0.41", default-features = false, features = ["std"] }
 serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt", "time"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 url = "2"
