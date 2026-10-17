@@ -157,7 +157,7 @@ fn is_owner_management(data: &[u8]) -> bool {
 /// single swap is a direct self-call.
 ///
 /// Rejected up front: a Safe whose version is not in [`SUPPORTED_VERSIONS`] or
-/// whose threshold is not 1, an empty swap list, DelegateCall entries, and user
+/// whose threshold is 0, an empty swap list, DelegateCall entries, and user
 /// calls that change the Safe's owners or threshold themselves.
 pub fn plan_rotation(
     state: &SafeState,
@@ -178,10 +178,8 @@ pub fn plan_rotation(
             state.version.as_deref().unwrap_or("an unknown version")
         )));
     }
-    if state.threshold != U256::from(1) {
-        return Err(Error::InvalidThreshold {
-            threshold: state.threshold.saturating_to(),
-        });
+    if state.threshold.is_zero() {
+        return Err(Error::InvalidThreshold { threshold: 0 });
     }
     if swaps.is_empty() {
         return Err(Error::Rotation("no owner swap requested".to_string()));
@@ -402,10 +400,9 @@ mod tests {
 
         let mut multisig = state(&[addr(0xA), addr(0xC)]);
         multisig.threshold = U256::from(2);
-        assert!(matches!(
-            plan_rotation(&multisig, 1, MSCO, &[], &swap),
-            Err(Error::InvalidThreshold { threshold: 2 })
-        ));
+        let plan = plan_rotation(&multisig, 1, MSCO, &[], &swap).unwrap();
+        assert_eq!(plan.expected_owners, vec![addr(0xB), addr(0xC)]);
+        assert_eq!(plan.threshold, U256::from(2));
 
         assert!(plan_rotation(&state(&[addr(0xA)]), 1, MSCO, &[], &[]).is_err());
 

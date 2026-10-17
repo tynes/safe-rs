@@ -392,7 +392,7 @@ mod tests {
 
         let right = wallet().owner_address(2).unwrap();
         let signed = ring.sign_safe_tx(2, right, &tx).await.unwrap();
-        assert_eq!(signed.owner, right);
+        assert_eq!(signed.owner(), Some(right));
 
         // A different phrase (or device) behind the same state.
         let wrong = Address::repeat_byte(0x22);

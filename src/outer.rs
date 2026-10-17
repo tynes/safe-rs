@@ -61,6 +61,29 @@ impl OuterTxParams {
         }
     }
 
+    /// The outer transaction that calls `ISafe::approveHash(safe_tx_hash)` on `safe` from `from`.
+    pub fn approve_hash(
+        chain_id: u64,
+        safe: Address,
+        safe_tx_hash: B256,
+        from: Address,
+        nonce: u64,
+        gas_limit: u64,
+        fees: Eip1559Estimation,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: fees.max_fee_per_gas,
+            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+            to: safe,
+            value: U256::ZERO,
+            input: SignedSafeTx::approve_hash_calldata(safe_tx_hash),
+        }
+    }
+
     /// A plain ETH transfer of `value` from `from` to `to`.
     pub fn transfer(
         chain_id: u64,

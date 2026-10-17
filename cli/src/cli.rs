@@ -156,10 +156,21 @@ pub struct SendArgs {
     #[arg(long = "call", value_name = "CALL")]
     pub calls: Vec<String>,
 
-    /// Path to Safe TX Bundler JSON file
+    /// Path to bundle JSON file (reads calls and existing signatures; writes updated bundle when collecting offchain signatures)
     #[arg(long)]
     pub bundle: Option<PathBuf>,
 
+    /// Merge offchain signatures from additional bundle file(s) into this run
+    #[arg(long = "merge-bundle", value_name = "PATH")]
+    pub merge_bundle: Vec<PathBuf>,
+
+    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
+    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
+    pub approve_hash: bool,
+
+    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
+    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
+    pub sign_only: bool,
     /// Use MultiSendCallOnly (safer, no delegatecall)
     #[arg(long)]
     pub call_only: bool,
@@ -433,6 +444,22 @@ pub struct RotateArgs {
     /// MultiSendCallOnly address (default: canonical for the Safe's version)
     #[arg(long)]
     pub multi_send_call_only: Option<Address>,
+
+    /// Path to bundle JSON file (reads existing signatures/rotations; writes updated bundle when collecting offchain signatures)
+    #[arg(long)]
+    pub bundle: Option<PathBuf>,
+
+    /// Merge offchain signatures from additional bundle file(s) into this run
+    #[arg(long = "merge-bundle", value_name = "PATH")]
+    pub merge_bundle: Vec<PathBuf>,
+
+    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
+    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
+    pub approve_hash: bool,
+
+    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
+    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
+    pub sign_only: bool,
 
     /// Skip confirmation prompt
     #[arg(long)]

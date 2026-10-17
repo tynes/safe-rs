@@ -100,6 +100,9 @@ sol! {
 
         /// Approves a hash for pre-validated signatures (msg.sender must be an owner)
         function approveHash(bytes32 hashToApprove) external;
+        /// Returns non-zero if `owner` has approved `hashToApprove` on-chain
+        function approvedHashes(address owner, bytes32 hashToApprove) external view returns (uint256);
+
 
         /// Events
         event ExecutionSuccess(bytes32 indexed txHash, uint256 payment);
@@ -113,6 +116,7 @@ sol! {
             address fallbackHandler
         );
         event EnabledModule(address indexed module);
+        event ApproveHash(bytes32 indexed approvedHash, address indexed owner);
         event ChangedGuard(address indexed guard);
         event AddedOwner(address indexed owner);
         event RemovedOwner(address indexed owner);

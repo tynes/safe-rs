@@ -9,7 +9,9 @@
 //!
 //! Nothing in this module talks to the network.
 
-use alloy::primitives::{Address, Bytes, Signature, B256, U256};
+use std::collections::BTreeMap;
+
+use alloy::primitives::{eip191_hash_message, Address, Bytes, Signature, B256, U256};
 use alloy::signers::Signer;
 use alloy::sol_types::{SolCall, SolStruct};
 
@@ -248,11 +250,11 @@ impl PreparedSafeTx {
             ));
         }
         let signature = signer.sign_typed_data(&typed, &domain).await?;
-        let signed = SignedSafeTx {
-            prepared: self.clone(),
-            owner: signer.address(),
-            signature: encode_signature(&signature),
-        };
+        let signed = SignedSafeTx::new(
+            self.clone(),
+            signer.address(),
+            encode_signature(&signature),
+        );
         signed.verify()?;
         Ok(signed)
     }
@@ -264,33 +266,170 @@ impl PreparedSafeTx {
     /// without the owner key, with the owner EOA as the transaction sender. It is
     /// not proof that the owner authorized anything.
     pub fn prevalidated(&self, owner: Address) -> SignedSafeTx {
-        SignedSafeTx {
-            prepared: self.clone(),
-            owner,
-            signature: encode_pre_validated_signature(owner),
-        }
+        SignedSafeTx::new(self.clone(), owner, encode_pre_validated_signature(owner))
     }
 }
 
-/// A prepared Safe transaction plus an owner signature.
+/// Recovers the owner address from a single 65-byte Safe signature against `safe_tx_hash`.
+///
+/// Handles:
+/// - `v == 1`: pre-validated signature where `r[12..32]` is the owner address (and `r[..12] == 0`)
+/// - `v in [27, 28]`: standard ECDSA signature over `safe_tx_hash`
+/// - `v in [31, 32]`: `eth_sign` signature over `keccak256("\x19Ethereum Signed Message:\n32" || safe_tx_hash)`
+pub fn recover_signer(safe_tx_hash: B256, signature: &[u8]) -> Result<Address> {
+    if signature.len() != 65 {
+        return Err(Error::Signing(format!(
+            "invalid signature length {}",
+            signature.len()
+        )));
+    }
+    let v = signature[64];
+    match v {
+        1 => {
+            if signature[..12].iter().any(|&b| b != 0) {
+                return Err(Error::Signing(
+                    "invalid pre-validated signature: non-zero padding in r".to_string(),
+                ));
+            }
+            Ok(Address::from_slice(&signature[12..32]))
+        }
+        27 | 28 => {
+            let sig = Signature::from_raw(signature)
+                .map_err(|e| Error::Signing(format!("invalid signature: {e}")))?;
+            sig.recover_address_from_prehash(&safe_tx_hash)
+                .map_err(|e| Error::Signing(format!("signature recovery failed: {e}")))
+        }
+        31 | 32 => {
+            let mut adjusted = [0u8; 65];
+            adjusted[..64].copy_from_slice(&signature[..64]);
+            adjusted[64] = v - 4;
+            let sig = Signature::from_raw(&adjusted)
+                .map_err(|e| Error::Signing(format!("invalid eth_sign signature: {e}")))?;
+            let eth_sign_digest = eip191_hash_message(safe_tx_hash);
+            sig.recover_address_from_prehash(&eth_sign_digest)
+                .map_err(|e| Error::Signing(format!("eth_sign signature recovery failed: {e}")))
+        }
+        _ => Err(Error::Signing(format!("invalid signature v value: {v}"))),
+    }
+}
+
+/// A prepared Safe transaction plus one or more owner signatures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedSafeTx {
     /// The frozen Safe transaction
     pub prepared: PreparedSafeTx,
-    /// The owner the signature is attributed to
-    pub owner: Address,
-    /// 65-byte Safe signature (`r || s || v`)
-    pub signature: Bytes,
+    /// Signatures keyed by owner address (`BTreeMap` orders by `Address` bytes ascending,
+    /// which is the exact ascending address order `Safe.checkNSignatures` requires).
+    pub signatures: BTreeMap<Address, Bytes>,
 }
 
 impl SignedSafeTx {
-    /// Returns true for a pre-validated (`v = 1`) signature.
-    pub fn is_prevalidated(&self) -> bool {
-        self.signature.len() == 65 && self.signature[64] == 1
+    /// Creates a `SignedSafeTx` with a single `(owner, signature)` entry.
+    pub fn new(prepared: PreparedSafeTx, owner: Address, signature: Bytes) -> Self {
+        let mut signatures = BTreeMap::new();
+        signatures.insert(owner, signature);
+        Self {
+            prepared,
+            signatures,
+        }
     }
 
-    /// ABI-encoded `execTransaction` calldata for the outer transaction.
+    /// Creates a `SignedSafeTx` with no signatures yet.
+    pub fn empty(prepared: PreparedSafeTx) -> Self {
+        Self {
+            prepared,
+            signatures: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the first (or sole) owner address in `self.signatures`.
+    pub fn owner(&self) -> Option<Address> {
+        self.signatures.keys().next().copied()
+    }
+
+    /// Returns the sole 65-byte signature when `signatures.len() == 1`, or the first signature.
+    pub fn signature(&self) -> Option<&Bytes> {
+        self.signatures.values().next()
+    }
+
+    /// Validates a 65-byte signature against `self.prepared.safe_tx_hash` and inserts it for `owner`.
+    pub fn insert_signature(&mut self, owner: Address, signature: Bytes) -> Result<()> {
+        let recovered = recover_signer(self.prepared.safe_tx_hash, &signature)?;
+        if recovered != owner {
+            return Err(Error::SignatureMismatch {
+                expected: owner,
+                recovered,
+            });
+        }
+        self.signatures.insert(owner, signature);
+        Ok(())
+    }
+
+    /// Inserts a pre-validated (`v = 1`) signature for `owner`.
+    pub fn add_prevalidated(&mut self, owner: Address) {
+        self.signatures
+            .insert(owner, encode_pre_validated_signature(owner));
+    }
+
+    /// Returns a clone with `v = 1` pre-validated signatures added for missing co-owners up to `threshold`.
+    pub fn with_simulated_co_owners(&self, owners: &[Address], threshold: usize) -> SignedSafeTx {
+        let mut clone = self.clone();
+        for &owner in owners {
+            if clone.signatures.len() >= threshold {
+                break;
+            }
+            if !clone.signatures.contains_key(&owner) {
+                clone.add_prevalidated(owner);
+            }
+        }
+        clone
+    }
+
+    /// Returns true if all present signatures are pre-validated (`v = 1`) and non-empty.
+    pub fn is_prevalidated(&self) -> bool {
+        !self.signatures.is_empty()
+            && self
+                .signatures
+                .values()
+                .all(|sig| sig.len() == 65 && sig[64] == 1)
+    }
+
+    /// Concatenates all signatures in ascending owner `Address` order into `65 * N` bytes.
+    pub fn packed_signatures(&self) -> Bytes {
+        let mut buf = Vec::with_capacity(65 * self.signatures.len());
+        for sig in self.signatures.values() {
+            buf.extend_from_slice(sig);
+        }
+        Bytes::from(buf)
+    }
+
+    /// Returns the first `threshold` signatures in ascending `Address` order as `Bytes`,
+    /// or `Err(Error::InsufficientSignatures)` if fewer than `threshold` signatures are present.
+    pub fn packed_signatures_for(&self, threshold: usize) -> Result<Bytes> {
+        if self.signatures.len() < threshold {
+            return Err(Error::InsufficientSignatures {
+                required: threshold,
+                present: self.signatures.len(),
+            });
+        }
+        let mut buf = Vec::with_capacity(65 * threshold);
+        for sig in self.signatures.values().take(threshold) {
+            buf.extend_from_slice(sig);
+        }
+        Ok(Bytes::from(buf))
+    }
+
+    /// ABI-encoded `execTransaction` calldata for the outer transaction using `self.packed_signatures()`.
     pub fn exec_calldata(&self) -> Bytes {
+        self.exec_calldata_with_signatures(self.packed_signatures())
+    }
+
+    /// ABI-encoded `execTransaction` calldata for the outer transaction using the first `threshold` signatures.
+    pub fn exec_calldata_for(&self, threshold: usize) -> Result<Bytes> {
+        Ok(self.exec_calldata_with_signatures(self.packed_signatures_for(threshold)?))
+    }
+
+    fn exec_calldata_with_signatures(&self, signatures: Bytes) -> Bytes {
         let p = &self.prepared.params;
         let call = ISafe::execTransactionCall {
             to: p.to,
@@ -302,42 +441,70 @@ impl SignedSafeTx {
             gasPrice: p.gas_price,
             gasToken: p.gas_token,
             refundReceiver: p.refund_receiver,
-            signatures: self.signature.clone(),
+            signatures,
         };
         Bytes::from(call.abi_encode())
     }
 
-    /// Recovers the address that produced the signature.
-    ///
-    /// For an ECDSA signature (`v` 27/28) this is `ecrecover(safe_tx_hash)`. A
-    /// pre-validated signature carries the owner in `r` and is returned as is.
-    pub fn recover_owner(&self) -> Result<Address> {
-        if self.signature.len() != 65 {
-            return Err(Error::Signing(format!(
-                "invalid signature length {}",
-                self.signature.len()
-            )));
-        }
-        if self.is_prevalidated() {
-            return Ok(Address::from_slice(&self.signature[12..32]));
-        }
-        let signature = Signature::from_raw(&self.signature)
-            .map_err(|e| Error::Signing(format!("invalid signature: {e}")))?;
-        signature
-            .recover_address_from_prehash(&self.prepared.safe_tx_hash)
-            .map_err(|e| Error::Signing(format!("signature recovery failed: {e}")))
+    /// ABI-encoded `ISafe::approveHash(safe_tx_hash)` calldata.
+    pub fn approve_hash_calldata(safe_tx_hash: B256) -> Bytes {
+        Bytes::from(
+            ISafe::approveHashCall {
+                hashToApprove: safe_tx_hash,
+            }
+            .abi_encode(),
+        )
     }
 
-    /// Checks that the signature recovers to [`SignedSafeTx::owner`].
+    /// Recovers the address that produced the sole (or first) signature.
+    pub fn recover_owner(&self) -> Result<Address> {
+        let sig = self
+            .signature()
+            .ok_or_else(|| Error::Signing("no signatures present".to_string()))?;
+        recover_signer(self.prepared.safe_tx_hash, sig)
+    }
+
+    /// Checks that every `(owner, sig)` entry in `self.signatures` recovers to `owner`.
     pub fn verify(&self) -> Result<()> {
-        let recovered = self.recover_owner()?;
-        if recovered != self.owner {
-            return Err(Error::SignatureMismatch {
-                expected: self.owner,
-                recovered,
-            });
+        if self.signatures.is_empty() {
+            return Err(Error::Signing("no signatures present".to_string()));
+        }
+        for (&owner, sig) in &self.signatures {
+            let recovered = recover_signer(self.prepared.safe_tx_hash, sig)?;
+            if recovered != owner {
+                return Err(Error::SignatureMismatch {
+                    expected: owner,
+                    recovered,
+                });
+            }
         }
         Ok(())
+    }
+
+    /// Splits `packed` into 65-byte chunks, recovers the owner of each chunk against `safe_tx_hash`,
+    /// verifies strictly ascending owner address order, and returns the map.
+    pub fn unpack_signatures(safe_tx_hash: B256, packed: &[u8]) -> Result<BTreeMap<Address, Bytes>> {
+        if !packed.len().is_multiple_of(65) {
+            return Err(Error::Signing(format!(
+                "invalid packed signatures length {}: must be a multiple of 65",
+                packed.len()
+            )));
+        }
+        let mut map = BTreeMap::new();
+        let mut prev: Option<Address> = None;
+        for chunk in packed.chunks_exact(65) {
+            let owner = recover_signer(safe_tx_hash, chunk)?;
+            if let Some(last) = prev {
+                if owner <= last {
+                    return Err(Error::Signing(format!(
+                        "packed signatures are not in strictly ascending owner order: {owner} <= {last}"
+                    )));
+                }
+            }
+            prev = Some(owner);
+            map.insert(owner, Bytes::copy_from_slice(chunk));
+        }
+        Ok(map)
     }
 }
 
@@ -549,7 +716,7 @@ mod tests {
         signed.verify().unwrap();
 
         let decoded = decode_exec_calldata(&signed.exec_calldata()).unwrap();
-        assert_eq!(decoded.signatures, signed.signature);
+        assert_eq!(decoded.signatures, signed.packed_signatures());
         let params = decoded.into_params(U256::from(7));
         assert_eq!(params, p.params);
         assert_eq!(
@@ -574,7 +741,7 @@ mod tests {
         let raw = crate::signing::sign_hash(&signer, p.safe_tx_hash)
             .await
             .unwrap();
-        assert_eq!(typed.signature, raw, "same key, same hash, same bytes");
+        assert_eq!(typed.packed_signatures(), raw, "same key, same hash, same bytes");
     }
 
     #[tokio::test]
@@ -610,5 +777,76 @@ mod tests {
         )
         .unwrap();
         assert!(!p.is_fail_closed());
+    }
+
+    #[tokio::test]
+    async fn multi_owner_signatures_sort_by_address_and_unpack() {
+        let s1 = PrivateKeySigner::random();
+        let s2 = PrivateKeySigner::random();
+        let s3 = PrivateKeySigner::random();
+        let p = PreparedSafeTx::single_call(1, SAFE, &call(MSCO), U256::ZERO, SafeTxGasPolicy::Zero)
+            .unwrap();
+
+        let sig1 = crate::signing::sign_hash(&s1, p.safe_tx_hash).await.unwrap();
+        let sig2 = crate::signing::sign_hash(&s2, p.safe_tx_hash).await.unwrap();
+        let _sig3 = encode_pre_validated_signature(s3.address());
+
+        let mut signed = SignedSafeTx::empty(p.clone());
+        // Insert out of order; BTreeMap sorts by Address ascending
+        signed.insert_signature(s2.address(), sig2.clone()).unwrap();
+        signed.insert_signature(s1.address(), sig1.clone()).unwrap();
+        signed.add_prevalidated(s3.address());
+        signed.verify().unwrap();
+
+        let mut expected_owners = vec![s1.address(), s2.address(), s3.address()];
+        expected_owners.sort();
+        let actual_owners: Vec<Address> = signed.signatures.keys().copied().collect();
+        assert_eq!(actual_owners, expected_owners);
+
+        let packed = signed.packed_signatures();
+        assert_eq!(packed.len(), 65 * 3);
+
+        let unpacked = SignedSafeTx::unpack_signatures(p.safe_tx_hash, &packed).unwrap();
+        assert_eq!(unpacked, signed.signatures);
+
+        // packed_signatures_for(2) takes first 2 sorted signatures
+        let packed_two = signed.packed_signatures_for(2).unwrap();
+        assert_eq!(packed_two.len(), 65 * 2);
+        assert_eq!(&packed_two[..], &packed[..130]);
+
+        // Insufficient signatures error when requesting 4
+        let err = signed.packed_signatures_for(4).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::InsufficientSignatures {
+                required: 4,
+                present: 3
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn insert_signature_rejects_wrong_owner_or_corrupt_bytes() {
+        let s1 = PrivateKeySigner::random();
+        let s2 = PrivateKeySigner::random();
+        let p = PreparedSafeTx::single_call(1, SAFE, &call(MSCO), U256::ZERO, SafeTxGasPolicy::Zero)
+            .unwrap();
+        let sig1 = crate::signing::sign_hash(&s1, p.safe_tx_hash).await.unwrap();
+
+        let mut signed = SignedSafeTx::empty(p.clone());
+        let err = signed.insert_signature(s2.address(), sig1.clone()).unwrap_err();
+        assert!(matches!(err, Error::SignatureMismatch { .. }));
+
+        // Reversed order in unpack_signatures is rejected
+        let sig2 = crate::signing::sign_hash(&s2, p.safe_tx_hash).await.unwrap();
+        let (high_sig, low_sig) = if s1.address() > s2.address() {
+            (sig1, sig2)
+        } else {
+            (sig2, sig1)
+        };
+        let mut bad_packed = Vec::with_capacity(130);
+        bad_packed.extend_from_slice(&high_sig);
+        bad_packed.extend_from_slice(&low_sig);
+        assert!(SignedSafeTx::unpack_signatures(p.safe_tx_hash, &bad_packed).is_err());
     }
 }

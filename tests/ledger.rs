@@ -46,7 +46,7 @@ async fn a_ledger_derives_keys_and_signs_safe_and_outer_transactions() {
     .unwrap();
     println!("Safe tx hash: {}", tx.safe_tx_hash);
     let signed = keys.sign_safe_tx(1, &tx).await.unwrap();
-    assert_eq!(signed.owner, addresses[1]);
+    assert_eq!(signed.owner(), Some(addresses[1]));
     signed.verify().unwrap();
 
     // The outer transaction that would submit it (confirm on the device).

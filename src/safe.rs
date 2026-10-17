@@ -187,6 +187,20 @@ where
         Ok(())
     }
 
+    /// Verifies that the signer is an owner of the Safe, returning `(owners, threshold)`
+    /// without rejecting `threshold > 1`.
+    pub async fn verify_owner(&self) -> Result<(Vec<Address>, u64)> {
+        let owners = self.owners().await?;
+        let threshold = self.threshold().await?;
+        if !owners.contains(&self.signer.address()) {
+            return Err(Error::NotOwner {
+                signer: self.signer.address(),
+                safe: self.address,
+            });
+        }
+        Ok((owners, threshold))
+    }
+
     /// Verifies that the signer is an owner and threshold is 1.
     ///
     /// This does not check the owner count: a Safe with several owners and
@@ -365,15 +379,40 @@ where
     pub async fn simulate(mut self) -> Result<Self> {
         let prepared = self.prepare().await?;
         let signed = prepared.sign(&self.safe.signer).await?;
-        let exec_data = signed.exec_calldata();
         let owner = self.safe.signer.address();
+        let owners = self.safe.owners().await.unwrap_or_default();
+        let threshold = self.safe.threshold().await.unwrap_or(1) as usize;
+        let sim_signed = if threshold > 1 && !owners.is_empty() {
+            signed.with_simulated_co_owners(&owners, threshold)
+        } else {
+            signed
+        };
+        let exec_data = sim_signed
+            .exec_calldata_for(threshold.max(1))
+            .unwrap_or_else(|_| sim_signed.exec_calldata());
+        let pre_approve: Vec<(Address, Call)> = sim_signed
+            .signatures
+            .keys()
+            .copied()
+            .filter(|&co_owner| co_owner != owner)
+            .map(|co_owner| {
+                (
+                    co_owner,
+                    Call::call(
+                        self.safe.address,
+                         crate::envelope::SignedSafeTx::approve_hash_calldata(prepared.safe_tx_hash),
+                    ),
+                )
+            })
+            .collect();
 
         let mut simulator = self.simulator();
         if let Some(dir) = &self.safe.debug_output_dir {
             simulator = simulator.with_debug_output_dir(dir.clone(), self.safe.address);
         }
         let mut result = simulator
-            .simulate_call(
+            .simulate_call_with_setup(
+                &pre_approve,
                 owner,
                 self.safe.address,
                 U256::ZERO,
@@ -396,7 +435,14 @@ where
             let traced = self
                 .simulator()
                 .with_tracing(true)
-                .simulate_call(owner, self.safe.address, U256::ZERO, exec_data, Operation::Call)
+                .simulate_call_with_setup(
+                    &pre_approve,
+                    owner,
+                    self.safe.address,
+                    U256::ZERO,
+                    exec_data,
+                    Operation::Call,
+                )
                 .await?;
             if let Some(inner) = traced
                 .traces
