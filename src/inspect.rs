@@ -263,6 +263,30 @@ pub async fn is_safe_with<P: Provider<N>, N: Network>(
     Ok(singletons.contains(&singleton))
 }
 
+/// Reads which of `owners` have approved `safe_tx_hash` on-chain (`approvedHashes(owner, safe_tx_hash) != 0`).
+pub async fn read_approved_owners<P: Provider<N>, N: Network>(
+    provider: &P,
+    safe: Address,
+    owners: &[Address],
+    safe_tx_hash: B256,
+    block: BlockId,
+) -> Result<Vec<Address>> {
+    let contract = ISafe::new(safe, provider);
+    let mut approved = Vec::new();
+    for &owner in owners {
+        let val = contract
+            .approvedHashes(owner, safe_tx_hash)
+            .block(block)
+            .call()
+            .await
+            .map_err(incomplete("approvedHashes"))?;
+        if !val.is_zero() {
+            approved.push(owner);
+        }
+    }
+    Ok(approved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

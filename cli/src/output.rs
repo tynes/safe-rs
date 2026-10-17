@@ -136,7 +136,7 @@ fn optional_address(address: Address) -> String {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 pub struct SimulationOutput {
     pub success: bool,
     pub gas_used: u64,
@@ -146,8 +146,13 @@ pub struct SimulationOutput {
     pub safe_tx_hash: Option<B256>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub traces: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signatures_collected: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ready_to_execute: Option<bool>,
 }
-
 impl Report for SimulationOutput {
     fn human(&self) -> String {
         let mut s = String::from("Simulation Result:");
@@ -187,6 +192,87 @@ impl Report for ExecutionOutput {
             let _ = write!(s, "\n  Outcome: {}", outcome);
         }
         let _ = write!(s, "\n  Gas Used: {}", self.gas_used);
+        s
+    }
+}
+
+#[derive(Serialize)]
+pub struct ApproveHashOutput {
+    pub tx_hash: TxHash,
+    pub success: bool,
+    pub gas_used: u64,
+    pub safe_tx_hash: B256,
+    pub safe_nonce: U256,
+    pub approver: Address,
+    pub signatures_collected: usize,
+    pub threshold: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_path: Option<String>,
+}
+
+impl Report for ApproveHashOutput {
+    fn human(&self) -> String {
+        let mut s = String::from("Safe Hash Approved On-Chain:");
+        let _ = write!(s, "\n  Tx Hash: {}", self.tx_hash);
+        let _ = write!(s, "\n  Safe Tx Hash: {}", self.safe_tx_hash);
+        let _ = write!(s, "\n  Safe Nonce: {}", self.safe_nonce);
+        let _ = write!(s, "\n  Approver: {}", self.approver);
+        let _ = write!(
+            s,
+            "\n  Approvals: {}/{}",
+            self.signatures_collected, self.threshold
+        );
+        let _ = write!(s, "\n  Gas Used: {}", self.gas_used);
+        if let Some(path) = &self.bundle_path {
+            let _ = write!(s, "\n  Bundle Saved: {path}");
+        }
+        s
+    }
+}
+
+#[derive(Serialize)]
+pub struct BundleSavedOutput {
+    pub safe_tx_hash: B256,
+    pub safe_nonce: U256,
+    pub signatures_collected: usize,
+    pub threshold: usize,
+    pub signers: Vec<Address>,
+    pub remaining_owners: Vec<Address>,
+    pub bundle_path: String,
+}
+
+impl Report for BundleSavedOutput {
+    fn human(&self) -> String {
+        let mut s = format!("Bundle Saved to {}:", self.bundle_path);
+        let _ = write!(s, "\n  Safe Tx Hash: {}", self.safe_tx_hash);
+        let _ = write!(s, "\n  Safe Nonce: {}", self.safe_nonce);
+        let _ = write!(
+            s,
+            "\n  Signatures: {}/{}",
+            self.signatures_collected, self.threshold
+        );
+        if !self.signers.is_empty() {
+            let _ = write!(
+                s,
+                "\n  Signed by: {}",
+                self.signers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !self.remaining_owners.is_empty() {
+            let _ = write!(
+                s,
+                "\n  Remaining owners: {}",
+                self.remaining_owners
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         s
     }
 }
@@ -259,8 +345,8 @@ impl SignedTxOutput {
                 gas_token: p.gas_token,
                 refund_receiver: p.refund_receiver,
             },
-            signer: signed.owner,
-            signature: signed.signature.clone(),
+            signer: signed.owner().unwrap_or(o.from),
+            signature: signed.packed_signatures(),
             outer: OuterTxOutput {
                 from: o.from,
                 to: o.to,
@@ -478,15 +564,19 @@ pub fn rotation_summary(
             user_calls.len() + offset + 1,
             prepared.safe
         );
-        let _ = write!(
-            s,
-            "\n     swapOwner: {} -> {}",
-            plan.old_owner, plan.new_owner
-        );
-        debug_assert_eq!(
-            (swap.old_owner, swap.new_owner),
-            (plan.old_owner.address, plan.new_owner.address)
-        );
+        if (swap.old_owner, swap.new_owner) == (plan.old_owner.address, plan.new_owner.address) {
+            let _ = write!(
+                s,
+                "\n     swapOwner: {} -> {}",
+                plan.old_owner, plan.new_owner
+            );
+        } else {
+            let _ = write!(
+                s,
+                "\n     swapOwner: {} -> {}",
+                swap.old_owner, swap.new_owner
+            );
+        }
     }
 
     match (plan.planned_sweep, sweep_enabled) {
@@ -722,6 +812,7 @@ mod tests {
             revert_reason: None,
             safe_tx_hash: None,
             traces: None,
+            ..Default::default()
         });
 
         assert_eq!(parsed["success"], true);
@@ -739,6 +830,7 @@ mod tests {
             revert_reason: Some("ERC20: transfer amount exceeds balance".to_string()),
             safe_tx_hash: None,
             traces: None,
+            ..Default::default()
         });
 
         assert_eq!(parsed["success"], false);

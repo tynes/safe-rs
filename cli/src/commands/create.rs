@@ -124,6 +124,7 @@ struct HdCreateOutput {
     tx_hash: Option<TxHash>,
     /// The wallet key that owns the Safe, and the address to send gas money to
     owner: OwnerOutput,
+    owners: Vec<Address>,
     threshold: u64,
     already_deployed: bool,
     /// The account that deploys and pays
@@ -145,6 +146,12 @@ impl Report for HdCreateOutput {
         }
         let _ = write!(s, "\n  Threshold: {}", self.threshold);
         let _ = write!(s, "\n  Owner: {}", self.owner);
+        if self.owners.len() > 1 {
+            let _ = write!(s, "\n  Owners:");
+            for (i, owner) in self.owners.iter().enumerate() {
+                let _ = write!(s, "\n    {}: {}", i + 1, owner);
+            }
+        }
         if let Some(sweep) = &self.sweep {
             let _ = write!(
                 s,
@@ -222,9 +229,8 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
              --keystore and --interactive, and unset PRIVATE_KEY"
         );
     }
-    if !args.owners.is_empty() || args.threshold != 1 {
-        bail!("a Safe created with --hd-wallet or --ledger has one owner and threshold 1");
-    }
+    // Multi-owner Safes with --hd-wallet or --ledger are supported;
+    // the wallet's derived owner key is the first owner, followed by deduplicated --owner addresses.
 
     let explicit_payer = create_payer(&args.payer)?;
     let mut ring = open_wallet(&args.hd, &args.password).await?;
@@ -237,9 +243,14 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
 
     let creation = if let Some(same_as) = &args.same_as {
         let key = same_as_key(same_as)?;
-        let params = ring.state().binding(&key)?.creation.ok_or_else(|| {
-            eyre!("{key} was not created by this wallet, so its creation parameters are unknown")
-        })?;
+        let params = ring
+            .state()
+            .binding(&key)?
+            .creation
+            .clone()
+            .ok_or_else(|| {
+                eyre!("{key} was not created by this wallet, so its creation parameters are unknown")
+            })?;
         Creation {
             owner: Reserved {
                 index: params.owner_index,
@@ -249,7 +260,36 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
         }
     } else {
         let defaults = ChainAddresses::from(args.safe_version);
+        // Validate threshold before reserving a fresh owner index on disk
+        let preview_owner = fresh_owner(&provider, &mut ring, false).await?;
+        let mut preview_owners = vec![preview_owner.address];
+        for &addr in &args.owners {
+            if addr == Address::ZERO {
+                bail!("Zero address cannot be an owner");
+            }
+            if !preview_owners.contains(&addr) {
+                preview_owners.push(addr);
+            }
+        }
+        if args.threshold == 0 || (args.threshold as usize) > preview_owners.len() {
+            bail!(
+                "Invalid threshold: {} (must be 1-{})",
+                args.threshold,
+                preview_owners.len()
+            );
+        }
         let owner = fresh_owner(&provider, &mut ring, !args.compute_only).await?;
+        let additional_owners: Vec<Address> = args
+            .owners
+            .iter()
+            .copied()
+            .filter(|&a| a != owner.address)
+            .fold(Vec::new(), |mut acc, a| {
+                if !acc.contains(&a) {
+                    acc.push(a);
+                }
+                acc
+            });
         Creation {
             owner,
             params: CreationParams {
@@ -258,17 +298,33 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
                 singleton: args.singleton.unwrap_or(defaults.safe_singleton),
                 factory: args.factory.unwrap_or(defaults.proxy_factory),
                 fallback_handler: args.fallback_handler.unwrap_or(defaults.fallback_handler),
+                additional_owners,
+                threshold: args.threshold,
             },
         }
     };
     let Creation { owner, params } = creation;
 
+    let mut owners = vec![owner.address];
+    for &co_owner in &params.additional_owners {
+        if !owners.contains(&co_owner) {
+            owners.push(co_owner);
+        }
+    }
+    let threshold = params.threshold.max(1);
+    if (threshold as usize) > owners.len() {
+        bail!(
+            "Invalid threshold: {} (must be 1-{})",
+            threshold,
+            owners.len()
+        );
+    }
     let creation_code = fetch_proxy_creation_code(&provider, params.factory).await?;
     let (safe, initializer) = predict_safe_address(
         params.factory,
         params.singleton,
-        &[owner.address],
-        1,
+        &owners,
+        threshold,
         params.fallback_handler,
         params.salt_nonce,
         &creation_code,
@@ -282,6 +338,10 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
         println!("  Singleton: {}", params.singleton);
         println!("  Salt Nonce: {}", params.salt_nonce);
         println!("  Owner: {}", OwnerOutput::from(owner));
+        if owners.len() > 1 {
+            println!("  Owners: {:?}", owners);
+        }
+        println!("  Threshold: {threshold}");
         println!("  Payer: {payer}");
         println!("  Safe Address: {safe}");
         println!();
@@ -290,7 +350,8 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
         safe_address: safe,
         tx_hash,
         owner: owner.into(),
-        threshold: 1,
+        owners: owners.clone(),
+        threshold,
         already_deployed,
         payer,
         sweep,

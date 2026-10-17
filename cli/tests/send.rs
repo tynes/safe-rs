@@ -81,11 +81,83 @@ fn send(h: &LocalHarness, home: &Path, safe: Address, args: &[&str]) -> Output {
 
 /// Writes a bundle of two transfers to `recipient`, 15 wei in total.
 fn write_transfers(path: &Path, recipient: Address) {
-    let bundle = serde_json::json!([
-        { "to": recipient.to_string(), "value": "10" },
-        { "to": recipient.to_string(), "value": "5" },
-    ]);
+    let bundle = serde_json::json!({
+        "calls": [
+            { "to": recipient.to_string(), "value": "10" },
+            { "to": recipient.to_string(), "value": "5" },
+        ]
+    });
     std::fs::write(path, bundle.to_string()).unwrap();
+}
+
+/// Runs `safe send --json` for `safe` signed by an arbitrary `signer`.
+fn send_as(
+    h: &LocalHarness,
+    home: &Path,
+    safe: Address,
+    signer: &alloy::signers::local::PrivateKeySigner,
+    args: &[&str],
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_safe"));
+    command
+        .arg("send")
+        .args(args)
+        .args(["--safe", &safe.to_string()])
+        .args(["--rpc-url", h.url().as_str()])
+        .args(["--private-key", &hex::encode_prefixed(signer.to_bytes())])
+        .arg("--json")
+        .env("SAFE_RS_HOME", home);
+    for name in [
+        "PRIVATE_KEY",
+        "SAFE_ADDRESS",
+        "ETH_RPC_URL",
+        "SAFE_HD_WALLET",
+        "SAFE_PASSWORD_FILE",
+        "SAFE_PAYER_PRIVATE_KEY",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().expect("run safe");
+    Output {
+        ok: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Runs `safe send --json` for `safe` with no owner wallet, only `--payer-private-key`.
+fn send_with_payer_only(
+    h: &LocalHarness,
+    home: &Path,
+    safe: Address,
+    payer: &alloy::signers::local::PrivateKeySigner,
+    args: &[&str],
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_safe"));
+    command
+        .arg("send")
+        .args(args)
+        .args(["--safe", &safe.to_string()])
+        .args(["--rpc-url", h.url().as_str()])
+        .args(["--payer-private-key", &hex::encode_prefixed(payer.to_bytes())])
+        .arg("--json")
+        .env("SAFE_RS_HOME", home);
+    for name in [
+        "PRIVATE_KEY",
+        "SAFE_ADDRESS",
+        "ETH_RPC_URL",
+        "SAFE_HD_WALLET",
+        "SAFE_PASSWORD_FILE",
+        "SAFE_PAYER_PRIVATE_KEY",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().expect("run safe");
+    Output {
+        ok: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
 }
 
 async fn balance(h: &LocalHarness, address: Address) -> U256 {
@@ -243,4 +315,224 @@ async fn the_default_multisend_follows_the_safe_version() {
         let chosen = batch_target(safe, &["--multi-send-call-only", &target.to_string()]);
         assert_eq!(chosen, target);
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_owner_offchain_bundle_collection_and_execution() {
+    use alloy::signers::local::PrivateKeySigner;
+
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    let owner1 = PrivateKeySigner::random();
+    let owner2 = PrivateKeySigner::random();
+    let owner3 = PrivateKeySigner::random();
+    h.fund(owner1.address(), U256::from(10u128.pow(18))).await;
+    h.fund(owner2.address(), U256::from(10u128.pow(18))).await;
+    h.fund(owner3.address(), U256::from(10u128.pow(18))).await;
+
+    let safe = h
+        .deploy_safe_with(
+            &[owner1.address(), owner2.address(), owner3.address()],
+            2,
+            700,
+        )
+        .await;
+    h.fund(safe, U256::from(1_000)).await;
+
+    let recipient = Address::repeat_byte(0x51);
+    let bundle_path = dir.path().join("tx.json");
+    let bundle = bundle_path.to_str().unwrap();
+
+    // Without --bundle or --approve-hash on a 2-of-3 Safe, `safe send` refuses with a clear error.
+    let missing_bundle = send_as(
+        &h,
+        &home,
+        safe,
+        &owner1,
+        &[&recipient.to_string(), "--value", "100"],
+    );
+    assert!(!missing_bundle.ok);
+    assert!(
+        missing_bundle
+            .stderr
+            .contains("Safe threshold is 2 (have 1/2 signatures)"),
+        "{}",
+        missing_bundle.stderr
+    );
+
+    // Owner 1 initializes and signs the bundle (1/2 signatures): simulates, does not broadcast.
+    let first = send_as(
+        &h,
+        &home,
+        safe,
+        &owner1,
+        &[&recipient.to_string(), "--value", "100", "--bundle", bundle],
+    )
+    .json();
+    assert_eq!(first["signatures_collected"], 1);
+    assert_eq!(first["threshold"], 2);
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
+    assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
+    assert_eq!(
+        h.provider
+            .get_transaction_count(owner1.address())
+            .await
+            .unwrap(),
+        0,
+        "nothing was broadcast"
+    );
+
+    // Owner 2 loads tx.json, appends signature (2/2), and executes execTransaction on-chain.
+    let second = send_as(&h, &home, safe, &owner2, &["--bundle", bundle]).json();
+    assert_eq!(second["success"], true);
+    assert_eq!(second["outcome"], "success");
+    assert_eq!(balance(&h, recipient).await, U256::from(100));
+    assert_eq!(h.safe_nonce(safe).await, U256::from(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_owner_offline_parallel_signing_and_merge_bundle_with_payer() {
+    use alloy::signers::local::PrivateKeySigner;
+
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    let owner1 = PrivateKeySigner::random();
+    let owner2 = PrivateKeySigner::random();
+    let payer = PrivateKeySigner::random();
+    // Owners have 0 ETH; only payer has ETH!
+    h.fund(payer.address(), U256::from(10u128.pow(18))).await;
+
+    let safe = h
+        .deploy_safe_with(&[owner1.address(), owner2.address()], 2, 701)
+        .await;
+    h.fund(safe, U256::from(1_000)).await;
+
+    let recipient = Address::repeat_byte(0x52);
+    let b1_path = dir.path().join("tx_owner1.json");
+    let b2_path = dir.path().join("tx_owner2.json");
+    let b1 = b1_path.to_str().unwrap();
+    let b2 = b2_path.to_str().unwrap();
+    let payer_key = hex::encode_prefixed(payer.to_bytes());
+
+    // Owner 1 signs into tx_owner1.json
+    let s1 = send_as(
+        &h,
+        &home,
+        safe,
+        &owner1,
+        &[
+            &recipient.to_string(),
+            "--value",
+            "75",
+            "--bundle",
+            b1,
+            "--payer-private-key",
+            &payer_key,
+        ],
+    )
+    .json();
+    assert_eq!(s1["signatures_collected"], 1);
+
+    // Owner 2 signs independently into tx_owner2.json with --sign-only
+    let s2 = send_as(
+        &h,
+        &home,
+        safe,
+        &owner2,
+        &[
+            &recipient.to_string(),
+            "--value",
+            "75",
+            "--bundle",
+            b2,
+            "--sign-only",
+            "--payer-private-key",
+            &payer_key,
+        ],
+    )
+    .json();
+    assert_eq!(s2["signatures_collected"], 1);
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
+
+    // Non-owner payer merges both bundles and executes on-chain!
+    let executed = send_with_payer_only(
+        &h,
+        &home,
+        safe,
+        &payer,
+        &["--bundle", b1, "--merge-bundle", b2],
+    )
+    .json();
+    assert_eq!(executed["success"], true);
+    assert_eq!(executed["outcome"], "success");
+    assert_eq!(balance(&h, recipient).await, U256::from(75));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_owner_onchain_approve_hash_flow() {
+    use alloy::signers::local::PrivateKeySigner;
+    use safe_rs::contracts::ISafe;
+
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+
+    let owner1 = PrivateKeySigner::random();
+    let owner2 = PrivateKeySigner::random();
+    h.fund(owner1.address(), U256::from(10u128.pow(18))).await;
+    h.fund(owner2.address(), U256::from(10u128.pow(18))).await;
+
+    let safe = h
+        .deploy_safe_with(&[owner1.address(), owner2.address()], 2, 702)
+        .await;
+    h.fund(safe, U256::from(1_000)).await;
+
+    let recipient = Address::repeat_byte(0x53);
+
+    // Owner 1 approves the hash on-chain with --approve-hash
+    let approved = send_as(
+        &h,
+        &home,
+        safe,
+        &owner1,
+        &[
+            &recipient.to_string(),
+            "--value",
+            "50",
+            "--approve-hash",
+        ],
+    )
+    .json();
+    assert_eq!(approved["success"], true);
+    let approver: Address = approved["approver"].as_str().unwrap().parse().unwrap();
+    assert_eq!(approver, owner1.address());
+    assert_eq!(approved["signatures_collected"], 1);
+    assert_eq!(approved["threshold"], 2);
+    let safe_tx_hash: B256 = approved["safe_tx_hash"].as_str().unwrap().parse().unwrap();
+
+    let onchain_flag = ISafe::new(safe, &h.provider)
+        .approvedHashes(owner1.address(), safe_tx_hash)
+        .call()
+        .await
+        .unwrap();
+    assert_eq!(onchain_flag, U256::from(1));
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
+
+    // Owner 2 runs the same `safe send` without a bundle file: automatically discovers
+    // owner 1's on-chain approval, combines v=1 + ECDSA signature, and executes!
+    let executed = send_as(
+        &h,
+        &home,
+        safe,
+        &owner2,
+        &[&recipient.to_string(), "--value", "50"],
+    )
+    .json();
+    assert_eq!(executed["success"], true);
+    assert_eq!(executed["outcome"], "success");
+    assert_eq!(balance(&h, recipient).await, U256::from(50));
 }

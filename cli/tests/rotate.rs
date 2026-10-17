@@ -1007,3 +1007,156 @@ async fn a_rotating_send_names_a_multisend_that_has_no_code() {
     assert_eq!(h.owners(safe).await, vec![owner]);
     assert_eq!(balance(&h, recipient).await, U256::ZERO);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash() {
+    use alloy::signers::local::PrivateKeySigner;
+
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cli = discovery_wallet(&h, dir.path());
+    let funding = HdWallet::from_phrase(PHRASE).unwrap().id();
+    let co_owner = PrivateKeySigner::random();
+    let co_owner_key = alloy::primitives::hex::encode_prefixed(co_owner.to_bytes());
+    h.fund(funding, eth(1)).await;
+    h.fund(co_owner.address(), eth(1)).await;
+
+    let singleton = h.addresses.safe_singleton.to_string();
+    let factory = h.addresses.proxy_factory.to_string();
+    let handler = h.addresses.fallback_handler.to_string();
+    let msco = h.addresses.multi_send_call_only.to_string();
+
+    // 1. Create a 2-of-2 Safe with `safe create --hd-wallet demo --owner <co_owner> --threshold 2`
+    let created = cli
+        .wallet_command(&[
+            "create",
+            "--owner",
+            &co_owner.address().to_string(),
+            "--threshold",
+            "2",
+            "--singleton",
+            &singleton,
+            "--factory",
+            &factory,
+            "--fallback-handler",
+            &handler,
+        ])
+        .json();
+    let safe = address(&created["safe_address"]);
+    let safe_arg = safe.to_string();
+    assert_eq!(created["owner"]["index"], 1);
+    assert_eq!(created["threshold"], 2);
+    assert_eq!(h.owners(safe).await, vec![key(1), co_owner.address()]);
+    h.fund(safe, U256::from(1_000)).await;
+
+    // 2. Offchain bundle rotation:
+    //    Step A: HD wallet runs `safe send --rotate --bundle rot.json` (1/2 signatures collected)
+    let recipient = Address::repeat_byte(0x61);
+    let bundle_path = dir.path().join("rot.json");
+    let bundle_arg = bundle_path.to_str().unwrap();
+    let saved = cli
+        .wallet_command(&[
+            "send",
+            &recipient.to_string(),
+            "--value",
+            "25",
+            "--safe",
+            &safe_arg,
+            "--multi-send-call-only",
+            &msco,
+            "--rotate",
+            "--bundle",
+            bundle_arg,
+        ])
+        .json();
+    assert_eq!(saved["signatures_collected"], 1);
+    assert_eq!(saved["threshold"], 2);
+    assert_eq!(h.owners(safe).await, vec![key(1), co_owner.address()]);
+    assert_eq!(balance(&h, recipient).await, U256::ZERO);
+
+    //    Step B: Co-owner signs the prepared bundle (with swapOwner included in tx.data) using `--sign-only`
+    let co_signed = cli
+        .run(&[
+            "send",
+            "--bundle",
+            bundle_arg,
+            "--sign-only",
+            "--safe",
+            &safe_arg,
+            "--multi-send-call-only",
+            &msco,
+            "--private-key",
+            &co_owner_key,
+            "--rpc-url",
+            h.url().as_str(),
+            "--json",
+        ])
+        .json();
+    assert_eq!(co_signed["signatures_collected"], 2);
+    assert_eq!(co_signed["threshold"], 2);
+
+    //    Step C: HD wallet runs `safe send --rotate --bundle rot.json`: sees 2/2 signatures, executes,
+    //            rotates key(1) -> key(2), and sweeps ETH from key(1) -> key(2)!
+    let executed = cli
+        .wallet_command(&[
+            "send",
+            "--bundle",
+            bundle_arg,
+            "--safe",
+            &safe_arg,
+            "--multi-send-call-only",
+            &msco,
+            "--rotate",
+        ])
+        .json();
+    assert_eq!(executed["status"], "rotated");
+    assert_eq!(executed["old_owner"]["index"], 1);
+    assert_eq!(executed["owner"]["index"], 2);
+    assert_eq!(h.owners(safe).await, vec![key(2), co_owner.address()]);
+    assert_eq!(balance(&h, recipient).await, U256::from(25));
+    assert_eq!(balance(&h, key(1)).await, U256::ZERO);
+    assert!(balance(&h, key(2)).await > U256::ZERO);
+
+    // 3. On-chain --approve-hash rotation via `safe rotate`:
+    //    Step A: HD wallet runs `safe rotate <SAFE> --approve-hash --bundle rot2.json`
+    let bundle2_path = dir.path().join("rot2.json");
+    let bundle2_arg = bundle2_path.to_str().unwrap();
+    let approved = cli
+        .wallet_command(&[
+            "rotate",
+            &safe_arg,
+            "--approve-hash",
+            "--bundle",
+            bundle2_arg,
+        ])
+        .json();
+    assert_eq!(approved["success"], true);
+    assert_eq!(address(&approved["approver"]), key(2));
+    assert_eq!(h.owners(safe).await, vec![key(2), co_owner.address()]);
+
+    //    Step B: Co-owner signs the bundle `--sign-only`, then HD wallet executes `safe rotate`
+    cli.run(&[
+        "send",
+        "--bundle",
+        bundle2_arg,
+        "--sign-only",
+        "--safe",
+        &safe_arg,
+        "--private-key",
+        &co_owner_key,
+        "--rpc-url",
+        h.url().as_str(),
+        "--json",
+    ])
+    .json();
+
+    let rotated = cli
+        .wallet_command(&["rotate", &safe_arg, "--bundle", bundle2_arg])
+        .json();
+    assert_eq!(rotated["status"], "rotated");
+    assert_eq!(rotated["old_owner"]["index"], 2);
+    assert_eq!(rotated["owner"]["index"], 3);
+    assert_eq!(h.owners(safe).await, vec![key(3), co_owner.address()]);
+    assert_eq!(balance(&h, key(2)).await, U256::ZERO);
+    assert!(balance(&h, key(3)).await > U256::ZERO);
+}

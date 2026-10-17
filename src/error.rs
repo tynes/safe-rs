@@ -126,6 +126,10 @@ pub enum Error {
     #[error("Signature mismatch: expected signer {expected}, recovered {recovered}")]
     SignatureMismatch { expected: Address, recovered: Address },
 
+    /// Not enough owner signatures have been collected to meet the Safe threshold
+    #[error("Insufficient signatures: Safe threshold requires {required}, have {present}")]
+    InsufficientSignatures { required: usize, present: usize },
+
     /// A safety-critical read could not be completed
     #[error("Incomplete read of {what}: {reason}")]
     IncompleteRead { what: &'static str, reason: String },

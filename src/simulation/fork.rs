@@ -484,6 +484,31 @@ where
         self.run_call(&mut db, from, to, value, data, operation, false)
     }
 
+    /// Simulates a call from `from` after committing `setup` calls from their respective senders.
+    pub async fn simulate_call_with_setup(
+        &self,
+        setup: &[(Address, Call)],
+        from: Address,
+        to: Address,
+        value: U256,
+        data: Bytes,
+        operation: Operation,
+    ) -> Result<SimulationResult> {
+        let mut db = self.fork_for(from).await?;
+        for (sender, call) in setup {
+            self.run_call(
+                &mut db,
+                *sender,
+                call.to,
+                call.value,
+                call.data.clone(),
+                call.operation,
+                true,
+            )?;
+        }
+        self.run_call(&mut db, from, to, value, data, operation, false)
+    }
+
     /// Simulates `calls` in order from `from` on a single fork, so every call
     /// sees the state changes of the calls before it.
     ///

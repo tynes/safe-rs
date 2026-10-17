@@ -148,9 +148,13 @@ pub struct Retired {
     pub swept: Option<Swept>,
 }
 
+fn default_threshold() -> u64 {
+    1
+}
+
 /// Parameters a Safe was created with, kept so the same address can be
 /// deployed on another chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreationParams {
     /// Index of the initial owner
     pub owner_index: u32,
@@ -162,6 +166,12 @@ pub struct CreationParams {
     pub factory: Address,
     /// Fallback handler
     pub fallback_handler: Address,
+    /// Additional co-owners beyond `owner_index`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_owners: Vec<Address>,
+    /// Safe signature threshold (default: 1)
+    #[serde(default = "default_threshold")]
+    pub threshold: u64,
 }
 
 /// Rotation state of one Safe on one chain.

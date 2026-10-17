@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use alloy::eips::eip1559::{BaseFeeParams, Eip1559Estimation};
 use alloy::eips::BlockId;
 use alloy::network::{AnyNetwork, AnyTransactionReceipt, Network, TransactionBuilder};
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{address, Address, Bytes, B256, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 
@@ -31,9 +31,13 @@ use crate::chain::ChainAddresses;
 use crate::contracts::{IGasPriceOracle, ISafe};
 use crate::envelope::{PreparedSafeTx, SignedSafeTx};
 use crate::error::{Error, Result};
-use crate::exec::{simulate_exec, submit_and_wait, Submission};
+use crate::exec::{
+    simulate_approve_hash, simulate_exec_with_threshold, submit_and_wait, Submission,
+};
 use crate::hd::HdWallet;
-use crate::inspect::{read_safe_state, require_batch_target, ReadSafeStateOptions};
+use crate::inspect::{
+    read_approved_owners, read_safe_state, require_batch_target, ReadSafeStateOptions,
+};
 use crate::outer::{
     decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
 };
@@ -128,12 +132,18 @@ impl std::fmt::Debug for RotationConfig {
 }
 
 /// Per-transaction overrides.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecOptions {
     /// EIP-1559 fees of the outer transaction (default: the node's estimate)
     pub fees: Option<Eip1559Estimation>,
     /// Gas limit of the outer transaction (default: simulated gas plus 20%)
     pub gas_limit: Option<u64>,
+    /// Existing offchain co-owner signatures (from a bundle file)
+    pub co_signatures: BTreeMap<Address, Bytes>,
+    /// Additional co-owner rotation swaps `(old_owner, new_owner)` batched in the same Safe transaction
+    pub extra_swaps: Vec<(Address, Address)>,
+    /// Sign the `approveHash(safeTxHash)` outer transaction instead of `execTransaction`
+    pub approve_hash: bool,
 }
 
 /// The sweep a rotation is expected to be followed by.
@@ -167,6 +177,12 @@ pub struct RotationTx {
     pub simulation: SimulationResult,
     /// The sweep that will follow, if any
     pub planned_sweep: Option<PlannedSweep>,
+    /// Number of signatures collected so far (including on-chain `approvedHashes` and this wallet's signature)
+    pub signatures_collected: usize,
+    /// Safe threshold required to execute `execTransaction`
+    pub threshold: usize,
+    /// Current Safe owners at the block the rotation was planned against
+    pub owners: Vec<Address>,
 }
 
 /// What a mined rotation did to the owner list.
@@ -635,12 +651,19 @@ where
             ReadSafeStateOptions::default(),
         )
         .await?;
+        let mut swaps: Vec<(Address, Address)> = Vec::new();
+        for &(old_owner, new_owner) in &options.extra_swaps {
+            if old_owner != current.address() && !swaps.iter().any(|(o, _)| *o == old_owner) {
+                swaps.push((old_owner, new_owner));
+            }
+        }
+        swaps.push((current.address(), reserved.address));
         let plan = plan_rotation(
             &state,
             self.chain_id,
             self.config.addresses.multi_send_call_only,
             calls,
-            &[(current.address(), reserved.address)],
+            &swaps,
         )?;
         // The plan has no DelegateCall entries, so this operation means the
         // calls are batched through MultiSendCallOnly. With no code there the
@@ -659,7 +682,32 @@ where
                 "the payer must not be the next owner: paying would publish its key".to_string(),
             ));
         }
-        let signed = self.sign_safe(&owner, &plan.prepared).await?;
+        let wallet_signed = self.sign_safe(&owner, &plan.prepared).await?;
+        let approved_owners = read_approved_owners(
+            &self.provider,
+            self.safe,
+            &state.owners,
+            plan.prepared.safe_tx_hash,
+            head.block_id(),
+        )
+        .await?;
+        let mut signed = SignedSafeTx::empty(plan.prepared.clone());
+        for (&co_owner, sig) in &options.co_signatures {
+            if state.owners.contains(&co_owner) {
+                signed.insert_signature(co_owner, sig.clone())?;
+            }
+        }
+        for &co_owner in &approved_owners {
+            signed
+                .signatures
+                .entry(co_owner)
+                .or_insert_with(|| crate::signing::encode_pre_validated_signature(co_owner));
+        }
+        for (&w_owner, sig) in &wallet_signed.signatures {
+            signed.insert_signature(w_owner, sig.clone())?;
+        }
+        let threshold = state.threshold.saturating_to::<usize>().max(1);
+        let signatures_collected = signed.signatures.len();
         let fees = match options.fees {
             Some(fees) => fees,
             None => self
@@ -675,14 +723,22 @@ where
             ""
         };
         let session = self.session(&head);
-        let simulated = simulate_exec(&session, &signed, payer.address(), fees, options.gas_limit)
-            .map_err(|e| match e {
-                Error::Revm(reason) if reason.contains("LackOfFund") => Error::Rotation(format!(
-                    "{} cannot pay for this transaction: fund it, or use a separate payer{owed}",
-                    payer.address()
-                )),
-                other => other,
-            })?;
+        let simulated = simulate_exec_with_threshold(
+            &session,
+            &signed,
+            &state.owners,
+            threshold,
+            payer.address(),
+            fees,
+            options.gas_limit,
+        )
+        .map_err(|e| match e {
+            Error::Revm(reason) if reason.contains("LackOfFund") => Error::Rotation(format!(
+                "{} cannot pay for this transaction: fund it, or use a separate payer{owed}",
+                payer.address()
+            )),
+            other => other,
+        })?;
         let Some(mut post) = simulated.post else {
             return Err(Error::SimulationReverted {
                 reason: simulated
@@ -706,28 +762,66 @@ where
             None
         };
 
-        let outer = self
-            .sign_outer(
-                &payer,
-                OuterTxParams::exec_transaction(
-                    &signed,
-                    payer.address(),
-                    simulated.payer_nonce,
-                    simulated.gas_limit,
-                    fees,
-                ),
+        let outer_params = if options.approve_hash {
+            let approve_sim = simulate_approve_hash(
+                &session,
+                self.chain_id,
+                self.safe,
+                plan.prepared.safe_tx_hash,
+                owner.address(),
+                fees,
+                options.gas_limit,
+            )?;
+            if !approve_sim.result.success {
+                return Err(Error::SimulationReverted {
+                    reason: approve_sim
+                        .result
+                        .revert_reason
+                        .unwrap_or_else(|| "approveHash reverted".to_string()),
+                });
+            }
+            OuterTxParams::approve_hash(
+                self.chain_id,
+                self.safe,
+                plan.prepared.safe_tx_hash,
+                owner.address(),
+                approve_sim.payer_nonce,
+                approve_sim.gas_limit,
+                fees,
             )
-            .await?;
+        } else {
+            let mut exec_signed = signed.clone();
+            if exec_signed.signatures.len() > threshold {
+                exec_signed.signatures = signed
+                    .signatures
+                    .iter()
+                    .take(threshold)
+                    .map(|(&k, v)| (k, v.clone()))
+                    .collect();
+            }
+            OuterTxParams::exec_transaction(
+                &exec_signed,
+                payer.address(),
+                simulated.payer_nonce,
+                simulated.gas_limit,
+                fees,
+            )
+        };
+        let outer_signer = if options.approve_hash { &owner } else { &payer };
+        let outer = self.sign_outer(outer_signer, outer_params).await?;
 
         Ok(RotationTx {
             plan,
             from: current,
             to: reserved,
-            payer: payer.address(),
+            payer: outer_signer.address(),
             signed,
             outer,
             simulation: simulated.result,
             planned_sweep,
+            signatures_collected,
+            threshold,
+            owners: state.owners,
         })
     }
 
@@ -762,6 +856,23 @@ where
                 created_at: now(),
             },
         )?;
+        self.ring.store.save()
+    }
+
+    /// Marks the current owner key as exposed (`Exposure::Signed`) and saves the state
+    /// without setting a pending outer `execTransaction` (used when the signature leaves
+    /// the process in an offchain `--bundle` or an on-chain `--approve-hash`).
+    pub fn arm_signed_only(&mut self, tx: &RotationTx) -> Result<()> {
+        let binding = self.binding()?;
+        if binding.current != tx.from || binding.reserved != Some(tx.to) {
+            return Err(Error::Rotation(
+                "the Safe's rotation state changed since the transaction was prepared".to_string(),
+            ));
+        }
+        self.ring
+            .store
+            .state
+            .mark_exposed(&self.key, Exposure::Signed)?;
         self.ring.store.save()
     }
 

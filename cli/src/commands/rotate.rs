@@ -57,6 +57,10 @@ pub async fn run(args: RotateArgs, json: bool) -> Result<()> {
         raw_out: None,
         no_submit: false,
         no_confirm: args.no_confirm,
+        bundle: args.bundle.clone(),
+        merge_bundle: args.merge_bundle.clone(),
+        approve_hash: args.approve_hash,
+        sign_only: args.sign_only,
         json,
     })
     .await
