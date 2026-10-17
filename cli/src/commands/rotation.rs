@@ -1,23 +1,32 @@
 //! The rotating send shared by `safe send --rotate` and `safe rotate`.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
+use alloy::network::primitives::ReceiptResponse;
 use alloy::primitives::utils::format_ether;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{bail, eyre, Result};
+use safe_rs::encoding::compute_domain_separator;
 use safe_rs::rotation::{
-    ExecOptions, OwnerRef, RotatingSafe, RotationConfig, RotationStatus, StateFile,
+    ExecOptions, Keyring, OwnerRef, RotatingSafe, RotationConfig, RotationStatus,
 };
-use safe_rs::{detect_addresses, Call, ChainAddresses, Error, HdWallet, SpecId};
+use safe_rs::{
+    broadcast_raw, detect_addresses, wait_for_receipt, BroadcastOutcome, Call, ChainAddresses,
+    Error, ReceiptWait, SpecId,
+};
 use url::Url;
 
+use crate::bundle::{BundleFile, BundleRotationSwap};
 use crate::cli::{SimArgs, SweepArgs};
 use crate::commands::{http_provider, outer_fees};
+use crate::keys::CliKeys;
 use crate::output::{
-    confirm_prompt, rotation_summary, Console, Report, RotationOutput, RotationPlanOutput,
-    SignedTxOutput, SimulationOutput,
+    confirm_prompt, rotation_summary, ApproveHashOutput, BundleSavedOutput, Console, Report,
+    RotationOutput, RotationPlanOutput, SignedTxOutput, SimulationOutput,
 };
 
 /// How often to poll for a receipt after broadcasting.
@@ -27,8 +36,8 @@ const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub struct RotationRun<'a> {
     pub rpc_url: &'a Url,
     pub safe: Address,
-    pub wallet: HdWallet,
-    pub store: StateFile,
+    /// The wallet's keys and their locked state
+    pub ring: Keyring<CliKeys>,
     /// Key of a current owner the wallet cannot derive (`safe rotate --from-*`)
     pub legacy_owner: Option<PrivateKeySigner>,
     /// `--sweep-legacy`: the legacy key's whole balance may move without a prompt
@@ -48,6 +57,10 @@ pub struct RotationRun<'a> {
     pub raw_out: Option<String>,
     pub no_submit: bool,
     pub no_confirm: bool,
+    pub bundle: Option<PathBuf>,
+    pub merge_bundle: Vec<PathBuf>,
+    pub approve_hash: bool,
+    pub sign_only: bool,
     pub json: bool,
 }
 
@@ -140,6 +153,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         run.sim.block_time,
         run.timeout,
     );
+    let on_device = run.ring.keys().is_device();
     config.payer = run.payer;
     config.sweep = !run.sweep.no_sweep;
     config.sweep_reserve = run.sweep.sweep_reserve;
@@ -147,7 +161,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
     config.legacy_owner = run.legacy_owner;
 
     let mut rotating =
-        RotatingSafe::open_with(provider.clone(), run.safe, run.wallet, run.store, config).await?;
+        RotatingSafe::with_keyring(provider.clone(), run.safe, run.ring, config).await?;
     print_warnings(&rotating.take_warnings());
     if let (true, OwnerRef::Derived { index, .. }) = (onboarding, rotating.binding()?.current) {
         bail!(
@@ -175,11 +189,44 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         }
     }
 
+    let bundle_existed = run.bundle.as_ref().is_some_and(|p| p.exists());
+    let mut bundle = if let Some(bundle_path) = &run.bundle {
+        if bundle_path.exists() {
+            BundleFile::load(bundle_path)?
+        } else {
+            BundleFile::from_calls(&run.calls)
+        }
+    } else {
+        BundleFile::from_calls(&run.calls)
+    };
+    for merge_path in &run.merge_bundle {
+        let other = BundleFile::load(merge_path)?;
+        bundle.merge_from_file(&other)?;
+    }
+
+    let extra_swaps: Vec<(Address, Address)> = bundle
+        .rotations
+        .iter()
+        .map(|s| (s.old_owner, s.new_owner))
+        .collect();
+
     let fees = outer_fees(&provider, run.max_fee_per_gas, run.max_priority_fee_per_gas).await?;
     let options = ExecOptions {
         fees: Some(fees),
         gas_limit: run.gas_limit,
+        co_signatures: bundle.signatures.clone(),
+        extra_swaps,
+        approve_hash: run.approve_hash,
     };
+    if on_device {
+        // The device shows the Safe signature as two hashes; the domain one is
+        // known now.
+        console.line(format!(
+            "Confirm each signature on the Ledger: the Safe transaction (EIP-712; domain hash \
+             {}), then the transaction that submits it, then the transfer of the old key's ETH.",
+            compute_domain_separator(rotating.chain_id(), run.safe)
+        ));
+    }
     let tx = match rotating.prepare(&run.calls, options).await {
         Ok(tx) => tx,
         Err(Error::SimulationReverted { reason }) => {
@@ -190,6 +237,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
                 revert_reason: Some(reason.clone()),
                 safe_tx_hash: None,
                 traces: None,
+                ..Default::default()
             };
             emit(&report, run.json, console);
             bail!("simulation failed: {reason}");
@@ -205,12 +253,17 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
     let sweep_enabled = !run.sweep.no_sweep;
     console.line(rotation_summary(&tx, &run.calls, sweep_enabled));
     console.line("");
+    let have = tx.signatures_collected;
+    let need = tx.threshold;
     let simulation = SimulationOutput {
         success: true,
         gas_used: tx.simulation.gas_used,
         revert_reason: None,
         safe_tx_hash: Some(tx.plan.prepared.safe_tx_hash),
         traces: run.trace.then(|| tx.simulation.format_traces()).flatten(),
+        signatures_collected: Some(have),
+        threshold: Some(need),
+        ready_to_execute: Some(have >= need),
     };
     if run.simulate_only {
         let report = RotationSimulation {
@@ -222,6 +275,135 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
     }
     console.line(simulation.human());
     console.line("");
+
+    let mut new_sigs = BTreeMap::new();
+    for (&owner_addr, sig) in &tx.signed.signatures {
+        if !(sig.len() == 65 && sig[64] == 1) {
+            new_sigs.insert(owner_addr, sig.clone());
+        }
+    }
+    let swap_entry = BundleRotationSwap {
+        old_owner: tx.from.address(),
+        new_owner: tx.to.address,
+        new_owner_index: Some(tx.to.index),
+    };
+
+    // Branch A: --approve-hash
+    if run.approve_hash {
+        let bundle_path_str = if let Some(bundle_path) = &run.bundle {
+            bundle.merge(
+                &tx.plan.prepared,
+                &new_sigs,
+                std::slice::from_ref(&swap_entry),
+            )?;
+            bundle.save(bundle_path)?;
+            Some(bundle_path.display().to_string())
+        } else {
+            None
+        };
+        let prompt = format!(
+            "Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?"
+        );
+        if prompts && !confirm_prompt(&prompt) {
+            console.line("Aborted");
+            return Ok(());
+        }
+        rotating.arm_signed_only(&tx)?;
+        match broadcast_raw(&provider, &tx.outer.raw, tx.outer.tx_hash).await {
+            BroadcastOutcome::Accepted(_) => {}
+            BroadcastOutcome::AlreadyKnown(_) => console.line("Node already knew the transaction"),
+            BroadcastOutcome::Rejected { reason, class } => {
+                bail!("node rejected {}: {reason} ({class:?})", tx.outer.tx_hash)
+            }
+            BroadcastOutcome::Ambiguous { reason } => bail!(
+                "broadcast of {} is ambiguous and it may still be pending: {reason}",
+                tx.outer.tx_hash
+            ),
+        }
+        console.line(format!("Sent {}, waiting for receipt...", tx.outer.tx_hash));
+        let timeout = Duration::from_secs(run.timeout);
+        let receipt = match wait_for_receipt(
+            &provider,
+            tx.outer.tx_hash,
+            timeout,
+            RECEIPT_POLL_INTERVAL,
+        )
+        .await?
+        {
+            ReceiptWait::Mined(receipt) => receipt,
+            ReceiptWait::TimedOut { tx_hash } => bail!(
+                "no receipt for {tx_hash} after {}s; it may still be pending",
+                run.timeout
+            ),
+        };
+        let success = receipt.status();
+        emit(
+            &ApproveHashOutput {
+                tx_hash: tx.outer.tx_hash,
+                success,
+                gas_used: receipt.gas_used,
+                safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+                safe_nonce: tx.plan.prepared.params.nonce,
+                approver: tx.from.address(),
+                signatures_collected: have,
+                threshold: need,
+                bundle_path: bundle_path_str,
+            },
+            run.json,
+            console,
+        );
+        if !success {
+            bail!("approveHash transaction reverted");
+        }
+        return Ok(());
+    }
+
+    // Branch B: Offchain signature collection (`have < need` or `--sign-only`)
+    if have < need || run.sign_only {
+        let Some(bundle_path) = &run.bundle else {
+            bail!(
+                "Safe threshold is {need} (have {have}/{need} signatures). Pass --bundle <FILE> to save and collect signatures offchain, or --approve-hash to approve on-chain"
+            );
+        };
+        rotating.arm_signed_only(&tx)?;
+        bundle.merge(
+            &tx.plan.prepared,
+            &new_sigs,
+            std::slice::from_ref(&swap_entry),
+        )?;
+        bundle.save(bundle_path)?;
+        let signers: Vec<Address> = tx.signed.signatures.keys().copied().collect();
+        let remaining_owners: Vec<Address> = tx
+            .owners
+            .iter()
+            .copied()
+            .filter(|o| !tx.signed.signatures.contains_key(o))
+            .collect();
+        emit(
+            &BundleSavedOutput {
+                safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+                safe_nonce: tx.plan.prepared.params.nonce,
+                signatures_collected: have,
+                threshold: need,
+                signers,
+                remaining_owners,
+                bundle_path: bundle_path.display().to_string(),
+            },
+            run.json,
+            console,
+        );
+        return Ok(());
+    }
+
+    // Branch C: Threshold met (`have >= need`) -> Execute `execTransaction`
+    if !run.no_submit {
+        if let Some(bundle_path) = &run.bundle {
+            if !bundle_existed || bundle.tx.is_some() {
+                bundle.merge(&tx.plan.prepared, &new_sigs, &[swap_entry])?;
+                bundle.save(bundle_path)?;
+            }
+        }
+    }
 
     if onboarding && sweep_enabled {
         let balance = provider.get_balance(tx.from.address()).await?;

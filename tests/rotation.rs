@@ -25,8 +25,8 @@ use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use common::{one_shot_initcode, LocalHarness};
 use safe_rs::rotation::{
-    binding_key, ExecOptions, Exposure, OwnerRef, RotatingSafe, RotationConfig, RotationStatus,
-    StateFile,
+    binding_key, ExecOptions, Exposure, KeySource, OwnerRef, RotatingSafe, RotationConfig,
+    RotationStatus, StateFile, SEND_LOOKAHEAD, SETUP_LOOKAHEAD,
 };
 use safe_rs::{
     broadcast_raw, sign_outer_tx, wait_for_receipt, BroadcastOutcome, Call, Error, HdWallet,
@@ -51,7 +51,7 @@ fn config(h: &LocalHarness) -> RotationConfig {
         addresses: h.addresses.clone(),
         timeout: Duration::from_secs(10),
         poll_interval: Duration::from_millis(50),
-        scan_limit: 24,
+        scan_limit: Some(24),
         ..RotationConfig::default()
     }
 }
@@ -1000,4 +1000,166 @@ async fn every_retired_key_that_holds_eth_is_swept_on_request() {
         .all(|retired| retired.swept.is_some()));
     // Nothing is left to schedule, and asking again moves nothing.
     assert!(rotating.sweep_retired().await.unwrap().is_empty());
+}
+
+/// A phrase wallet that counts how often each key's address is asked for:
+/// a stand-in for a hardware wallet, where every question is a round trip.
+struct CountingKeys {
+    inner: HdWallet,
+    asked: std::sync::Mutex<std::collections::BTreeMap<u32, u32>>,
+}
+
+impl CountingKeys {
+    fn new() -> Self {
+        Self {
+            inner: wallet(),
+            asked: std::sync::Mutex::default(),
+        }
+    }
+
+    fn asked(&self, index: u32) -> u32 {
+        self.asked.lock().unwrap().get(&index).copied().unwrap_or(0)
+    }
+
+    fn total(&self) -> u32 {
+        self.asked.lock().unwrap().values().sum()
+    }
+}
+
+impl KeySource for CountingKeys {
+    async fn address(&self, index: u32) -> safe_rs::Result<Address> {
+        *self.asked.lock().unwrap().entry(index).or_default() += 1;
+        self.inner.address(index).await
+    }
+
+    async fn sign_safe_tx(
+        &self,
+        index: u32,
+        tx: &safe_rs::PreparedSafeTx,
+    ) -> safe_rs::Result<safe_rs::SignedSafeTx> {
+        self.inner.sign_safe_tx(index, tx).await
+    }
+
+    async fn sign_outer_tx(
+        &self,
+        index: u32,
+        params: OuterTxParams,
+    ) -> safe_rs::Result<safe_rs::SignedOuterTx> {
+        self.inner.sign_outer_tx(index, params).await
+    }
+}
+
+async fn open_counting(
+    h: &LocalHarness,
+    safe: Address,
+    state: &Path,
+) -> RotatingSafe<DynProvider<AnyNetwork>, CountingKeys> {
+    let store = StateFile::open(state, wallet().id()).unwrap();
+    RotatingSafe::open_with(
+        h.provider.clone(),
+        safe,
+        CountingKeys::new(),
+        store,
+        config(h),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn setting_up_a_safe_looks_ahead_once_and_remembers() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = h.deploy_safe_with(&[key(1)], 1, 120).await;
+
+    // No state yet: the Safe is set up from the chain.
+    let rotating = open_counting(&h, safe, &state).await;
+    let next = rotating.state().next_index;
+    let recorded: Vec<u32> = rotating.state().addresses.keys().copied().collect();
+    assert_eq!(recorded, (0..next + SETUP_LOOKAHEAD).collect::<Vec<_>>());
+    for index in 2..next + SETUP_LOOKAHEAD {
+        assert_eq!(rotating.wallet().asked(index), 1, "key {index}");
+    }
+    drop(rotating);
+
+    // A later command finds every address on record: only key 0 is asked, to
+    // check the source is the wallet the state belongs to.
+    let rotating = open_counting(&h, safe, &state).await;
+    assert_eq!(rotating.wallet().total(), 1);
+    assert_eq!(rotating.wallet().asked(0), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_send_keeps_a_few_keys_ahead() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 121, &state).await;
+
+    let mut rotating = open_counting(&h, safe, &state).await;
+    for _ in 0..4 {
+        let outcome = rotating.rotate().await.unwrap();
+        assert_eq!(outcome.status, RotationStatus::Rotated);
+        let next = rotating.state().next_index;
+        for index in next..next + SEND_LOOKAHEAD {
+            assert!(
+                rotating.state().addresses.contains_key(&index),
+                "key {index} should be on record ahead of {next}"
+            );
+        }
+    }
+    assert_eq!(rotating.binding().unwrap().current.index(), Some(5));
+
+    // Keys that have not signed yet were asked for once, when looked ahead.
+    // Keys that signed were asked again right before each signature.
+    let next = rotating.state().next_index;
+    for index in 6..next + SEND_LOOKAHEAD {
+        assert_eq!(rotating.wallet().asked(index), 1, "key {index}");
+    }
+    for index in 1..=4 {
+        assert!(rotating.wallet().asked(index) > 1, "key {index} signed");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_small_search_limit_never_hides_recorded_keys() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 122, &state).await;
+    // A source asked about very few keys, like a slow device.
+    let mut narrow = config(&h);
+    narrow.scan_limit = Some(3);
+
+    let mut rotating = open_with(&h, safe, &state, narrow).await;
+    for _ in 0..5 {
+        rotating.rotate().await.unwrap();
+    }
+    assert_eq!(rotating.binding().unwrap().current.index(), Some(6));
+
+    // Rebuilding the history from the logs keeps every retired key the
+    // wallet's own, although most are past the configured limit.
+    let report = rotating.sync(Some(0), 1_000).await.unwrap();
+    assert_eq!(report.used, vec![1, 2, 3, 4, 5, 6]);
+    let history = &rotating.binding().unwrap().history;
+    assert_eq!(history.len(), 5);
+    for (position, retired) in history.iter().enumerate() {
+        let index = u32::try_from(position).unwrap() + 1;
+        assert_eq!(
+            retired.owner,
+            OwnerRef::Derived {
+                index,
+                address: key(index)
+            }
+        );
+    }
+    drop(rotating);
+
+    // And an owner far past the limit is recognised when the Safe is opened
+    // again, from the record.
+    let mut narrow = config(&h);
+    narrow.scan_limit = Some(1);
+    let rotating = open_with(&h, safe, &state, narrow).await;
+    assert_eq!(rotating.binding().unwrap().current.index(), Some(6));
 }

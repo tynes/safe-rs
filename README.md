@@ -158,6 +158,7 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 | `--payer-private-key <key>` | A different key sends the outer transaction and pays for gas |
 | `--rotate` | Swap the owner for the next unused key of `--hd-wallet` in the same transaction (see [One-time owner keys](#one-time-owner-keys)) |
 | `--hd-wallet <name\|path>` | The HD wallet the owner keys come from (with `--rotate`) |
+| `--ledger` | Take the owner keys from a connected Ledger instead (with `--rotate`; see [On a Ledger](#on-a-ledger)) |
 | `--no-sweep` | With `--rotate`: leave the old owner's ETH where it is |
 | `--sweep-reserve <wei>` | With `--rotate`: wei to leave on the old owner when sweeping |
 
@@ -237,19 +238,23 @@ safe create \
 | `--fallback-handler <address>` | Custom fallback handler |
 | `--singleton <address>` / `--factory <address>` | Non-canonical Safe deployment |
 
-With `--hd-wallet <name>` the Safe is a 1/1 owned by a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--safe-version` applies as usual. `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version and contracts it was first created with.
+With `--hd-wallet <name>` (or `--ledger`) the Safe is a 1/1 owned by a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--safe-version` applies as usual. `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version and contracts it was first created with.
 
 ### `safe rotate`
 
 Swap the Safe's owner for the HD wallet's next unused key, with no other calls. See [One-time owner keys](#one-time-owner-keys).
 
 ```bash
-# Retire the current owner key (for example after a failed transaction)
-safe rotate --safe 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury
+# Retire the current owner of the wallet's sole Safe on this chain
+safe rotate --rpc-url $ETH_RPC_URL --hd-wallet treasury
 
 # Move an existing Safe from an ordinary key onto the wallet
-safe rotate --safe 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury --from-interactive
+safe rotate 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury --from-interactive
 ```
+
+The Safe address is optional: `safe rotate [SAFE]`. Without an address, the command selects the HD wallet's sole recorded Safe on the connected chain. If none are recorded, supply an address or recover the state with `safe wallet sync`; if several are recorded, the command lists them and asks for an explicit address.
+
+With `--from-*` and no address, it instead discovers that legacy signer's default Safe, just like `info` (v1.5.0 first, then v1.4.1). Safes created with other options need an explicit address. `rotate` does not accept `--safe` or read `SAFE_ADDRESS`.
 
 **Options:**
 | Flag | Description |
@@ -273,6 +278,8 @@ safe wallet status  --hd-wallet <name> [--safe 0xYourSafe]
 safe wallet sync    --hd-wallet <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL [--from-block N]
 safe wallet sweep   --hd-wallet <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL
 ```
+
+`address`, `status`, `sync` and `sweep` take `--ledger` in place of `--hd-wallet <name>`; `new` and `import` are for phrases only.
 
 | Command | What it does |
 |---------|--------------|
@@ -314,6 +321,7 @@ This assumes ECDSA is weakened, not broken instantly: while a transaction waits 
 - **The swap is part of the transaction.** `send --rotate` appends `swapOwner` to your calls and sends them through `MultiSendCallOnly` with `safeTxGas = 0`, so the calls and the rotation succeed or fail together. The simulation checks that the Safe's owner list afterwards is exactly the planned one.
 - **Gas money follows the owner.** The owner key pays for its one transaction. Right after the rotation, its remaining ETH is sent to the new owner, so the ETH always sits on a key whose public key is unpublished and the next owner is ready to send. Turn this off with `--no-sweep`, or use `--payer-private-key` so owner keys never hold ETH at all.
 - **Used keys are remembered.** `~/.safe-rs/state/` records, per chain and Safe, the current owner key, the next one, and every retired one. No key index is handed out twice.
+- **Upcoming keys are at hand.** The state also records the addresses of the next keys: 20 ahead when a Safe is set up (created, adopted or synced) and at least 5 ahead after every send. They are a cache: before a key signs, its address is derived (or asked of the device) again and must match, so the wrong phrase or device fails before it signs.
 
 ### Getting started
 
@@ -336,10 +344,28 @@ safe wallet status --hd-wallet treasury
 To move an existing Safe onto a wallet, sign one rotation with its current key:
 
 ```bash
-safe rotate --safe 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury --from-interactive
+safe rotate 0xYourSafe --rpc-url $ETH_RPC_URL --hd-wallet treasury --from-interactive
 ```
 
 The prompt shows how much ETH the old key holds; all of it moves to the new owner unless you pass `--no-sweep`.
+
+### On a Ledger
+
+Pass `--ledger` instead of `--hd-wallet <name>` to keep the keys on a Ledger. It uses the same path, `m/44'/60'/0'/0/i`, so a Ledger seeded with a phrase has the same keys, and the same state, as that phrase.
+
+```bash
+safe wallet address --ledger                  # the funding address (key 0)
+safe create --ledger --rpc-url $ETH_RPC_URL   # records the next 20 keys from the device
+safe send 0xRecipient --value 1000000000000000000 \
+    --safe 0xYourSafe --rpc-url $ETH_RPC_URL --rotate --ledger
+```
+
+- **The device is asked for each address once.** Setting up a Safe reads 20 keys ahead and records them; each send tops the record up so at least 5 unused keys stay ahead, and asks the device again only for the keys that sign. Searching for a Safe's owner (when adopting one, or `wallet sync`) looks at 52 keys rather than 1000; pass `--scan-limit` to `wallet sync` to look further.
+- **Each send asks for three confirmations** when the owner pays for gas: the Safe transaction, the transaction that submits it, and the transfer that moves the old key's ETH. With `--payer-private-key` it is one. The CLI prints the EIP-712 domain hash to compare before the first prompt.
+- **What the device must allow:** the Ethereum app 1.6.0 or later (Safe transactions are signed as EIP-712 typed data and shown as a domain hash and a message hash), and blind signing turned on in its settings, because `execTransaction` calldata cannot be decoded on the device.
+- No password is asked for, and `--ledger` takes precedence over `SAFE_HD_WALLET`.
+
+Ledger support is a default feature of the CLI (`cargo install safe-rs-cli --no-default-features` leaves it out). On Linux it uses the system libusb if pkg-config finds it, and builds libusb from source otherwise.
 
 ### When something goes wrong
 
@@ -370,7 +396,7 @@ Under `~/.safe-rs` (or `$SAFE_RS_HOME`), all readable by you only:
 | File | Contents |
 |------|----------|
 | `wallets/<name>.json` | The phrase, encrypted with your password |
-| `state/<funding address>.json` | Addresses and key indices: which key owns which Safe. No secrets |
+| `state/<funding address>.json` | Addresses and key indices: which key owns which Safe, and the addresses of the next keys. No secrets |
 
 The keystore is Web3 Secret Storage v3, the format geth and Foundry use, with the `x-ethers` field ethers.js defines for a phrase. Foundry and geth open it as an ordinary keystore for the funding key (`cast wallet address --keystore ~/.safe-rs/wallets/<name>.json`); ethers.js and safe-rs also recover the phrase.
 
@@ -513,6 +539,20 @@ println!("new owner: {:?}", safe.binding()?.current);
 
 `execute` is `prepare` (reserve the next key, sign, simulate, check the resulting owner list) followed by `submit` (record the signed transaction, broadcast, read the owner list at the receipt's block, sweep). Call them separately to inspect a transaction before it leaves the process; `rotate()` sends a swap with no other calls, and `sync()` rebuilds the state from the chain. `RotationConfig` sets a separate payer, the sweep, and a legacy owner key for moving an existing Safe onto the wallet.
 
+Owner keys come from a `KeySource`: `HdWallet` (the default type parameter of `RotatingSafe`) or, with the `ledger` feature, `LedgerKeys`. A `KeySource` only derives addresses and signs; a `Keyring` pairs one with its state file, records the addresses it is told about, looks ahead, and checks a key's address again before it signs:
+
+```rust
+use safe_rs::rotation::{KeySource, RotatingSafe, RotationConfig, StateFile};
+use safe_rs::LedgerKeys;
+
+let keys = LedgerKeys::connect().await?;
+let store = StateFile::open(state_path, keys.address(0).await?)?;
+// A Ledger is searched for 52 keys rather than 1000: it answers one at a time.
+let mut safe =
+    RotatingSafe::open_with(provider, safe_address, keys, store, RotationConfig::default()).await?;
+safe.rotate().await?; // confirm on the device
+```
+
 Calls sent with the swap are batched through `RotationConfig::addresses.multi_send_call_only`. `prepare` fails with `Error::MultiSendNotDeployed` before signing if that address has no code; a rotation with no other calls is a direct call to the Safe and needs no batch contract.
 
 Without the feature, `safe_rs::rotation` still has the parts that need no key material: `plan_rotation` builds the Safe transaction for any `(old owner, new owner)` pair, `check_post_state` verifies it against a simulation, and `RotationState` tracks used keys.
@@ -648,7 +688,7 @@ All chains use the same contract addresses (deployed via CREATE2). A Safe's batc
 | `SAFE_ADDRESS` | Safe address for `send` and `call` |
 | `PRIVATE_KEY` | Signer private key |
 | `SAFE_PAYER_PRIVATE_KEY` | Key that pays for gas instead of the owner key |
-| `SAFE_HD_WALLET` | Default `--hd-wallet` |
+| `SAFE_HD_WALLET` | Default `--hd-wallet` (`--ledger` overrides it) |
 | `SAFE_PASSWORD_FILE` | Default `--password-file` |
 | `SAFE_RS_HOME` | Where HD wallets and their state are stored (default `~/.safe-rs`) |
 

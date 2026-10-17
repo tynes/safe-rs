@@ -10,4 +10,4 @@ pub use fork::{
     CallTraceArena, ForkSimulator, LogDebug, SimulationDebugOutput, SimulationResult,
     SimulationResultDebug, StateDiffDebug,
 };
-pub use session::{ForkSession, ParentHeader, SimBlockEnv, SimTx, SpecId, TxChecks};
+pub use session::{ForkSession, ParentHeader, SimBlockEnv, SimTx, SpecId, TxChecks, READ_CALL_GAS};

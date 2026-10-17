@@ -67,6 +67,8 @@ pub mod hd;
 pub mod inspect;
 #[cfg(feature = "hd-wallet")]
 pub mod keystore;
+#[cfg(feature = "ledger")]
+pub mod ledger;
 pub mod outer;
 pub mod rotation;
 pub mod safe;
@@ -87,18 +89,26 @@ pub use create2::{
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
-pub use exec::{simulate_exec, submit_and_wait, ExecSimulation, Submission};
+pub use exec::{
+    simulate_approve_hash, simulate_exec, simulate_exec_with_threshold, submit_and_wait,
+    ExecSimulation, Submission,
+};
 #[cfg(feature = "hd-wallet")]
 pub use hd::HdWallet;
+#[cfg(feature = "ledger")]
+pub use ledger::LedgerKeys;
 pub use safe::{
     detect_addresses, is_gs013_revert, is_safe, ExecutionResult, Safe, SafeBuilder,
     SAFE_SINGLETON_SLOT,
 };
 pub use envelope::{
-    batch_params, decode_exec_calldata, BatchTarget, DecodedExecTransaction, PreparedSafeTx,
-    SafeTxGasPolicy, SignedSafeTx,
+    batch_params, decode_exec_calldata, recover_signer, BatchTarget, DecodedExecTransaction,
+    PreparedSafeTx, SafeTxGasPolicy, SignedSafeTx,
 };
-pub use inspect::{is_safe_with, read_safe_state, ModuleList, ReadSafeStateOptions, SafeState};
+pub use inspect::{
+    is_safe_with, read_approved_owners, read_safe_state, require_batch_target, ModuleList,
+    ReadSafeStateOptions, SafeState,
+};
 pub use outer::{
     decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
 };

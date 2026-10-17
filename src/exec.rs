@@ -10,13 +10,13 @@ use std::time::Duration;
 
 use alloy::eips::eip1559::Eip1559Estimation;
 use alloy::network::{AnyNetwork, AnyTransactionReceipt};
-use alloy::primitives::{Address, B256};
+use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
 
 use crate::envelope::SignedSafeTx;
 use crate::error::Result;
 use crate::outer::{OuterTxParams, SignedOuterTx};
-use crate::simulation::{ForkSession, SimTx, SimulationResult, TxChecks};
+use crate::simulation::{ForkSession, SimTx, SimulationResult, TxChecks, READ_CALL_GAS};
 use crate::submit::{broadcast_raw, wait_for_receipt, BroadcastOutcome, ReceiptWait, RejectClass};
 
 /// The strict simulation of the outer transaction that would be signed.
@@ -74,6 +74,109 @@ pub fn simulate_exec(
     let mut result =
         post.transact_commit(SimTx::from_outer(&outer(gas_limit), TxChecks::STRICT))?;
     result.require_safe_success(signed.prepared.safe, signed.prepared.safe_tx_hash);
+    let post = result.success.then_some(post);
+    Ok(ExecSimulation {
+        result,
+        payer_nonce,
+        gas_limit,
+        post,
+    })
+}
+
+/// Simulates `execTransaction` for `signed` on a Safe with `owners` and `threshold`.
+///
+/// - If `signed.signatures.len() >= threshold`, trims `signed` to exact `threshold` signatures
+///   in ascending owner order and runs [`simulate_exec`] directly.
+/// - If `signed.signatures.len() < threshold`, creates a checkpoint of `session`, commits
+///   `ISafe::approveHash(safe_tx_hash)` via `SimTx::relaxed` for each missing co-owner up to
+///   `threshold`, builds `signed.with_simulated_co_owners(owners, threshold)`, and runs
+///   [`simulate_exec`] against that checkpoint so inner call reverts and Safe checks are
+///   exercised even before all co-owners have signed.
+pub fn simulate_exec_with_threshold(
+    session: &ForkSession,
+    signed: &SignedSafeTx,
+    owners: &[Address],
+    threshold: usize,
+    payer: Address,
+    fees: Eip1559Estimation,
+    gas_limit: Option<u64>,
+) -> Result<ExecSimulation> {
+    if signed.signatures.len() >= threshold {
+        let mut trimmed = signed.clone();
+        trimmed.signatures = signed
+            .signatures
+            .iter()
+            .take(threshold)
+            .map(|(&k, v)| (k, v.clone()))
+            .collect();
+        return simulate_exec(session, &trimmed, payer, fees, gas_limit);
+    }
+
+    let mut pre_approved = session.checkpoint();
+    let approve_calldata = SignedSafeTx::approve_hash_calldata(signed.prepared.safe_tx_hash);
+    let gas = pre_approved.max_tx_gas().min(READ_CALL_GAS);
+    let mut needed = threshold.saturating_sub(signed.signatures.len());
+    for &owner in owners {
+        if needed == 0 {
+            break;
+        }
+        if !signed.signatures.contains_key(&owner) {
+            pre_approved.transact_commit(SimTx::relaxed(
+                owner,
+                signed.prepared.safe,
+                U256::ZERO,
+                approve_calldata.clone(),
+                gas,
+            ))?;
+            needed -= 1;
+        }
+    }
+    let sim_signed = signed.with_simulated_co_owners(owners, threshold);
+    simulate_exec(&pre_approved, &sim_signed, payer, fees, gas_limit)
+}
+
+/// Simulates an on-chain `ISafe::approveHash(safe_tx_hash)` outer transaction sent by `owner`.
+pub fn simulate_approve_hash(
+    session: &ForkSession,
+    chain_id: u64,
+    safe: Address,
+    safe_tx_hash: B256,
+    owner: Address,
+    fees: Eip1559Estimation,
+    gas_limit: Option<u64>,
+) -> Result<ExecSimulation> {
+    let mut scratch = session.checkpoint();
+    let payer_nonce = scratch.nonce(owner)?;
+    let outer = |gas_limit| {
+        OuterTxParams::approve_hash(
+            chain_id,
+            safe,
+            safe_tx_hash,
+            owner,
+            payer_nonce,
+            gas_limit,
+            fees,
+        )
+    };
+
+    let gas_limit = if let Some(gas) = gas_limit {
+        gas
+    } else {
+        let max = session.max_tx_gas();
+        let measured = scratch.transact(SimTx::from_outer(&outer(max), TxChecks::MEASURE))?;
+        if !measured.success {
+            return Ok(ExecSimulation {
+                result: measured,
+                payer_nonce,
+                gas_limit: max,
+                post: None,
+            });
+        }
+        (measured.gas_used + measured.gas_used / 5).min(max)
+    };
+
+    let mut post = session.checkpoint();
+    let result = post.transact_commit(SimTx::from_outer(&outer(gas_limit), TxChecks::STRICT))?;
     let post = result.success.then_some(post);
     Ok(ExecSimulation {
         result,

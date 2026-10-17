@@ -126,6 +126,10 @@ pub enum Error {
     #[error("Signature mismatch: expected signer {expected}, recovered {recovered}")]
     SignatureMismatch { expected: Address, recovered: Address },
 
+    /// Not enough owner signatures have been collected to meet the Safe threshold
+    #[error("Insufficient signatures: Safe threshold requires {required}, have {present}")]
+    InsufficientSignatures { required: usize, present: usize },
+
     /// A safety-critical read could not be completed
     #[error("Incomplete read of {what}: {reason}")]
     IncompleteRead { what: &'static str, reason: String },
@@ -160,6 +164,10 @@ pub enum Error {
     /// A keystore file is malformed or uses unsupported parameters
     #[error("Keystore error: {0}")]
     Keystore(String),
+
+    /// A hardware wallet could not be reached or refused an operation
+    #[error("{0}")]
+    Device(String),
 
     /// A recovery phrase is invalid. The message never contains the phrase.
     #[error("Recovery phrase error: {0}")]

@@ -156,10 +156,21 @@ pub struct SendArgs {
     #[arg(long = "call", value_name = "CALL")]
     pub calls: Vec<String>,
 
-    /// Path to Safe TX Bundler JSON file
+    /// Path to bundle JSON file (reads calls and existing signatures; writes updated bundle when collecting offchain signatures)
     #[arg(long)]
     pub bundle: Option<PathBuf>,
 
+    /// Merge offchain signatures from additional bundle file(s) into this run
+    #[arg(long = "merge-bundle", value_name = "PATH")]
+    pub merge_bundle: Vec<PathBuf>,
+
+    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
+    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
+    pub approve_hash: bool,
+
+    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
+    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
+    pub sign_only: bool,
     /// Use MultiSendCallOnly (safer, no delegatecall)
     #[arg(long)]
     pub call_only: bool,
@@ -345,7 +356,7 @@ pub struct CreateArgs {
     /// Deploy the same Safe an HD wallet created on another chain, given as
     /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
     /// must be rotated right away
-    #[arg(long, value_name = "CHAIN_ID:SAFE", requires = "hd_wallet", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
+    #[arg(long, value_name = "CHAIN_ID:SAFE", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
     pub same_as: Option<String>,
 
     #[command(flatten)]
@@ -366,8 +377,10 @@ pub struct CreateArgs {
 
 #[derive(Parser, Clone)]
 pub struct RotateArgs {
-    #[command(flatten)]
-    pub safe: SafeArgs,
+    /// Safe contract address (default: the wallet's sole recorded Safe on this
+    /// chain, or the legacy signer's default Safe with --from-*)
+    #[arg(value_name = "SAFE")]
+    pub safe: Option<Address>,
 
     #[command(flatten)]
     pub rpc: RpcArgs,
@@ -431,6 +444,22 @@ pub struct RotateArgs {
     /// MultiSendCallOnly address (default: canonical for the Safe's version)
     #[arg(long)]
     pub multi_send_call_only: Option<Address>,
+
+    /// Path to bundle JSON file (reads existing signatures/rotations; writes updated bundle when collecting offchain signatures)
+    #[arg(long)]
+    pub bundle: Option<PathBuf>,
+
+    /// Merge offchain signatures from additional bundle file(s) into this run
+    #[arg(long = "merge-bundle", value_name = "PATH")]
+    pub merge_bundle: Vec<PathBuf>,
+
+    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
+    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
+    pub approve_hash: bool,
+
+    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
+    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
+    pub sign_only: bool,
 
     /// Skip confirmation prompt
     #[arg(long)]
@@ -522,9 +551,10 @@ pub struct WalletSyncArgs {
     #[command(flatten)]
     pub rpc: RpcArgs,
 
-    /// How many wallet indices to derive and compare
-    #[arg(long, default_value_t = 1000)]
-    pub scan_limit: u32,
+    /// How many wallet indices to derive and compare (default: 1000 for an HD
+    /// wallet file, 52 for a Ledger, which answers one address at a time)
+    #[arg(long)]
+    pub scan_limit: Option<u32>,
 
     /// Also read the Safe's owner events from this block on, to restore its
     /// history and find keys that never paid for gas. Use the Safe's
@@ -608,6 +638,18 @@ pub struct HdArgs {
     /// HD wallet: a name under ~/.safe-rs/wallets, or the path of a mnemonic keystore
     #[arg(long, env = "SAFE_HD_WALLET", value_name = "NAME|PATH")]
     pub hd_wallet: Option<String>,
+
+    /// Take the owner keys from a connected Ledger (Ethereum app open) instead
+    /// of an HD wallet file. Overrides SAFE_HD_WALLET
+    #[arg(long)]
+    pub ledger: bool,
+}
+
+impl HdArgs {
+    /// Whether an HD wallet or a Ledger was chosen.
+    pub fn is_set(&self) -> bool {
+        self.ledger || self.hd_wallet.is_some()
+    }
 }
 
 /// What happens to a retired owner key's ETH.
@@ -735,7 +777,6 @@ mod tests {
     fn rotate(extra: &[&str]) -> Result<Cli, clap::Error> {
         let mut args = vec![
             "rotate",
-            "--safe",
             SAFE,
             "--rpc-url",
             "http://localhost:8545",
@@ -744,6 +785,28 @@ mod tests {
         ];
         args.extend_from_slice(extra);
         parse(&args)
+    }
+
+    #[test]
+    fn rotate_takes_the_safe_as_an_optional_positional() {
+        let base = [
+            "rotate",
+            "--rpc-url",
+            "http://localhost:8545",
+            "--hd-wallet",
+            "w",
+        ];
+        let Commands::Rotate(args) = parse(&base).unwrap().command else {
+            unreachable!()
+        };
+        assert_eq!(args.safe, None);
+        let Commands::Rotate(args) = rotate(&[]).unwrap().command else {
+            unreachable!()
+        };
+        assert_eq!(args.safe, Some(SAFE.parse().unwrap()));
+        let mut flagged = base.to_vec();
+        flagged.extend(["--safe", SAFE]);
+        assert!(parse(&flagged).is_err());
     }
 
     #[test]
@@ -788,10 +851,9 @@ mod tests {
         };
         let same_as = format!("10:{SAFE}");
         assert!(with(&["--hd-wallet", "w", "--same-as", &same_as]).is_ok());
-        assert!(
-            with(&["--same-as", &same_as]).is_err(),
-            "--same-as needs --hd-wallet"
-        );
+        assert!(with(&["--ledger", "--same-as", &same_as]).is_ok());
+        // Without a wallet it parses, and `create` refuses it.
+        assert!(with(&["--same-as", &same_as]).is_ok());
         assert!(
             with(&[
                 "--hd-wallet",

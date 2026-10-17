@@ -11,6 +11,7 @@ use crate::cli::SimArgs;
 
 pub mod call;
 pub mod create;
+mod default_safe;
 pub mod info;
 pub mod rotate;
 pub mod rotation;

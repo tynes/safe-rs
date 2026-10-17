@@ -16,28 +16,33 @@
 //! 5. *Broadcast*, wait, and reconcile again from the receipt's block.
 //! 6. *Sweep* the old owner's ETH to the new owner.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::eips::eip1559::{BaseFeeParams, Eip1559Estimation};
 use alloy::eips::BlockId;
 use alloy::network::{AnyNetwork, AnyTransactionReceipt, Network, TransactionBuilder};
-use alloy::primitives::{address, Address, B256, U256};
+use alloy::primitives::{address, Address, Bytes, B256, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 
 use crate::chain::ChainAddresses;
 use crate::contracts::{IGasPriceOracle, ISafe};
-use crate::envelope::SignedSafeTx;
+use crate::envelope::{PreparedSafeTx, SignedSafeTx};
 use crate::error::{Error, Result};
-use crate::exec::{simulate_exec, submit_and_wait, Submission};
+use crate::exec::{
+    simulate_approve_hash, simulate_exec_with_threshold, submit_and_wait, Submission,
+};
 use crate::hd::HdWallet;
-use crate::inspect::{read_safe_state, require_batch_target, ReadSafeStateOptions};
+use crate::inspect::{
+    read_approved_owners, read_safe_state, require_batch_target, ReadSafeStateOptions,
+};
 use crate::outer::{
     decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
 };
 use crate::rotation::history::{owner_history, OwnerEventKind};
+use crate::rotation::keys::{KeySource, Keyring, SEND_LOOKAHEAD, SETUP_LOOKAHEAD};
 use crate::rotation::plan::{check_post_state, plan_rotation, RotationPlan};
 use crate::rotation::state::{
     binding_key, Binding, Exposure, Observation, OwnerRef, PendingTx, Reserved, Retired,
@@ -84,8 +89,9 @@ pub struct RotationConfig {
     pub timeout: Duration,
     /// How often to poll for a receipt
     pub poll_interval: Duration,
-    /// How many wallet indices to search for an owner the state does not know
-    pub scan_limit: u32,
+    /// How many wallet indices to search for an owner the state does not know.
+    /// `None`: the key source's own limit ([`KeySource::scan_limit`])
+    pub scan_limit: Option<u32>,
 }
 
 impl Default for RotationConfig {
@@ -100,7 +106,7 @@ impl Default for RotationConfig {
             block_time: 12,
             timeout: Duration::from_mins(2),
             poll_interval: Duration::from_millis(500),
-            scan_limit: 1_000,
+            scan_limit: None,
         }
     }
 }
@@ -126,12 +132,18 @@ impl std::fmt::Debug for RotationConfig {
 }
 
 /// Per-transaction overrides.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecOptions {
     /// EIP-1559 fees of the outer transaction (default: the node's estimate)
     pub fees: Option<Eip1559Estimation>,
     /// Gas limit of the outer transaction (default: simulated gas plus 20%)
     pub gas_limit: Option<u64>,
+    /// Existing offchain co-owner signatures (from a bundle file)
+    pub co_signatures: BTreeMap<Address, Bytes>,
+    /// Additional co-owner rotation swaps `(old_owner, new_owner)` batched in the same Safe transaction
+    pub extra_swaps: Vec<(Address, Address)>,
+    /// Sign the `approveHash(safeTxHash)` outer transaction instead of `execTransaction`
+    pub approve_hash: bool,
 }
 
 /// The sweep a rotation is expected to be followed by.
@@ -165,6 +177,12 @@ pub struct RotationTx {
     pub simulation: SimulationResult,
     /// The sweep that will follow, if any
     pub planned_sweep: Option<PlannedSweep>,
+    /// Number of signatures collected so far (including on-chain `approvedHashes` and this wallet's signature)
+    pub signatures_collected: usize,
+    /// Safe threshold required to execute `execTransaction`
+    pub threshold: usize,
+    /// Current Safe owners at the block the rotation was planned against
+    pub owners: Vec<Address>,
 }
 
 /// What a mined rotation did to the owner list.
@@ -253,43 +271,62 @@ fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// A key that signs: one of the wallet's, or a local key from the configuration.
+#[derive(Clone)]
+enum Key {
+    Wallet { index: u32, address: Address },
+    Local(PrivateKeySigner),
+}
+
+impl Key {
+    fn address(&self) -> Address {
+        match self {
+            Self::Wallet { address, .. } => *address,
+            Self::Local(key) => key.address(),
+        }
+    }
+}
+
 /// A Safe that rotates its owner with every transaction.
-pub struct RotatingSafe<P> {
+///
+/// Owner keys come from `K`: a phrase ([`HdWallet`], the default) or any other
+/// [`KeySource`], such as a hardware wallet.
+pub struct RotatingSafe<P, K = HdWallet> {
     provider: P,
     chain_id: u64,
     safe: Address,
     key: String,
-    wallet: HdWallet,
-    store: StateFile,
+    ring: Keyring<K>,
     config: RotationConfig,
     warnings: Vec<String>,
 }
 
-impl<P> std::fmt::Debug for RotatingSafe<P> {
+impl<P, K> std::fmt::Debug for RotatingSafe<P, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RotatingSafe")
             .field("chain_id", &self.chain_id)
             .field("safe", &self.safe)
-            .field("wallet", &self.wallet)
+            .field("wallet", &self.ring.store.state.wallet_id)
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
 }
 
-impl<P> RotatingSafe<P>
+impl<P, K> RotatingSafe<P, K>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
+    K: KeySource,
 {
     /// Opens `safe` with the default configuration, locking the state at
     /// `state_path` until the value is dropped.
     pub async fn open(
         provider: P,
         safe: Address,
-        wallet: HdWallet,
+        keys: K,
         state_path: impl Into<PathBuf>,
     ) -> Result<Self> {
-        let store = StateFile::open(state_path, wallet.id())?;
-        Self::open_with(provider, safe, wallet, store, RotationConfig::default()).await
+        let store = StateFile::open(state_path, keys.address(0).await?)?;
+        Self::open_with(provider, safe, keys, store, RotationConfig::default()).await
     }
 
     /// Opens `safe` and reconciles the state with the chain.
@@ -300,29 +337,33 @@ where
     pub async fn open_with(
         provider: P,
         safe: Address,
-        wallet: HdWallet,
+        keys: K,
         store: StateFile,
         config: RotationConfig,
     ) -> Result<Self> {
-        if store.state.wallet_id != wallet.id() {
-            return Err(Error::Rotation(format!(
-                "the state belongs to wallet {}, not {}",
-                store.state.wallet_id,
-                wallet.id()
-            )));
-        }
+        let ring = Keyring::open(keys, store).await?;
+        Self::with_keyring(provider, safe, ring, config).await
+    }
+
+    /// Like [`RotatingSafe::open_with`], for keys already paired with their
+    /// state (for example after creating the Safe with them).
+    pub async fn with_keyring(
+        provider: P,
+        safe: Address,
+        ring: Keyring<K>,
+        config: RotationConfig,
+    ) -> Result<Self> {
         let chain_id = provider.get_chain_id().await.map_err(provider_error)?;
         let mut this = Self {
             provider,
             chain_id,
             safe,
             key: binding_key(chain_id, safe),
-            wallet,
-            store,
+            ring,
             config,
             warnings: Vec::new(),
         };
-        if !this.store.state.safes.contains_key(&this.key) {
+        if !this.ring.store.state.safes.contains_key(&this.key) {
             this.adopt().await?;
         }
         this.reconcile().await?;
@@ -339,9 +380,14 @@ where
         self.chain_id
     }
 
-    /// The wallet the owner keys come from.
-    pub fn wallet(&self) -> &HdWallet {
-        &self.wallet
+    /// The source the owner keys come from.
+    pub fn wallet(&self) -> &K {
+        self.ring.keys()
+    }
+
+    /// The keys and their record.
+    pub fn keyring(&self) -> &Keyring<K> {
+        &self.ring
     }
 
     /// The configuration in use.
@@ -351,12 +397,12 @@ where
 
     /// Everything recorded for the wallet.
     pub fn state(&self) -> &RotationState {
-        &self.store.state
+        self.ring.state()
     }
 
     /// This Safe's rotation state.
     pub fn binding(&self) -> Result<&Binding> {
-        self.store.state.binding(&self.key)
+        self.ring.store.state.binding(&self.key)
     }
 
     /// Problems that did not stop the last operation, such as a sweep that is
@@ -385,7 +431,7 @@ where
     /// Starts tracking a Safe from what the chain shows.
     async fn adopt(&mut self) -> Result<()> {
         let owners = self.owners_at(BlockId::latest()).await?;
-        let found = self.wallet.find_owner(&owners, self.config.scan_limit)?;
+        let found = self.ring.find(&owners, self.scan_limit()).await?;
         let current = if let Some((index, address)) = found {
             OwnerRef::Derived { index, address }
         } else if let Some(legacy) = self
@@ -401,23 +447,27 @@ where
             return Err(Error::Rotation(format!(
                 "none of the wallet's first {} keys owns Safe {}; \
                  supply the current owner's key to move the Safe onto this wallet",
-                self.config.scan_limit, self.safe
+                self.scan_limit(),
+                self.safe
             )));
         };
-        self.store.state.bind(&self.key, current)?;
+        self.ring.store.state.bind(&self.key, current)?;
         if current.index().is_some() {
             // The chain cannot show signatures that reverted or were never
             // mined, nor indices reserved but not yet used.
-            self.store
+            self.ring
+                .store
                 .state
                 .mark_exposed(&self.key, Exposure::Rebuilt)?;
-            self.store.state.skip_ahead(REBUILD_MARGIN);
+            self.ring.store.state.skip_ahead(REBUILD_MARGIN);
         }
-        self.store.save()
+        self.ring.save()?;
+        self.ring.look_ahead(SETUP_LOOKAHEAD).await?;
+        Ok(())
     }
 
-    fn observe(&mut self, owners: &[Address], block: Option<u64>) -> Result<Observation> {
-        let binding = self.store.state.binding(&self.key)?;
+    async fn observe(&mut self, owners: &[Address], block: Option<u64>) -> Result<Observation> {
+        let binding = self.ring.store.state.binding(&self.key)?;
         let known = owners.contains(&binding.current.address())
             || binding
                 .reserved
@@ -425,9 +475,9 @@ where
         let found = if known {
             None
         } else {
-            self.wallet.find_owner(owners, self.config.scan_limit)?
+            self.ring.find(owners, self.scan_limit()).await?
         };
-        self.store.state.observe(
+        self.ring.store.state.observe(
             &self.key,
             owners,
             block,
@@ -436,11 +486,24 @@ where
         )
     }
 
+    /// How many keys to ask the source about when searching for an owner:
+    /// the configured or the source's limit, and never less than the range the
+    /// wallet has handed out (plus the setup look-ahead), so a long-used wallet
+    /// does not outgrow its own search.
+    fn scan_limit(&self) -> u32 {
+        let limit = self
+            .config
+            .scan_limit
+            .unwrap_or_else(|| self.ring.keys().scan_limit());
+        limit.max(self.ring.state().next_index.saturating_add(SETUP_LOOKAHEAD))
+    }
+
     fn lost(&self) -> Error {
         Error::Rotation(format!(
             "neither the recorded owner nor any of the wallet's first {} keys owns Safe {}; \
              rebuild the state from the Safe's history, or supply the current owner's key",
-            self.config.scan_limit, self.safe
+            self.scan_limit(),
+            self.safe
         ))
     }
 
@@ -453,14 +516,14 @@ where
     pub async fn reconcile(&mut self) -> Result<Observation> {
         let head = ParentHeader::fetch(&self.provider, BlockId::latest()).await?;
         let owners = self.owners_at(head.block_id()).await?;
-        let observation = self.observe(&owners, Some(head.number))?;
+        let observation = self.observe(&owners, Some(head.number)).await?;
         if observation == Observation::Lost {
             return Err(self.lost());
         }
         self.resolve_pending().await?;
-        let warnings = self.store.state.cross_check();
+        let warnings = self.ring.store.state.cross_check();
         self.warnings.extend(warnings);
-        self.store.save()?;
+        self.ring.store.save()?;
         Ok(observation)
     }
 
@@ -482,72 +545,50 @@ where
             .await
             .map_err(provider_error)?;
         if mined || nonce > pending.payer_nonce {
-            self.store.state.clear_pending(&self.key)?;
+            self.ring.store.state.clear_pending(&self.key)?;
         }
         Ok(())
     }
 
-    /// The key for an owner: derived from the wallet, or the legacy key.
-    fn signer_for(&self, owner: &OwnerRef) -> Result<Option<PrivateKeySigner>> {
-        match *owner {
-            OwnerRef::Derived { index, address } => {
-                let signer = if index == 0 {
-                    self.wallet.funding().clone()
-                } else {
-                    self.wallet.owner(index)?
-                };
-                if signer.address() != address {
-                    return Err(Error::Rotation(format!(
-                        "the state records {address} for key {index}, but the wallet derives {}",
-                        signer.address()
-                    )));
-                }
-                Ok(Some(signer))
-            }
-            OwnerRef::External { address } => Ok(self
+    /// The key for an owner: one of the wallet's, or the legacy key.
+    fn signer_for(&self, owner: &OwnerRef) -> Result<Option<Key>> {
+        Ok(match *owner {
+            OwnerRef::Derived { index, address } => Some(Key::Wallet { index, address }),
+            OwnerRef::External { address } => self
                 .config
                 .legacy_owner
                 .clone()
-                .filter(|key| key.address() == address)),
+                .filter(|key| key.address() == address)
+                .map(Key::Local),
+        })
+    }
+
+    async fn sign_safe(&self, key: &Key, tx: &PreparedSafeTx) -> Result<SignedSafeTx> {
+        match key {
+            Key::Wallet { index, address } => self.ring.sign_safe_tx(*index, *address, tx).await,
+            Key::Local(key) => tx.sign(key).await,
+        }
+    }
+
+    async fn sign_outer(&self, key: &Key, params: OuterTxParams) -> Result<SignedOuterTx> {
+        match key {
+            Key::Wallet { index, address } => {
+                self.ring.sign_outer_tx(*index, *address, params).await
+            }
+            Key::Local(key) => sign_outer_tx(key, params).await,
         }
     }
 
     /// The next owner: the binding's reservation, or a fresh index.
-    ///
-    /// A fresh index is written to disk before its key is looked at, and is
-    /// skipped if its address has ever sent a transaction or holds code here.
     async fn reserve(&mut self) -> Result<Reserved> {
         if let Some(reserved) = self.binding()?.reserved {
             return Ok(reserved);
         }
-        loop {
-            let wallet = &self.wallet;
-            let candidate = self
-                .store
-                .state
-                .allocate(|index| wallet.owner_address(index))?;
-            self.store.save()?;
-            let nonce = self
-                .provider
-                .get_transaction_count(candidate.address)
-                .await
-                .map_err(provider_error)?;
-            let code = self
-                .provider
-                .get_code_at(candidate.address)
-                .await
-                .map_err(provider_error)?;
-            if nonce != 0 || !code.is_empty() {
-                self.warnings.push(format!(
-                    "skipping key {}: {} was already used on this chain",
-                    candidate.index, candidate.address
-                ));
-                continue;
-            }
-            self.store.state.reserve(&self.key, candidate)?;
-            self.store.save()?;
-            return Ok(candidate);
-        }
+        let (candidate, skipped) = self.ring.take_unused(&self.provider).await?;
+        self.warnings.extend(skipped);
+        self.ring.store.state.reserve(&self.key, candidate)?;
+        self.ring.save()?;
+        Ok(candidate)
     }
 
     fn session(&self, head: &ParentHeader) -> ForkSession {
@@ -599,6 +640,8 @@ where
             )));
         };
         let reserved = self.reserve().await?;
+        // Keep the next few keys at hand; a device is asked before it signs.
+        self.ring.look_ahead(SEND_LOOKAHEAD).await?;
 
         let head = ParentHeader::fetch(&self.provider, BlockId::latest()).await?;
         let state = read_safe_state(
@@ -608,12 +651,19 @@ where
             ReadSafeStateOptions::default(),
         )
         .await?;
+        let mut swaps: Vec<(Address, Address)> = Vec::new();
+        for &(old_owner, new_owner) in &options.extra_swaps {
+            if old_owner != current.address() && !swaps.iter().any(|(o, _)| *o == old_owner) {
+                swaps.push((old_owner, new_owner));
+            }
+        }
+        swaps.push((current.address(), reserved.address));
         let plan = plan_rotation(
             &state,
             self.chain_id,
             self.config.addresses.multi_send_call_only,
             calls,
-            &[(current.address(), reserved.address)],
+            &swaps,
         )?;
         // The plan has no DelegateCall entries, so this operation means the
         // calls are batched through MultiSendCallOnly. With no code there the
@@ -622,13 +672,42 @@ where
             require_batch_target(&self.provider, plan.prepared.params.to, head.block_id()).await?;
         }
 
-        let payer = self.config.payer.clone().unwrap_or_else(|| owner.clone());
+        let payer = self
+            .config
+            .payer
+            .clone()
+            .map_or_else(|| owner.clone(), Key::Local);
         if payer.address() == reserved.address {
             return Err(Error::Rotation(
                 "the payer must not be the next owner: paying would publish its key".to_string(),
             ));
         }
-        let signed = plan.prepared.sign(&owner).await?;
+        let wallet_signed = self.sign_safe(&owner, &plan.prepared).await?;
+        let approved_owners = read_approved_owners(
+            &self.provider,
+            self.safe,
+            &state.owners,
+            plan.prepared.safe_tx_hash,
+            head.block_id(),
+        )
+        .await?;
+        let mut signed = SignedSafeTx::empty(plan.prepared.clone());
+        for (&co_owner, sig) in &options.co_signatures {
+            if state.owners.contains(&co_owner) {
+                signed.insert_signature(co_owner, sig.clone())?;
+            }
+        }
+        for &co_owner in &approved_owners {
+            signed
+                .signatures
+                .entry(co_owner)
+                .or_insert_with(|| crate::signing::encode_pre_validated_signature(co_owner));
+        }
+        for (&w_owner, sig) in &wallet_signed.signatures {
+            signed.insert_signature(w_owner, sig.clone())?;
+        }
+        let threshold = state.threshold.saturating_to::<usize>().max(1);
+        let signatures_collected = signed.signatures.len();
         let fees = match options.fees {
             Some(fees) => fees,
             None => self
@@ -644,14 +723,22 @@ where
             ""
         };
         let session = self.session(&head);
-        let simulated = simulate_exec(&session, &signed, payer.address(), fees, options.gas_limit)
-            .map_err(|e| match e {
-                Error::Revm(reason) if reason.contains("LackOfFund") => Error::Rotation(format!(
-                    "{} cannot pay for this transaction: fund it, or use a separate payer{owed}",
-                    payer.address()
-                )),
-                other => other,
-            })?;
+        let simulated = simulate_exec_with_threshold(
+            &session,
+            &signed,
+            &state.owners,
+            threshold,
+            payer.address(),
+            fees,
+            options.gas_limit,
+        )
+        .map_err(|e| match e {
+            Error::Revm(reason) if reason.contains("LackOfFund") => Error::Rotation(format!(
+                "{} cannot pay for this transaction: fund it, or use a separate payer{owed}",
+                payer.address()
+            )),
+            other => other,
+        })?;
         let Some(mut post) = simulated.post else {
             return Err(Error::SimulationReverted {
                 reason: simulated
@@ -675,27 +762,66 @@ where
             None
         };
 
-        let outer = sign_outer_tx(
-            &payer,
+        let outer_params = if options.approve_hash {
+            let approve_sim = simulate_approve_hash(
+                &session,
+                self.chain_id,
+                self.safe,
+                plan.prepared.safe_tx_hash,
+                owner.address(),
+                fees,
+                options.gas_limit,
+            )?;
+            if !approve_sim.result.success {
+                return Err(Error::SimulationReverted {
+                    reason: approve_sim
+                        .result
+                        .revert_reason
+                        .unwrap_or_else(|| "approveHash reverted".to_string()),
+                });
+            }
+            OuterTxParams::approve_hash(
+                self.chain_id,
+                self.safe,
+                plan.prepared.safe_tx_hash,
+                owner.address(),
+                approve_sim.payer_nonce,
+                approve_sim.gas_limit,
+                fees,
+            )
+        } else {
+            let mut exec_signed = signed.clone();
+            if exec_signed.signatures.len() > threshold {
+                exec_signed.signatures = signed
+                    .signatures
+                    .iter()
+                    .take(threshold)
+                    .map(|(&k, v)| (k, v.clone()))
+                    .collect();
+            }
             OuterTxParams::exec_transaction(
-                &signed,
+                &exec_signed,
                 payer.address(),
                 simulated.payer_nonce,
                 simulated.gas_limit,
                 fees,
-            ),
-        )
-        .await?;
+            )
+        };
+        let outer_signer = if options.approve_hash { &owner } else { &payer };
+        let outer = self.sign_outer(outer_signer, outer_params).await?;
 
         Ok(RotationTx {
             plan,
             from: current,
             to: reserved,
-            payer: payer.address(),
+            payer: outer_signer.address(),
             signed,
             outer,
             simulation: simulated.result,
             planned_sweep,
+            signatures_collected,
+            threshold,
+            owners: state.owners,
         })
     }
 
@@ -718,7 +844,7 @@ where
                 "the Safe's rotation state changed since the transaction was prepared".to_string(),
             ));
         }
-        self.store.state.arm(
+        self.ring.store.state.arm(
             &self.key,
             PendingTx {
                 safe_tx_hash: tx.plan.prepared.safe_tx_hash,
@@ -730,7 +856,24 @@ where
                 created_at: now(),
             },
         )?;
-        self.store.save()
+        self.ring.store.save()
+    }
+
+    /// Marks the current owner key as exposed (`Exposure::Signed`) and saves the state
+    /// without setting a pending outer `execTransaction` (used when the signature leaves
+    /// the process in an offchain `--bundle` or an on-chain `--approve-hash`).
+    pub fn arm_signed_only(&mut self, tx: &RotationTx) -> Result<()> {
+        let binding = self.binding()?;
+        if binding.current != tx.from || binding.reserved != Some(tx.to) {
+            return Err(Error::Rotation(
+                "the Safe's rotation state changed since the transaction was prepared".to_string(),
+            ));
+        }
+        self.ring
+            .store
+            .state
+            .mark_exposed(&self.key, Exposure::Signed)?;
+        self.ring.store.save()
     }
 
     /// Arms, broadcasts and waits for `tx`, then updates the state from the
@@ -787,12 +930,12 @@ where
         // the same signed Safe transaction may have been mined by someone else.
         let block = receipt.block_hash.map_or(BlockId::latest(), BlockId::hash);
         let owners = self.owners_at(block).await?;
-        let observation = self.observe(&owners, receipt.block_number)?;
+        let observation = self.observe(&owners, receipt.block_number).await?;
         // Mined bytes cannot be mined again.
-        self.store.state.clear_pending(&self.key)?;
-        let warnings = self.store.state.cross_check();
+        self.ring.store.state.clear_pending(&self.key)?;
+        let warnings = self.ring.store.state.cross_check();
         self.warnings.extend(warnings);
-        self.store.save()?;
+        self.ring.store.save()?;
 
         let status = match observation {
             Observation::Rotated { .. } if safe_outcome.is_success() => RotationStatus::Rotated,
@@ -864,19 +1007,22 @@ where
 
     /// What an OP-stack chain charges for `draft` outside gas, with a margin
     /// for the L1 fee moving before inclusion. Zero on any other chain.
-    async fn fee_reserve(&self, draft: &SignedOuterTx) -> U256 {
+    ///
+    /// The oracle prices the unsigned transaction, so nothing is signed here:
+    /// on a hardware wallet that would be an extra confirmation.
+    async fn fee_reserve(&self, draft: &OuterTxParams) -> U256 {
         match self.provider.get_code_at(GAS_PRICE_ORACLE).await {
             Ok(code) if !code.is_empty() => {}
             _ => return U256::ZERO,
         }
         let oracle = IGasPriceOracle::new(GAS_PRICE_ORACLE, &self.provider);
         let l1_fee = oracle
-            .getL1Fee(draft.raw.clone())
+            .getL1Fee(draft.unsigned_encoding())
             .call()
             .await
             .unwrap_or_default();
         let operator_fee = oracle
-            .getOperatorFee(U256::from(draft.params.gas_limit))
+            .getOperatorFee(U256::from(draft.gas_limit))
             .call()
             .await
             .unwrap_or_default();
@@ -976,21 +1122,18 @@ where
         let reserve = match self.config.sweep_reserve {
             Some(reserve) => reserve,
             None => match sweep_value(balance, gas, exact.max_fee_per_gas, U256::ZERO) {
-                Some(amount) => {
-                    let draft = sign_outer_tx(&signer, transfer(amount)).await?;
-                    self.fee_reserve(&draft).await
-                }
+                Some(amount) => self.fee_reserve(&transfer(amount)).await,
                 None => U256::ZERO,
             },
         };
         let Some(amount) = sweep_value(balance, gas, exact.max_fee_per_gas, reserve) else {
-            self.store.state.finish_sweep(&self.key, from, None)?;
-            self.store.save()?;
+            self.ring.store.state.finish_sweep(&self.key, from, None)?;
+            self.ring.store.save()?;
             return Ok(None);
         };
 
-        let outer = sign_outer_tx(&signer, transfer(amount)).await?;
-        self.store.state.set_signed_sweep(
+        let outer = self.sign_outer(&signer, transfer(amount)).await?;
+        self.ring.store.state.set_signed_sweep(
             &self.key,
             from,
             Some(SignedSweep {
@@ -1000,7 +1143,7 @@ where
                 raw: outer.raw.clone(),
             }),
         )?;
-        self.store.save()?;
+        self.ring.store.save()?;
         self.broadcast_sweep(outer, amount, to).await
     }
 
@@ -1021,14 +1164,12 @@ where
     /// payer on a Safe that is not scanned here: run this for every Safe and
     /// chain the phrase was used with.
     pub async fn sync(&mut self, from_block: Option<u64>, chunk: u64) -> Result<SyncReport> {
-        let limit = self.config.scan_limit;
-        let mut index_of = HashMap::new();
-        let mut address_of = BTreeMap::new();
-        for index in 1..=limit {
-            let address = self.wallet.owner_address(index)?;
-            index_of.insert(address, index);
-            address_of.insert(index, address);
-        }
+        let limit = self.scan_limit();
+        let index_of = self.ring.scan(limit).await?;
+        let address_of: BTreeMap<u32, Address> = index_of
+            .iter()
+            .map(|(address, index)| (*index, *address))
+            .collect();
         let owner_ref = |address: Address| match index_of.get(&address) {
             Some(index) => OwnerRef::Derived {
                 index: *index,
@@ -1079,7 +1220,7 @@ where
                 }
             }
             if !retired.is_empty() {
-                self.store.state.set_history(&self.key, retired)?;
+                self.ring.store.state.set_history(&self.key, retired)?;
             }
         }
 
@@ -1089,7 +1230,7 @@ where
             .next_back()
             .copied()
             .unwrap_or(0)
-            .max(self.store.state.next_index.saturating_sub(1));
+            .max(self.ring.store.state.next_index.saturating_sub(1));
         let mut index = 1;
         while index <= limit && index <= last.saturating_add(REBUILD_MARGIN) {
             if let Some(address) = address_of.get(&index) {
@@ -1107,16 +1248,18 @@ where
         }
 
         if let Some(highest) = used.iter().next_back() {
-            self.store
+            self.ring
+                .store
                 .state
                 .note_used(highest.saturating_add(REBUILD_MARGIN));
         }
-        self.store.save()?;
+        self.ring.save()?;
+        self.ring.look_ahead(SETUP_LOOKAHEAD).await?;
         Ok(SyncReport {
             current: self.binding()?.current,
             used: used.into_iter().collect(),
             events,
-            next_index: self.store.state.next_index,
+            next_index: self.ring.store.state.next_index,
         })
     }
 
@@ -1145,12 +1288,12 @@ where
                 .await
                 .map_err(provider_error)?;
             if !balance.is_zero() {
-                self.store.state.schedule_sweep(&self.key, owner)?;
+                self.ring.store.state.schedule_sweep(&self.key, owner)?;
                 added += 1;
             }
         }
         if added > 0 {
-            self.store.save()?;
+            self.ring.store.save()?;
         }
         Ok(added)
     }
@@ -1194,8 +1337,11 @@ where
                 // sign a different transfer. An underpriced replacement means
                 // an earlier one is still pending: keep the record.
                 if class != RejectClass::Underpriced {
-                    self.store.state.set_signed_sweep(&self.key, from, None)?;
-                    self.store.save()?;
+                    self.ring
+                        .store
+                        .state
+                        .set_signed_sweep(&self.key, from, None)?;
+                    self.ring.store.save()?;
                 }
                 Err(unconfirmed(format!("the node rejected it: {reason}")))
             }
@@ -1215,16 +1361,20 @@ where
     ) -> Result<Option<SweepOutcome>> {
         if !success {
             // The nonce is used up; the next attempt has to sign afresh.
-            self.store.state.set_signed_sweep(&self.key, from, None)?;
-            self.store.save()?;
+            self.ring
+                .store
+                .state
+                .set_signed_sweep(&self.key, from, None)?;
+            self.ring.store.save()?;
             return Err(Error::ExecutionFailed {
                 reason: format!("sweep transaction {tx_hash} reverted"),
             });
         }
-        self.store
+        self.ring
+            .store
             .state
             .finish_sweep(&self.key, from, Some(Swept { tx_hash, amount }))?;
-        self.store.save()?;
+        self.ring.store.save()?;
         Ok(Some(SweepOutcome {
             tx_hash,
             amount,
