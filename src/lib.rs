@@ -12,6 +12,16 @@
 //!   fresh key ([`rotation`]; the `hd-wallet` feature adds the encrypted
 //!   phrase and `rotation::RotatingSafe`)
 //!
+//! ## Cargo features
+//!
+//! - `simulation` (default): fork simulation with foundry-fork-db and revm,
+//!   meaning `simulate()` on the builders, `ForkSession` and the
+//!   `simulate_exec*` functions. With `default-features = false` the builders
+//!   still execute, with gas estimated over RPC, and revm is not compiled.
+//! - `hd-wallet`: encrypted mnemonic keystores, HD keys and
+//!   `rotation::RotatingSafe` (implies `simulation`).
+//! - `ledger`: owner keys on a Ledger device (implies `hd-wallet`).
+//!
 //! ## Quick Start
 //!
 //! ```rust,ignore
@@ -73,6 +83,7 @@ pub mod outer;
 pub mod rotation;
 pub mod safe;
 pub mod signing;
+#[cfg(feature = "simulation")]
 pub mod simulation;
 pub mod submit;
 pub mod types;
@@ -89,10 +100,9 @@ pub use create2::{
 pub use encoding::SafeTxParams;
 pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
 pub use error::{Error, Result};
-pub use exec::{
-    simulate_approve_hash, simulate_exec, simulate_exec_with_threshold, submit_and_wait,
-    ExecSimulation, Submission,
-};
+#[cfg(feature = "simulation")]
+pub use exec::{simulate_approve_hash, simulate_exec, simulate_exec_with_threshold, ExecSimulation};
+pub use exec::{submit_and_wait, Submission};
 #[cfg(feature = "hd-wallet")]
 pub use hd::HdWallet;
 #[cfg(feature = "ledger")]
@@ -113,6 +123,7 @@ pub use outer::{
     decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
 };
 pub use rotation::{OwnerSwap, RotationPlan};
+#[cfg(feature = "simulation")]
 pub use simulation::{
     AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator, ParentHeader, SimBlockEnv,
     SimTx, SimulationResult, SpecId, TxChecks,
@@ -121,7 +132,9 @@ pub use submit::{
     broadcast_raw, decode_safe_outcome, receipt_logs, safe_outcome_for_receipt, wait_for_receipt,
     BroadcastOutcome, ReceiptWait, RejectClass, SafeExecutionOutcome,
 };
-pub use types::{BatchResult, BatchSimulationResult, Call, CallBuilder, Operation, SafeCall, TypedCall};
+#[cfg(feature = "simulation")]
+pub use types::BatchSimulationResult;
+pub use types::{BatchResult, Call, CallBuilder, Operation, SafeCall, TypedCall};
 pub use wallet::{SafeDeployment, Wallet, WalletBuilder, WalletConfig};
 
 /// Type alias for a Safe wallet

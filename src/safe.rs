@@ -15,6 +15,7 @@ use crate::contracts::ISafe;
 use crate::envelope::{batch_params, BatchTarget, PreparedSafeTx, SafeTxGasPolicy};
 use crate::error::{Error, Result};
 use crate::inspect::{is_safe_with, require_batch_target};
+#[cfg(feature = "simulation")]
 use crate::simulation::{ForkSimulator, SimulationResult};
 use crate::submit::{decode_safe_outcome, receipt_logs};
 use crate::types::{Call, CallBuilder, Operation};
@@ -103,7 +104,8 @@ where
     /// Configures a directory for writing debug output on simulation failures.
     ///
     /// When a simulation fails and this is set, a JSON file will be written
-    /// to the configured directory with the simulation details.
+    /// to the configured directory with the simulation details. Without the
+    /// `simulation` feature nothing is simulated, so nothing is written.
     pub fn with_debug_output_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.debug_output_dir = Some(path.into());
         self
@@ -233,7 +235,9 @@ pub struct SafeBuilder<'a, P> {
     /// Block the batch target must have code at
     batch_target_block: BlockId,
     /// The Safe transaction `simulate()` ran, which `execute()` must match
+    #[cfg(feature = "simulation")]
     simulated: Option<PreparedSafeTx>,
+    #[cfg(feature = "simulation")]
     simulation_result: Option<SimulationResult>,
 }
 
@@ -249,7 +253,9 @@ where
             gas: SafeTxGasPolicy::Zero,
             nonce: None,
             batch_target_block: BlockId::latest(),
+            #[cfg(feature = "simulation")]
             simulated: None,
+            #[cfg(feature = "simulation")]
             simulation_result: None,
         }
     }
@@ -361,6 +367,7 @@ where
     }
 
     /// A simulator for this Safe's chain, without debug output.
+    #[cfg(feature = "simulation")]
     fn simulator(&self) -> ForkSimulator<P> {
         ForkSimulator::new(self.safe.provider.clone(), self.safe.config.chain_id)
     }
@@ -376,6 +383,7 @@ where
     /// the result (success or failure) is stored internally. Use `simulation_success()`
     /// to check if the simulation succeeded before calling `execute()`, which
     /// executes exactly the simulated Safe transaction.
+    #[cfg(feature = "simulation")]
     pub async fn simulate(mut self) -> Result<Self> {
         let prepared = self.prepare().await?;
         let signed = prepared.sign(&self.safe.signer).await?;
@@ -473,6 +481,7 @@ where
     ///     .simulation_success()?
     ///     .execute().await?
     /// ```
+    #[cfg(feature = "simulation")]
     pub fn simulation_success(self) -> Result<Self> {
         match &self.simulation_result {
             None => Err(Error::SimulationNotPerformed),
@@ -487,6 +496,7 @@ where
     }
 
     /// Returns the simulation result if simulation was performed
+    #[cfg(feature = "simulation")]
     pub fn simulation_result(&self) -> Option<&SimulationResult> {
         self.simulation_result.as_ref()
     }
@@ -515,15 +525,20 @@ where
     /// carrying an `ExecutionFailure` event. This usually surfaces before
     /// broadcast, as [`Error::InnerTransactionReverted`], when gas is estimated,
     /// and then no account nonce is used. The on-chain revert does not carry the
-    /// inner reason, so use `simulate()` to find out why a transaction fails.
+    /// inner reason, so use `simulate()` (the `simulation` feature) to find out
+    /// why a transaction fails.
     ///
     /// `success` in the result requires both a successful receipt and the Safe's
     /// `ExecutionSuccess` event for this Safe transaction.
     pub async fn execute(self) -> Result<ExecutionResult> {
+        #[cfg(feature = "simulation")]
         let expected_nonce = self
             .nonce
             .or_else(|| self.simulated.as_ref().map(|p| p.params.nonce));
+        #[cfg(not(feature = "simulation"))]
+        let expected_nonce = self.nonce;
         let prepared = self.prepare_at(expected_nonce).await?;
+        #[cfg(feature = "simulation")]
         if let Some(simulated) = &self.simulated {
             if simulated != &prepared {
                 return Err(Error::InvalidConfig(
@@ -596,14 +611,17 @@ where
         SafeBuilder::with_gas_limit(self, gas_limit)
     }
 
+    #[cfg(feature = "simulation")]
     async fn simulate(self) -> Result<Self> {
         SafeBuilder::simulate(self).await
     }
 
+    #[cfg(feature = "simulation")]
     fn simulation_result(&self) -> Option<&SimulationResult> {
         self.simulation_result.as_ref()
     }
 
+    #[cfg(feature = "simulation")]
     fn simulation_success(self) -> Result<Self> {
         SafeBuilder::simulation_success(self)
     }
@@ -660,13 +678,12 @@ where
         data: Bytes,
         operation: Operation,
     ) -> Result<ExecutionResult> {
-        self.batch()
-            .add(Call::new(to, value, data).with_operation(operation))
-            .simulate()
-            .await?
-            .simulation_success()?
-            .execute()
-            .await
+        let builder = self
+            .batch()
+            .add(Call::new(to, value, data).with_operation(operation));
+        #[cfg(feature = "simulation")]
+        let builder = builder.simulate().await?.simulation_success()?;
+        builder.execute().await
     }
 }
 

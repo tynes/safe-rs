@@ -5,21 +5,31 @@
 //! may or may not be the same key: the *owner* authorizes the Safe transaction
 //! and the *payer* sends `execTransaction` and pays for gas. Everything here
 //! takes the payer explicitly.
+//!
+//! The `simulate_*` functions need the `simulation` feature (on by default).
 
 use std::time::Duration;
 
+#[cfg(feature = "simulation")]
 use alloy::eips::eip1559::Eip1559Estimation;
 use alloy::network::{AnyNetwork, AnyTransactionReceipt};
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::B256;
+#[cfg(feature = "simulation")]
+use alloy::primitives::{Address, U256};
 use alloy::providers::Provider;
 
+#[cfg(feature = "simulation")]
 use crate::envelope::SignedSafeTx;
 use crate::error::Result;
-use crate::outer::{OuterTxParams, SignedOuterTx};
+#[cfg(feature = "simulation")]
+use crate::outer::OuterTxParams;
+use crate::outer::SignedOuterTx;
+#[cfg(feature = "simulation")]
 use crate::simulation::{ForkSession, SimTx, SimulationResult, TxChecks, READ_CALL_GAS};
 use crate::submit::{broadcast_raw, wait_for_receipt, BroadcastOutcome, ReceiptWait, RejectClass};
 
 /// The strict simulation of the outer transaction that would be signed.
+#[cfg(feature = "simulation")]
 #[derive(Debug, Clone)]
 pub struct ExecSimulation {
     /// Result of the strict run (or of the gas measurement, if that failed)
@@ -42,6 +52,7 @@ pub struct ExecSimulation {
 /// `session` itself is left untouched: the runs happen on checkpoints, and the
 /// one the transaction was committed to is returned in
 /// [`ExecSimulation::post`] so the caller can inspect the resulting state.
+#[cfg(feature = "simulation")]
 pub fn simulate_exec(
     session: &ForkSession,
     signed: &SignedSafeTx,
@@ -92,6 +103,7 @@ pub fn simulate_exec(
 ///   `threshold`, builds `signed.with_simulated_co_owners(owners, threshold)`, and runs
 ///   [`simulate_exec`] against that checkpoint so inner call reverts and Safe checks are
 ///   exercised even before all co-owners have signed.
+#[cfg(feature = "simulation")]
 pub fn simulate_exec_with_threshold(
     session: &ForkSession,
     signed: &SignedSafeTx,
@@ -136,6 +148,7 @@ pub fn simulate_exec_with_threshold(
 }
 
 /// Simulates an on-chain `ISafe::approveHash(safe_tx_hash)` outer transaction sent by `owner`.
+#[cfg(feature = "simulation")]
 pub fn simulate_approve_hash(
     session: &ForkSession,
     chain_id: u64,

@@ -17,6 +17,7 @@ use crate::account::Account;
 use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
 use crate::safe::ExecutionResult;
+#[cfg(feature = "simulation")]
 use crate::simulation::{ForkSimulator, SimulationResult};
 use crate::types::{Call, CallBuilder, Operation};
 
@@ -88,7 +89,8 @@ where
     /// Configures a directory for writing debug output on simulation failures.
     ///
     /// When a simulation fails and this is set, a JSON file will be written
-    /// to the configured directory with the simulation details.
+    /// to the configured directory with the simulation details. Without the
+    /// `simulation` feature nothing is simulated, so nothing is written.
     pub fn with_debug_output_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.debug_output_dir = Some(path.into());
         self
@@ -111,7 +113,9 @@ pub struct EoaBuilder<'a, P> {
     eoa: &'a Eoa<P>,
     calls: Vec<Call>,
     stop_on_failure: bool,
+    #[cfg(feature = "simulation")]
     simulation_results: Option<Vec<SimulationResult>>,
+    #[cfg(feature = "simulation")]
     aggregated_result: Option<SimulationResult>,
 }
 
@@ -124,7 +128,9 @@ where
             eoa,
             calls: Vec::new(),
             stop_on_failure: true,
+            #[cfg(feature = "simulation")]
             simulation_results: None,
+            #[cfg(feature = "simulation")]
             aggregated_result: None,
         }
     }
@@ -174,6 +180,7 @@ where
     ///
     /// After simulation, you can inspect the results via `simulation_results()`
     /// and then call `execute()` which will use the simulation gas values.
+    #[cfg(feature = "simulation")]
     pub async fn simulate(mut self) -> Result<Self> {
         if self.calls.is_empty() {
             return Err(Error::NoCalls);
@@ -210,6 +217,7 @@ where
     ///     .simulation_success()?
     ///     .execute().await?
     /// ```
+    #[cfg(feature = "simulation")]
     pub fn simulation_success(self) -> Result<Self> {
         match &self.simulation_results {
             None => Err(Error::SimulationNotPerformed),
@@ -232,6 +240,7 @@ where
     }
 
     /// Returns the simulation results if simulation was performed
+    #[cfg(feature = "simulation")]
     pub fn simulation_results(&self) -> Option<&[SimulationResult]> {
         self.simulation_results.as_deref()
     }
@@ -244,6 +253,7 @@ where
     /// - `return_data`: from the last call
     /// - `logs`: concatenated from all calls
     /// - `revert_reason`: first revert reason encountered
+    #[cfg(feature = "simulation")]
     pub fn simulation_result(&self) -> Option<&SimulationResult> {
         self.aggregated_result.as_ref()
     }
@@ -251,10 +261,23 @@ where
     /// Returns the total gas used across all simulated calls
     ///
     /// Returns `None` if simulation was not performed.
+    #[cfg(feature = "simulation")]
     pub fn total_gas_used(&self) -> Option<u64> {
         self.simulation_results
             .as_ref()
             .map(|results| results.iter().map(|r| r.gas_used).sum())
+    }
+
+    /// The gas call `i` used in `simulate()`, if it was simulated
+    #[cfg(feature = "simulation")]
+    fn simulated_gas(&self, i: usize) -> Option<u64> {
+        self.simulation_results.as_ref()?.get(i).map(|r| r.gas_used)
+    }
+
+    /// Without the `simulation` feature no call is ever simulated
+    #[cfg(not(feature = "simulation"))]
+    fn simulated_gas(&self, _i: usize) -> Option<u64> {
+        None
     }
 
     /// Executes all transactions
@@ -286,9 +309,8 @@ where
             // Determine gas: use fixed gas limit if set, then simulation result, otherwise estimate
             let gas_with_buffer = if let Some(fixed_gas) = call.gas_limit {
                 fixed_gas
-            } else if let Some(ref sim_results) = self.simulation_results {
-                let sim_result = &sim_results[i];
-                sim_result.gas_used + sim_result.gas_used / 10
+            } else if let Some(gas_used) = self.simulated_gas(i) {
+                gas_used + gas_used / 10
             } else {
                 // Build transaction for gas estimation
                 let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
@@ -378,6 +400,7 @@ where
     }
 
     /// Aggregates multiple simulation results into a single unified result
+    #[cfg(feature = "simulation")]
     fn aggregate_results(results: &[SimulationResult]) -> SimulationResult {
         use alloy::rpc::types::trace::geth::pre_state::DiffMode;
         use std::collections::BTreeMap;
@@ -440,14 +463,17 @@ where
         EoaBuilder::with_gas_limit(self, gas_limit)
     }
 
+    #[cfg(feature = "simulation")]
     async fn simulate(self) -> Result<Self> {
         EoaBuilder::simulate(self).await
     }
 
+    #[cfg(feature = "simulation")]
     fn simulation_result(&self) -> Option<&SimulationResult> {
         self.aggregated_result.as_ref()
     }
 
+    #[cfg(feature = "simulation")]
     fn simulation_success(self) -> Result<Self> {
         EoaBuilder::simulation_success(self)
     }
@@ -509,14 +535,10 @@ where
             });
         }
 
-        let result = self
-            .batch()
-            .add_raw(to, value, data)
-            .simulate()
-            .await?
-            .simulation_success()?
-            .execute()
-            .await?;
+        let builder = self.batch().add_raw(to, value, data);
+        #[cfg(feature = "simulation")]
+        let builder = builder.simulate().await?.simulation_success()?;
+        let result = builder.execute().await?;
 
         let tx_result = result.results.into_iter().next().ok_or(Error::NoCalls)?;
 
