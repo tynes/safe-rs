@@ -11,6 +11,9 @@ license = "MIT"
 repository = "https://github.com/tynes/safe-rs"
 keywords = ["ethereum", "safe", "multisig", "smart-account"]
 categories = ["cryptography", "web-programming"]
+# An allowlist: cargo packages every untracked file that is not ignored, such
+# as local env files at the root.
+include = ["/src", "/tests", "/examples", "/README.md"]
 
 [dependencies]
 # Default features (HTTP provider over rustls, contract, local signer) plus
