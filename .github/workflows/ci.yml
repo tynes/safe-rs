@@ -1,0 +1,105 @@
+# Lints and tests every pull request and every push to master, with the
+# checks the release workflow runs before it publishes.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Clippy 1.99 adds the chunks_exact_to_as_chunks, unused_async_trait_impl
+      # and assert_is_empty lints, which the tree fails at 24 sites. Move back
+      # to stable once those are fixed.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.97.1
+          components: clippy
+
+      # Only master saves the cache, so pull requests do not evict it.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # The CLI's default `ledger` feature builds against libusb.
+      - name: Install libusb and libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  check-features:
+    name: Lint each feature set
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 1.97.1 for the same reason as the lint job.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.97.1
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install libusb and libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
+      # `just check-features`: per package and without dev-dependencies, so
+      # another crate's features cannot hide a missing one.
+      - name: Clippy each library feature set and the CLI
+        run: |
+          cargo clippy -p safe-rs --lib --locked --no-default-features -- -D warnings
+          cargo clippy -p safe-rs --lib --locked -- -D warnings
+          cargo clippy -p safe-rs --lib --locked --no-default-features --features hd-wallet -- -D warnings
+          cargo clippy -p safe-rs --lib --locked --no-default-features --features ledger -- -D warnings
+          cargo clippy -p safe-rs-cli --bins --locked -- -D warnings
+          cargo clippy -p safe-rs-cli --bins --locked --no-default-features -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install libusb and libudev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
+
+      - uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1.9.1
+
+      # The e2e tests skip themselves without ETH_RPC_URL; the local ones run
+      # against Anvil.
+      - name: Test
+        run: cargo test --workspace --all-features --locked
