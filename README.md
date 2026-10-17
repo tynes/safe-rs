@@ -1,11 +1,11 @@
 # safe-rs
 
 A Rust library and CLI for interacting with [Safe](https://safe.global) smart accounts.
-Built for single-signer (threshold 1) Safes with a focus on simplicity, safety, and developer experience.
+Built for owners who sign and execute their own Safe transactions, alone or with co-owners, with a focus on simplicity, safety, and developer experience.
 
 ## Philosophy
 
-**Opinionated by design.** safe-rs optimizes for an opinionated usecase: single-signer Safes where you want to execute transactions with confidence. Rather than supporting every Safe configuration, it provides a streamlined experience with compile-time guarantees and optional forking simulation.
+**Opinionated by design.** safe-rs optimizes for an opinionated usecase: owners who want to execute Safe transactions with confidence. A threshold-1 Safe signs and executes in one command; a Safe that needs more signatures collects them in a bundle file or on chain, with no Safe infrastructure in between. Rather than supporting every Safe configuration, it provides a streamlined experience with compile-time guarantees and optional forking simulation.
 
 **Minimal surface area.** One way to do things, done well. No configuration sprawl, no optional safety features that can be accidentally disabled.
 
@@ -20,6 +20,7 @@ Built for single-signer (threshold 1) Safes with a focus on simplicity, safety, 
 - **Fail-closed execution** — `safeTxGas` defaults to 0, so a failing inner call reverts the whole transaction instead of consuming the Safe nonce; `execute()` signs exactly the Safe transaction that `simulate()` ran
 - **Revert decoding** — Human-readable error messages from failed simulations
 - **EOA fallback mode** — Same builder API for executing as individual transactions from an EOA
+- **Multi-owner Safes** — For a threshold above 1, owners sign into a bundle file or approve the hash on chain (`approveHash`), and whoever completes the threshold executes ([details](#multi-owner-safes))
 - **One-time owner keys** — `send --rotate` swaps the Safe's owner for a fresh key in the same transaction, with the keys derived from one encrypted phrase ([details](#one-time-owner-keys))
 
 ## Installation
@@ -177,6 +178,10 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 | `--json` | Output as JSON |
 | `-i, --interactive` | Prompt for private key |
 | `--payer-private-key <key>` | A different key sends the outer transaction and pays for gas |
+| `--bundle <path>` | Read the calls, and any signatures collected so far, from a [bundle file](#bundle-format); below the threshold, save this owner's signature to it (see [Multi-owner Safes](#multi-owner-safes)) |
+| `--merge-bundle <path>` | Add the signatures from another bundle of the same Safe transaction (repeatable) |
+| `--sign-only` | Sign into `--bundle` and stop, even when the threshold is met |
+| `--approve-hash` | Approve the Safe transaction hash on chain (`approveHash`) instead of executing |
 | `--rotate` | Swap the owner for the next unused key of `--hd-wallet` in the same transaction (see [One-time owner keys](#one-time-owner-keys)) |
 | `--hd-wallet <name\|path>` | The HD wallet the owner keys come from (with `--rotate`) |
 | `--ledger` | Take the owner keys from a connected Ledger instead (with `--rotate`; see [On a Ledger](#on-a-ledger)) |
@@ -187,9 +192,36 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 
 Two or more calls go through a MultiSend contract: by default the canonical one for the Safe's version (v1.5.0 for a v1.5.0 Safe, v1.4.1 for any other), with or without `--rotate`. Pass another with `--multi-send` or `--multi-send-call-only`. A Safe sent a batch through an address without code reports success while none of the calls ran, so if the contract has no code on the chain (at `--block`, when simulating from one) the command stops before signing anything and names the address. That holds with `--rotate` too, where the calls and the owner swap are the batch.
 
-The `--raw-out` document contains `chain_id`, `safe`, `safe_nonce`, `safe_tx_hash`, the Safe transaction fields (`safe_tx`), the owner `signer` and `signature`, the outer transaction fields (`outer`), the EIP-2718 `raw` bytes and their `tx_hash`. `raw` can be rebroadcast as is with `cast publish`. With `--rotate` it also has a `rotation` object naming the old and new owner, the payer and the planned sweep.
+The `--raw-out` document contains `chain_id`, `safe`, `safe_nonce`, `safe_tx_hash`, the Safe transaction fields (`safe_tx`), the owner `signer` and `signature` (with several owners, `signature` packs all of them sorted by owner address, and `signer` is the first), the outer transaction fields (`outer`), the EIP-2718 `raw` bytes and their `tx_hash`. `raw` can be rebroadcast as is with `cast publish`. With `--rotate` it also has a `rotation` object naming the old and new owner, the payer and the planned sweep.
 
 A broadcast the node rejects, a broadcast with an unclear result, a receipt that doesn't arrive in time, and a Safe transaction without `ExecutionSuccess` all exit non-zero with the transaction hash.
+
+### Multi-owner Safes
+
+When the Safe's threshold is above 1, `send` signs with your key and counts it with the signatures already collected: the ones in `--bundle` and `--merge-bundle`, and the approvals owners have made on chain with `approveHash`. Below the threshold it saves your signature to `--bundle` and stops, with nothing broadcast (without `--bundle` or `--approve-hash`, it stops with an error). Once the threshold is met it executes. The simulation runs first either way, with the missing owners' approvals filled in on the fork, so the calls are checked before everyone has signed.
+
+```bash
+# Owner 1 prepares the transaction and signs it into tx.json (1/2)
+safe send 0xRecipient --value 1000000000000000000 \
+    --safe 0xYourSafe --rpc-url $ETH_RPC_URL --private-key $OWNER1_KEY \
+    --bundle tx.json
+
+# Owner 2 adds a signature (2/2) and executes
+safe send --bundle tx.json --safe 0xYourSafe --rpc-url $ETH_RPC_URL --private-key $OWNER2_KEY
+```
+
+The first run writes the Safe transaction to the file, and every later run signs that transaction. Owners can also sign the same calls independently, each into a file of their own, with `--sign-only` so that nobody executes. Then anyone, an owner or a key that only pays for gas, merges the files and executes:
+
+```bash
+safe send --bundle owner1.json --merge-bundle owner2.json \
+    --safe 0xYourSafe --rpc-url $ETH_RPC_URL --payer-private-key $PAYER_KEY
+```
+
+Files merge only if they hold the same Safe transaction: the same calls, options and Safe nonce.
+
+To approve on chain instead, `--approve-hash` sends `approveHash(safeTxHash)` from your owner key, which pays its gas. Later runs find on-chain approvals by themselves: another owner who sends the same calls at the same Safe nonce counts yours and can execute. With `--bundle` the transaction is written to the file as well, so the others don't have to repeat the calls.
+
+`safe rotate` and `send --rotate` take the same flags; see [Limits](#limits) for what rotates.
 
 ### `safe call`
 
@@ -259,7 +291,7 @@ safe create \
 | `--fallback-handler <address>` | Custom fallback handler |
 | `--singleton <address>` / `--factory <address>` | Non-canonical Safe deployment |
 
-With `--hd-wallet <name>` (or `--ledger`) the Safe is a 1/1 owned by a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--safe-version` applies as usual. `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version and contracts it was first created with.
+With `--hd-wallet <name>` (or `--ledger`) the Safe's first owner is a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--owner` and `--threshold` add co-owners, and `--safe-version` applies as usual. `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version, contracts, owners and threshold it was first created with.
 
 ### `safe rotate`
 
@@ -284,6 +316,7 @@ With `--from-*` and no address, it instead discovers that legacy signer's defaul
 | `--sweep-legacy` | Move the `--from-*` key's whole ETH balance to the new owner without a prompt (required with `--no-confirm` or `--json`) |
 | `--no-sweep` / `--sweep-reserve <wei>` | As for `send --rotate` |
 | `--payer-private-key <key>` | A different key pays for gas |
+| `--bundle`, `--merge-bundle`, `--sign-only`, `--approve-hash` | Collect the co-owners' signatures, as for `send` (see [Multi-owner Safes](#multi-owner-safes)) |
 | `--simulate-only`, `--gas-limit`, `--max-fee-per-gas`, `--max-priority-fee-per-gas`, `--timeout`, `--trace`, `--spec`, `--multi-send-call-only`, `--no-confirm` | As for `send` |
 
 ### `safe wallet`
@@ -402,7 +435,7 @@ Ledger support is a default feature of the CLI (`cargo install safe-rs-cli --loc
 
 ### Limits
 
-- **Threshold 1 only.** In a 1-of-N Safe only the signing owner rotates. N-of-M signature collection is not supported.
+- **Only the wallet's key rotates.** In a Safe with co-owners, the wallet's owner key is swapped and the co-owners keep theirs. They sign the bundle with `safe send --bundle <file> --sign-only` (no `--rotate`) and the wallet's next run executes it, or they approve on chain. Either way their public keys are published.
 - **Safe v1.4.1 and v1.5.0.** Other versions are refused.
 - **Sync every Safe.** After losing state, a key retired on a Safe or chain you did not sync could be handed out again. A phrase imported from another wallet may have keys that already signed: use `--start-index`, or better, a phrase from `safe wallet new`.
 - **Never export the account's extended public key (xpub).** The derivation is not hardened: with the xpub, one recovered key yields all the others. safe-rs never writes it anywhere.
@@ -436,6 +469,8 @@ let safe = Safe::connect(provider, signer, safe_address).await?;
 // Verify single-owner requirement
 safe.verify_single_owner().await?;
 ```
+
+`verify_single_owner` checks that the signer is an owner and the threshold is 1, which `execute()` needs. `verify_owner` checks only ownership and returns the owners and threshold (see [Multi-Owner Signatures](#multi-owner-signatures)).
 
 `Safe::connect` reads the chain ID and the Safe's version, and batches through the canonical MultiSend contracts for that version (v1.4.1's if the version cannot be read). `Safe::new` takes a `ChainConfig` and uses its addresses as given, as does `RotationConfig`; `ChainConfig::new` is v1.4.1. `detect_addresses` does the lookup `Safe::connect` does, for a configuration you build yourself.
 
@@ -514,6 +549,33 @@ let outcome = broadcast_raw(&provider, &outer.raw, outer.tx_hash).await;
 ```
 
 `ForkSession` simulates `SimTx::from_outer(&outer.params, TxChecks::STRICT)` in the next block before you broadcast. `read_safe_state` returns a block-pinned snapshot of owners, threshold, nonce, modules, guard and fallback handler.
+
+### Multi-Owner Signatures
+
+`execute()` signs with the one key the `Safe` was connected with, so it needs a threshold-1 Safe. `simulate()` works at any threshold: it fills in the missing owners' approvals on the fork. For a higher threshold, collect the signatures on a frozen transaction:
+
+```rust
+use safe_rs::{read_approved_owners, OuterTxParams, SignedSafeTx};
+
+let (owners, threshold) = safe.verify_owner().await?;
+let prepared = safe.batch().add_typed(token, call).prepare().await?;
+
+// Each owner signs the same transaction; a signature must recover to its owner
+let mut signed = SignedSafeTx::empty(prepared.clone());
+for owner in &owner_signers {
+    let sig = prepared.sign(owner).await?;
+    signed.insert_signature(owner.address(), sig.signature().unwrap().clone())?;
+}
+// Owners that called approveHash(safe_tx_hash) on chain count without a signature
+for owner in read_approved_owners(&provider, safe_address, &owners, prepared.safe_tx_hash, block).await? {
+    signed.add_prevalidated(owner);
+}
+
+let params = OuterTxParams::exec_transaction(&signed, payer.address(), eoa_nonce, gas_limit, fees);
+// then sign_outer_tx and broadcast_raw, as above
+```
+
+`recover_signer` checks a signature that arrives from elsewhere. `OuterTxParams::approve_hash` builds an owner's on-chain approval. With the `simulation` feature, `simulate_exec_with_threshold` simulates the transaction before every owner has signed, and `simulate_approve_hash` simulates the approval. `RotatingSafe::prepare` takes the co-owners' signatures in `ExecOptions::co_signatures`; check `signatures_collected` against `threshold` on the result before you `submit` it.
 
 ### Simulation-Only Mode
 
@@ -638,30 +700,39 @@ if let Some(idx) = result.first_failure {
 
 ## Bundle Format
 
-The `--bundle` option accepts JSON files compatible with the Safe Transaction Bundler format:
+The `--bundle` option reads a JSON object. To send a list of calls, `calls` is all it needs:
 
 ```json
-[
-  {
-    "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    "value": "0",
-    "data": "0xa9059cbb000000000000000000000000...",
-    "operation": 0
-  },
-  {
-    "to": "0x6B175474E89094C44Da98b954EescdAD80089fD12",
-    "data": "0x095ea7b3...",
-    "operation": 0
-  }
-]
+{
+  "calls": [
+    {
+      "to": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      "value": "0",
+      "data": "0xa9059cbb000000000000000000000000...",
+      "operation": 0
+    },
+    {
+      "to": "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+      "data": "0x095ea7b3...",
+      "operation": 0
+    }
+  ]
+}
 ```
 
-Fields:
+Fields of a call:
 - `to` — Target address (required)
 - `value` — Wei to send (optional, default: "0")
 - `data` — Calldata hex (optional, default: "0x")
 - `operation` — 0 for Call, 1 for DelegateCall (optional, default: 0). With `--call-only`, a DelegateCall entry is rejected.
 - `value` accepts decimal or `0x`-prefixed hex
+
+When owners collect signatures ([Multi-owner Safes](#multi-owner-safes)), the CLI adds:
+- `tx` — The Safe transaction being signed: chain ID, Safe, nonce, `safe_tx_hash` and the `execTransaction` fields. Once it is set, every run signs this transaction, and calls given on the command line must match `calls`.
+- `signatures` — Owner address → 65-byte signature of `safe_tx_hash`
+- `rotations` — The owner swaps `--rotate` added to the calls (`old_owner`, `new_owner`, `new_owner_index`)
+
+Reading the file recomputes `safe_tx_hash` from the `tx` fields and checks that every signature recovers to its owner. The bare JSON array that versions before 0.13 read is rejected: wrap it as `{"calls": [...]}`.
 
 ## Supported Chains and Versions
 
@@ -733,7 +804,7 @@ cargo run --example simple_transfer
 
 **vs ethers/alloy directly:** safe-rs handles the complexity of Safe transaction encoding, EIP-712 signing, gas estimation, and multicall batching. You focus on what you want to do, not how Safe works internally.
 
-**vs multi-owner Safes:** If you need multiple signers, use the Safe web interface or Transaction Service. safe-rs is intentionally limited to threshold-1 Safes for simplicity and reliability.
+**vs the Safe web interface:** A multi-owner Safe collects its signatures without the Transaction Service: owners pass a bundle file around however they like, or approve on chain with `approveHash`.
 
 ## License
 
