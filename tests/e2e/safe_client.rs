@@ -15,7 +15,7 @@ use safe_rs::{Account, ChainConfig, Safe};
 async fn test_safe_new_with_explicit_config() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // First deploy a Safe
@@ -43,7 +43,7 @@ async fn test_safe_new_with_explicit_config() {
 async fn test_safe_connect_auto_detects_chain() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe
@@ -67,7 +67,7 @@ async fn test_safe_connect_auto_detects_chain() {
 async fn test_safe_with_debug_output_dir() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe
@@ -97,7 +97,7 @@ async fn test_safe_with_debug_output_dir() {
 async fn test_safe_threshold_returns_correct_value() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe with threshold 1
@@ -121,7 +121,7 @@ async fn test_safe_threshold_returns_correct_value() {
 async fn test_safe_owners_returns_all_owners() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe with single owner
@@ -146,7 +146,7 @@ async fn test_safe_owners_returns_all_owners() {
 async fn test_safe_owners_returns_multiple_owners() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner1 = harness.signer_address();
     let owner2 = address!("0x1111111111111111111111111111111111111111");
 
@@ -173,7 +173,7 @@ async fn test_safe_owners_returns_multiple_owners() {
 async fn test_safe_is_owner_true_for_owner() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe
@@ -197,7 +197,7 @@ async fn test_safe_is_owner_true_for_owner() {
 async fn test_safe_is_owner_false_for_non_owner() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
     let non_owner = address!("0x9999999999999999999999999999999999999999");
 
@@ -225,7 +225,7 @@ async fn test_safe_is_owner_false_for_non_owner() {
 async fn test_safe_verify_single_owner_succeeds() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe with threshold 1
@@ -251,7 +251,7 @@ async fn test_safe_verify_single_owner_succeeds() {
 async fn test_safe_verify_single_owner_fails_high_threshold() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner1 = harness.signer_address();
     let owner2 = address!("0x2222222222222222222222222222222222222222");
 
@@ -283,7 +283,7 @@ async fn test_safe_verify_single_owner_fails_high_threshold() {
 async fn test_safe_verify_single_owner_fails_not_owner() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let different_owner = address!("0x3333333333333333333333333333333333333333");
 
     // Deploy a Safe with a different owner (not the signer)
@@ -319,7 +319,7 @@ async fn test_safe_verify_single_owner_fails_not_owner() {
 async fn test_is_safe_returns_true_for_safe() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe
@@ -340,7 +340,7 @@ async fn test_is_safe_returns_true_for_safe() {
 async fn test_is_safe_returns_false_for_eoa() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa_address = harness.signer_address();
 
     let is_safe = safe_rs::is_safe(&harness.provider, eoa_address)
@@ -354,7 +354,7 @@ async fn test_is_safe_returns_false_for_eoa() {
 async fn test_is_safe_returns_false_for_empty_address() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let random_address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
     let is_safe = safe_rs::is_safe(&harness.provider, random_address)
@@ -372,7 +372,7 @@ async fn test_is_safe_returns_false_for_empty_address() {
 async fn test_safe_nonce_returns_zero_for_fresh_safe() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a fresh Safe

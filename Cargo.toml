@@ -178,6 +178,9 @@ no_effect_underscore_binding = "allow"
 # Closure vs method reference - closure syntax is clearer: .map(|s| s.to_string())
 redundant_closure_for_method_calls = "allow"
 
+# assert!(x.is_empty()) reads better than assert_eq!(x, [] as [T; 0])
+assert_is_empty = "allow"
+
 # Panic safety - deny any operations that could panic
 unwrap_used = "deny"
 expect_used = "deny"

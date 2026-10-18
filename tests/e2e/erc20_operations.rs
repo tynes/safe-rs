@@ -11,7 +11,7 @@ use safe_rs::{Account, CallBuilder, IERC20};
 async fn test_deploy_mock_erc20() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -45,7 +45,7 @@ async fn test_deploy_mock_erc20() {
 async fn test_erc20_transfer_via_safe() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -120,7 +120,7 @@ async fn test_erc20_transfer_via_safe() {
 async fn test_erc20_approve() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -180,7 +180,7 @@ async fn test_erc20_approve() {
 async fn test_batch_erc20_operations() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -284,7 +284,7 @@ async fn test_batch_erc20_operations() {
 async fn test_batch_execute_without_simulate() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     let safe_address = harness

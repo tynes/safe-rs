@@ -12,7 +12,7 @@ use safe_rs::{Account, CallBuilder, IERC20};
 async fn test_simulation_gas_matches_execution() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -84,7 +84,7 @@ async fn test_simulation_gas_matches_execution() {
 async fn test_simulation_logs_match_execution() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -204,7 +204,7 @@ async fn test_simulation_logs_match_execution() {
 async fn test_simulation_success_matches_execution() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -250,7 +250,7 @@ async fn test_simulation_success_matches_execution() {
 async fn test_failed_simulation_reports_revert() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -322,7 +322,7 @@ async fn test_failed_simulation_reports_revert() {
 async fn test_simulation_multiple_transfers() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe

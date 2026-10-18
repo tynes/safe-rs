@@ -11,7 +11,7 @@ use safe_rs::is_safe;
 async fn test_is_safe_returns_true_for_safe() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a new Safe
@@ -33,7 +33,7 @@ async fn test_is_safe_returns_true_for_safe() {
 async fn test_is_safe_returns_false_for_erc20() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     // Deploy a MockERC20 token
     let token_address = harness
@@ -54,7 +54,7 @@ async fn test_is_safe_returns_false_for_erc20() {
 async fn test_is_safe_returns_false_for_eoa() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa_address = harness.signer_address();
 
     // Verify is_safe returns false for EOA
@@ -70,7 +70,7 @@ async fn test_is_safe_returns_false_for_eoa() {
 async fn test_is_safe_returns_false_for_empty_address() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     // Random address with no code deployed
     let empty_address = alloy::primitives::address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 

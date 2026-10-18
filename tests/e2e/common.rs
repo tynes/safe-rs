@@ -78,7 +78,7 @@ impl TestHarness {
     /// - `ANVIL_COMPUTE_UNITS_PER_SECOND`: Compute units per second (default: 330)
     /// - `ANVIL_RETRIES`: Number of retries for RPC requests (default: 5)
     /// - `ANVIL_TIMEOUT`: Timeout in milliseconds for RPC requests (default: 20000)
-    pub async fn new() -> Self {
+    pub fn new() -> Self {
         let rpc_url = std::env::var("ETH_RPC_URL").expect("ETH_RPC_URL must be set");
 
         // Build Anvil args based on environment variables

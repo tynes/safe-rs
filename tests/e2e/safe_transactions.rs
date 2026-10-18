@@ -11,7 +11,7 @@ use safe_rs::{Account, CallBuilder, Operation};
 async fn test_execute_single_eth_transfer() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -66,7 +66,7 @@ async fn test_execute_single_eth_transfer() {
 async fn test_multicall_multiple_transfers() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -132,7 +132,7 @@ async fn test_multicall_multiple_transfers() {
 async fn test_simulate_then_execute() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -191,7 +191,7 @@ async fn test_simulate_then_execute() {
 async fn test_nonce_increments() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe

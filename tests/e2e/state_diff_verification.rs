@@ -11,7 +11,7 @@ use safe_rs::{Account, CallBuilder, IERC20};
 async fn test_state_diff_balance_changes() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -100,7 +100,7 @@ fn compute_balance_slot(holder: alloy::primitives::Address, base_slot: U256) -> 
 async fn test_state_diff_storage_changes() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -216,7 +216,7 @@ async fn test_state_diff_storage_changes() {
 async fn test_state_diff_nonce_increment() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -281,7 +281,7 @@ async fn test_state_diff_nonce_increment() {
 async fn test_state_diff_multiple_accounts() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe
@@ -357,7 +357,7 @@ async fn test_state_diff_multiple_accounts() {
 async fn test_state_diff_pre_values_match_rpc() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe

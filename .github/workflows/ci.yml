@@ -26,12 +26,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # Clippy 1.99 adds the chunks_exact_to_as_chunks, unused_async_trait_impl
-      # and assert_is_empty lints, which the tree fails at 24 sites. Move back
-      # to stable once those are fixed.
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: 1.97.1
+          toolchain: stable
           components: clippy
 
       # Only master saves the cache, so pull requests do not evict it.
@@ -54,10 +51,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # 1.97.1 for the same reason as the lint job.
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          toolchain: 1.97.1
+          toolchain: stable
           components: clippy
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

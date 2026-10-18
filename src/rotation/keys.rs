@@ -78,8 +78,8 @@ impl HdWallet {
 }
 
 impl KeySource for HdWallet {
-    async fn address(&self, index: u32) -> Result<Address> {
-        Ok(self.key(index)?.address())
+    fn address(&self, index: u32) -> impl Future<Output = Result<Address>> + Send {
+        std::future::ready(self.key(index).map(|key| key.address()))
     }
 
     async fn sign_safe_tx(&self, index: u32, tx: &PreparedSafeTx) -> Result<SignedSafeTx> {

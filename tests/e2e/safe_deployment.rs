@@ -11,7 +11,7 @@ use crate::skip_if_no_rpc;
 async fn test_deploy_safe_success() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy Safe with single owner and threshold 1
@@ -47,7 +47,7 @@ async fn test_deploy_safe_success() {
 async fn test_deploy_same_safe_twice_fails() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
     let salt_nonce = U256::from(2001);
 
@@ -83,7 +83,7 @@ async fn test_deploy_same_safe_twice_fails() {
 async fn test_deploy_safe_multiple_owners() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner1 = harness.signer_address();
     // Generate additional owner addresses
     let owner2 = alloy::primitives::address!("0x1111111111111111111111111111111111111111");
@@ -124,7 +124,7 @@ async fn test_deploy_safe_multiple_owners() {
 async fn test_deploy_safe_threshold_equals_owners() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner1 = harness.signer_address();
     let owner2 = alloy::primitives::address!("0x3333333333333333333333333333333333333333");
 
