@@ -1,11 +1,11 @@
 use std::fmt::Write as _;
 
 use alloy::eips::BlockId;
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 use color_eyre::eyre::{bail, Result};
 use safe_rs::{
-    check_config_post_state, plan_config, read_safe_state, ConfigChanges, ConfigOp, ConfigPlan,
-    ForkSession, ReadSafeStateOptions,
+    check_config_post_state, check_new_guards_allow_followup, plan_config, read_safe_state,
+    ConfigChanges, ConfigOp, ConfigPlan, ForkSession, ReadSafeStateOptions,
 };
 
 use crate::cli::{ConfigArgs, SafeArgs, SendArgs, SweepArgs};
@@ -90,9 +90,38 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
             ));
         }
     }
+    let new_guard = plan.ops.iter().any(|op| match op {
+        ConfigOp::SetGuard { guard } => *guard != Address::ZERO,
+        ConfigOp::SetModuleGuard { module_guard } => *module_guard != Address::ZERO,
+        _ => false,
+    });
+    if new_guard && args.allow_unchecked_guard {
+        console.line(
+            "WARNING: --allow-unchecked-guard: a new guard that rejects every transaction \
+             would lock the Safe for good",
+        );
+    } else if new_guard && args.skip_simulation {
+        bail!(
+            "--skip-simulation would install a new guard unchecked: a guard that rejects \
+             every transaction locks the Safe for good. Simulate, or pass \
+             --allow-unchecked-guard to install it anyway"
+        );
+    }
     console.line("");
 
-    let check = |post: &mut ForkSession| check_config_post_state(post, &plan);
+    let check_guards = new_guard && !args.allow_unchecked_guard;
+    let check = |post: &mut ForkSession| {
+        check_config_post_state(post, &plan)?;
+        if check_guards {
+            check_new_guards_allow_followup(post, &plan).map_err(|e| match e {
+                safe_rs::Error::Config(message) => safe_rs::Error::Config(format!(
+                    "{message}. Pass --allow-unchecked-guard to install it anyway"
+                )),
+                e => e,
+            })?;
+        }
+        Ok(())
+    };
     let hooks = ExecHooks {
         signer,
         post_check: Some(&check),
