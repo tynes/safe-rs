@@ -92,6 +92,8 @@ sol! {
         function enableModule(address module) external;
         function disableModule(address prevModule, address module) external;
         function setGuard(address guard) external;
+        /// Sets the module guard (Safe v1.5.0 and later)
+        function setModuleGuard(address moduleGuard) external;
         function setFallbackHandler(address handler) external;
         function addOwnerWithThreshold(address owner, uint256 _threshold) external;
         function removeOwner(address prevOwner, address owner, uint256 _threshold) external;
@@ -116,6 +118,8 @@ sol! {
             address fallbackHandler
         );
         event EnabledModule(address indexed module);
+        event DisabledModule(address indexed module);
+        event ChangedModuleGuard(address indexed moduleGuard);
         event ApproveHash(bytes32 indexed approvedHash, address indexed owner);
         event ChangedGuard(address indexed guard);
         event AddedOwner(address indexed owner);

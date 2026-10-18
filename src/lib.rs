@@ -67,6 +67,7 @@
 
 pub mod account;
 pub mod chain;
+pub mod config;
 pub mod contracts;
 pub mod create2;
 pub mod encoding;
@@ -94,6 +95,9 @@ pub mod wallet;
 // Re-export main types at crate root
 pub use account::Account;
 pub use chain::{ChainAddresses, ChainConfig};
+#[cfg(feature = "simulation")]
+pub use config::check_config_post_state;
+pub use config::{plan_config, ConfigChanges, ConfigOp, ConfigPlan, ExpectedConfig};
 pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
 pub use create2::{
     compute_create2_address, encode_create_proxy_with_nonce, encode_setup_call,
@@ -118,8 +122,8 @@ pub use envelope::{
     PreparedSafeTx, SafeTxGasPolicy, SignedSafeTx,
 };
 pub use inspect::{
-    is_safe_with, read_approved_owners, read_safe_state, require_batch_target, ModuleList,
-    ReadSafeStateOptions, SafeState,
+    has_module_guard, is_safe_with, prev_in_list, read_approved_owners, read_safe_state,
+    require_batch_target, ModuleList, ReadSafeStateOptions, SafeState,
 };
 pub use outer::{
     decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,

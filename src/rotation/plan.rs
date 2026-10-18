@@ -11,7 +11,7 @@ use alloy::sol_types::SolCall;
 use crate::contracts::ISafe;
 use crate::envelope::{PreparedSafeTx, SafeTxGasPolicy};
 use crate::error::{Error, Result};
-use crate::inspect::{SafeState, SENTINEL};
+use crate::inspect::{prev_in_list, SafeState, SENTINEL};
 #[cfg(feature = "simulation")]
 use crate::simulation::ForkSession;
 use crate::types::Call;
@@ -31,11 +31,7 @@ pub const SUPPORTED_VERSIONS: [&str; 2] = ["1.4.1", "1.5.0"];
 /// `owners` must be in list order, as `getOwners()` returns it. The first owner
 /// is preceded by [`SENTINEL`].
 pub fn prev_owner(owners: &[Address], owner: Address) -> Result<Address> {
-    match owners.iter().position(|o| *o == owner) {
-        Some(0) => Ok(SENTINEL),
-        Some(i) => Ok(owners[i - 1]),
-        None => Err(Error::Rotation(format!("{owner} is not an owner"))),
-    }
+    prev_in_list(owners, owner).ok_or_else(|| Error::Rotation(format!("{owner} is not an owner")))
 }
 
 /// One `swapOwner(prevOwner, oldOwner, newOwner)` call.
@@ -287,6 +283,7 @@ mod tests {
             },
             guard: Address::ZERO,
             fallback_handler: Address::ZERO,
+            module_guard: None,
             block: BlockId::latest(),
         }
     }

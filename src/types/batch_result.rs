@@ -163,6 +163,7 @@ mod tests {
         let sim_result = SimulationResult {
             success: true,
             gas_used: 50000,
+            gas_spent: 50000,
             return_data: Default::default(),
             revert_reason: None,
             logs: vec![],
@@ -184,6 +185,7 @@ mod tests {
             SimulationResult {
                 success: true,
                 gas_used: 21000,
+                gas_spent: 21000,
                 return_data: Default::default(),
                 revert_reason: None,
                 logs: vec![],
@@ -193,6 +195,7 @@ mod tests {
             SimulationResult {
                 success: true,
                 gas_used: 30000,
+                gas_spent: 30000,
                 return_data: Default::default(),
                 revert_reason: None,
                 logs: vec![],
