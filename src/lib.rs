@@ -96,7 +96,7 @@ pub mod wallet;
 pub use account::Account;
 pub use chain::{ChainAddresses, ChainConfig};
 #[cfg(feature = "simulation")]
-pub use config::check_config_post_state;
+pub use config::{check_config_post_state, check_new_guards_allow_followup};
 pub use config::{plan_config, ConfigChanges, ConfigOp, ConfigPlan, ExpectedConfig};
 pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
 pub use create2::{

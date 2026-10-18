@@ -304,12 +304,19 @@ safe config --disable-module 0xModule --guard 0x00000000000000000000000000000000
 | `--guard <addr>` | Set the transaction guard; the zero address removes it |
 | `--fallback-handler <addr>` | Set the fallback handler; the zero address removes it |
 | `--module-guard <addr>` | Set the module guard (Safe v1.5.0 only); the zero address removes it |
+| `--allow-unchecked-guard` | Install a new guard or module guard even if the follow-up check below fails, or with `--skip-simulation` |
 
 The `prevOwner` and `prevModule` arguments of the Safe's linked lists are worked out for you, including when one change moves the entry another depends on. The calls always run in this order: owner swaps, additions, removals, `changeThreshold`, module enables, disables, fallback handler, module guard, and the transaction guard last.
 
 The threshold is never lowered unless you pass `--threshold`. A change that would leave fewer owners than the current threshold is refused and asks for one. Also refused, before anything is signed: an address named in two changes, adding an existing owner, removing or swapping out a non-owner, enabling an enabled module or disabling one that isn't enabled, a module guard on a Safe before v1.5.0, and a request that changes nothing.
 
 After simulating, `config` reads the Safe back from the simulated state and checks that every owner (in list order), the threshold, the modules, the guards and the fallback handler match the plan. Several changes go through MultiSendCallOnly (`--multi-send-call-only` to override), never through a DELEGATECALL MultiSend.
+
+The transaction that installs a guard is not checked by that guard, so its simulation says nothing about whether the guard lets anything through afterwards. A guard whose `checkTransaction` or `checkAfterExecution` always reverts would block every later Safe transaction, including the one that removes it, and lock the Safe for good. So when `--guard` sets a non-zero guard, `config` also simulates a trivial follow-up on the simulated post-state: a zero-value call from the Safe to itself at the next nonce, approved by the owners and threshold after the change. If the guard rejects it, `config` refuses to sign and says why. `--skip-simulation` with a new guard is refused too. `--allow-unchecked-guard` overrides both.
+
+`--module-guard` (v1.5.0) gets the same check through `execTransactionFromModule`, sent by the first module enabled after the change. A module guard that rejects every module transaction cannot lock the owners out, because `execTransaction` does not go through it, but it does stop every module until the owners replace it. When no module is enabled after the change there is no module to send the follow-up from, so the module guard is not checked.
+
+The follow-up proves that the guard lets a self-call through at the next nonce in the simulated block. It does not prove the guard will allow other calls, or the same call later. A guard that depends on time, targets or calldata can still lock the Safe in ways one follow-up cannot catch.
 
 The signing, bundle, simulation and gas options are those of `safe send` (`--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`, `--simulate-only`, `--no-submit`, `--raw-out`, `--nonce`, fees and so on). `--safe-tx-gas` and `--rotate` are not offered: config changes are always fail-closed, and a config change cannot also rotate the signer. `--hd-wallet` and `--ledger` are refused for the same reason as in `send` without `--rotate`.
 
@@ -323,7 +330,7 @@ safe config --add-owner 0xNewOwner --threshold 3 --bundle config.json --safe 0xY
 safe config --bundle config.json --private-key $OWNER2_KEY
 ```
 
-`safe send --bundle config.json` works for co-owners too. A co-owner signing from the bundle gets the simulation and the Safe's own checks, but not the read-back of the planned configuration: only the run that planned the change knows what to expect.
+`safe send --bundle config.json` works for co-owners too. A co-owner signing from the bundle gets the simulation and the Safe's own checks, but not the read-back of the planned configuration or the guard follow-up check: only the run that planned the change knows what to expect.
 
 ### `safe create`
 

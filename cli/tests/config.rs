@@ -19,7 +19,7 @@ mod common;
 use std::path::Path;
 use std::process::Command;
 
-use alloy::primitives::{hex, Address, U256};
+use alloy::primitives::{hex, Address, Bytes, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use common::LocalHarness;
@@ -96,6 +96,19 @@ fn config(
     ];
     all.extend_from_slice(args);
     safe_cli(h, home, &all)
+}
+
+/// Init code for a guard that answers every ERC-165 `supportsInterface` with
+/// true (so `setGuard` and `setModuleGuard` accept it) and reverts on every
+/// other call, `checkTransaction` and `checkModuleTransaction` included.
+fn reject_all_guard_initcode() -> Bytes {
+    // init: copy the 30-byte runtime (at offset 11) to memory and return it
+    // runtime: PUSH1 0 CALLDATALOAD PUSH1 0xe0 SHR PUSH4 0x01ffc9a7 EQ
+    //          PUSH1 19 JUMPI PUSH1 0 DUP1 REVERT
+    //          JUMPDEST PUSH1 1 PUSH1 0 MSTORE PUSH1 32 PUSH1 0 RETURN
+    "0x601e80600b6000396000f360003560e01c6301ffc9a714601357600080fd5b600160005260206000f3"
+        .parse()
+        .expect("hex")
 }
 
 fn info(h: &LocalHarness, home: &Path, safe: Address) -> Value {
@@ -230,7 +243,9 @@ async fn modules_guard_and_fallback_handler_change() {
         Address::ZERO
     );
 
-    // Clearing the guard runs through the guard itself.
+    // Setting the guard also ran a follow-up transaction through it: the
+    // DebugTransactionGuard lets it through. Clearing the guard runs through
+    // the guard itself.
     config(
         &h,
         home,
@@ -415,5 +430,114 @@ async fn module_guard_changes_on_v1_5_0() {
             .parse::<Address>()
             .unwrap(),
         Address::ZERO
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_guard_that_rejects_every_transaction_is_refused() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let safe = h.deploy_safe(806).await;
+    let reject_all = h.create2(reject_all_guard_initcode()).await;
+    let s = |address: Address| address.to_string();
+    let guard = |h: &LocalHarness| {
+        info(h, home, safe)["guard"]
+            .as_str()
+            .unwrap()
+            .parse::<Address>()
+            .unwrap()
+    };
+
+    // The installing transaction itself succeeds: only the follow-up through
+    // the new guard reverts.
+    let refused = config(&h, home, safe, &h.owner, &["--guard", &s(reject_all)]);
+    refused.assert_refused(&format!(
+        "the new guard {reject_all} rejects a later Safe transaction"
+    ));
+    refused.assert_refused("--allow-unchecked-guard");
+    config(
+        &h,
+        home,
+        safe,
+        &h.owner,
+        &["--guard", &s(reject_all), "--simulate-only"],
+    )
+    .assert_refused("rejects a later Safe transaction");
+    config(
+        &h,
+        home,
+        safe,
+        &h.owner,
+        &["--guard", &s(reject_all), "--skip-simulation"],
+    )
+    .assert_refused("--skip-simulation would install a new guard unchecked");
+    assert_eq!(guard(&h), Address::ZERO);
+    assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
+
+    // The override installs it, and the check was right: the Safe is locked,
+    // even against removing the guard.
+    let out = config(
+        &h,
+        home,
+        safe,
+        &h.owner,
+        &["--guard", &s(reject_all), "--allow-unchecked-guard"],
+    )
+    .json();
+    assert_eq!(out["outcome"], "success");
+    assert_eq!(guard(&h), reject_all);
+    config(&h, home, safe, &h.owner, &["--guard", &s(Address::ZERO)])
+        .assert_refused("simulation failed");
+    assert_eq!(h.safe_nonce(safe).await, U256::from(1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_guard_that_rejects_every_module_transaction_is_refused() {
+    let h = LocalHarness::with_version("1.5.0").await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let safe = h.deploy_safe(807).await;
+    let reject_all = h.create2(reject_all_guard_initcode()).await;
+    let module = Address::repeat_byte(0xe3);
+    let s = |address: Address| address.to_string();
+
+    // The module enabled in the same transaction sends the follow-up.
+    config(
+        &h,
+        home,
+        safe,
+        &h.owner,
+        &[
+            "--enable-module",
+            &s(module),
+            "--module-guard",
+            &s(reject_all),
+        ],
+    )
+    .assert_refused(&format!(
+        "the new module guard {reject_all} rejects a module transaction"
+    ));
+    assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
+
+    // The DebugTransactionGuard lets the module transaction through.
+    let out = config(
+        &h,
+        home,
+        safe,
+        &h.owner,
+        &["--enable-module", &s(module), "--module-guard", &s(h.guard)],
+    )
+    .json();
+    assert_eq!(out["outcome"], "success");
+    let state = info(&h, home, safe);
+    assert_eq!(addresses(&state["modules"]), [module]);
+    assert_eq!(
+        state["module_guard"]
+            .as_str()
+            .unwrap()
+            .parse::<Address>()
+            .unwrap(),
+        h.guard
     );
 }

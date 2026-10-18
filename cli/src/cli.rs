@@ -345,6 +345,12 @@ pub struct ConfigArgs {
     #[arg(long, value_name = "ADDR")]
     pub module_guard: Option<Address>,
 
+    /// Install a new guard or module guard even if it rejects a trivial
+    /// follow-up transaction in simulation, or without simulating at all
+    /// (a guard that rejects every transaction locks the Safe for good)
+    #[arg(long)]
+    pub allow_unchecked_guard: bool,
+
     /// Path to bundle JSON file. Saves the planned transaction and signatures
     /// when the threshold is not met; co-signers pass it without change flags
     #[arg(long)]

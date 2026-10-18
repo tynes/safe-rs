@@ -19,6 +19,8 @@ use alloy::primitives::{Address, U256};
 use alloy::sol_types::SolCall;
 
 use crate::contracts::ISafe;
+#[cfg(feature = "simulation")]
+use crate::envelope::{PreparedSafeTx, SafeTxGasPolicy, SignedSafeTx};
 use crate::error::{Error, Result};
 use crate::inspect::{has_module_guard, prev_in_list, SafeState, SENTINEL};
 #[cfg(feature = "simulation")]
@@ -26,7 +28,7 @@ use crate::inspect::{
     FALLBACK_HANDLER_STORAGE_SLOT, GUARD_STORAGE_SLOT, MODULE_GUARD_STORAGE_SLOT,
 };
 #[cfg(feature = "simulation")]
-use crate::simulation::ForkSession;
+use crate::simulation::{ForkSession, SimTx, SimulationResult, READ_CALL_GAS};
 use crate::types::Call;
 
 /// The configuration changes requested in one Safe transaction.
@@ -576,6 +578,155 @@ pub fn check_config_post_state(post: &mut ForkSession, plan: &ConfigPlan) -> Res
         }
     }
     Ok(())
+}
+
+/// Checks that a transaction guard or module guard that `plan` installs does
+/// not reject every later transaction, on a checkpoint of `post` (a session the
+/// plan's transaction was committed to).
+///
+/// The transaction that installs a guard is not checked by it, so the
+/// simulation of that transaction says nothing about the guard. Here a trivial
+/// follow-up runs through each new non-zero guard:
+///
+/// - transaction guard: a zero-value call from the Safe to itself at the next
+///   nonce, through `execTransaction`, approved on-chain by `plan.after`'s
+///   first `threshold` owners. A guard that rejects it would block every Safe
+///   transaction, including the one that removes it, and lock the Safe.
+/// - module guard (Safe v1.5.0): the same call through
+///   `execTransactionFromModule`, sent by the first module enabled after the
+///   plan. A module guard that rejects it stops every module, until the owners
+///   replace it. Without an enabled module there is nothing to send it from,
+///   and the module guard is not checked.
+///
+/// A rejected follow-up is an [`Error::Config`] with the reason.
+#[cfg(feature = "simulation")]
+pub fn check_new_guards_allow_followup(post: &ForkSession, plan: &ConfigPlan) -> Result<()> {
+    let safe = plan.safe;
+    let new_guard = plan
+        .ops
+        .iter()
+        .any(|op| matches!(op, ConfigOp::SetGuard { guard } if *guard != Address::ZERO));
+    if new_guard {
+        let mut session = post.checkpoint();
+        if let Some(reason) = followup_exec(&mut session, plan)? {
+            return Err(config_err(format!(
+                "the new guard {} rejects a later Safe transaction (a zero-value call from the \
+                 Safe to itself at the next nonce): {reason}. Once installed, it would block \
+                 every Safe transaction, including one that removes it, and lock the Safe",
+                plan.after.guard
+            )));
+        }
+    }
+
+    let new_module_guard = plan.ops.iter().any(
+        |op| matches!(op, ConfigOp::SetModuleGuard { module_guard } if *module_guard != Address::ZERO),
+    );
+    let module = plan
+        .after
+        .modules
+        .as_ref()
+        .and_then(|modules| modules.first().copied());
+    if let (true, Some(module)) = (new_module_guard, module) {
+        let mut session = post.checkpoint();
+        if let Some(reason) = followup_module_exec(&mut session, safe, module)? {
+            return Err(config_err(format!(
+                "the new module guard {} rejects a module transaction (a zero-value call from \
+                 the Safe to itself, sent by module {module}): {reason}. Once installed, no \
+                 module could execute until the owners replace the module guard",
+                or_none(plan.after.module_guard.unwrap_or_default())
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The revert reason of a failed follow-up, or `None` if it succeeded.
+#[cfg(feature = "simulation")]
+fn failure_reason(mut result: SimulationResult) -> Option<String> {
+    result.apply_inner_revert_reason();
+    (!result.success).then(|| {
+        result
+            .revert_reason
+            .unwrap_or_else(|| "unknown reason".to_string())
+    })
+}
+
+/// Runs a zero-value self-call through `execTransaction` at the Safe's
+/// current nonce, approved by the planned owners.
+#[cfg(feature = "simulation")]
+fn followup_exec(session: &mut ForkSession, plan: &ConfigPlan) -> Result<Option<String>> {
+    let safe = plan.safe;
+    let nonce = read(session, safe, &ISafe::nonceCall {})?;
+    let prepared = PreparedSafeTx::single_call(
+        session.chain_id(),
+        safe,
+        &Call::new(safe, U256::ZERO, alloy::primitives::Bytes::new()),
+        nonce,
+        SafeTxGasPolicy::Zero,
+    )?;
+    let owners = &plan.after.owners;
+    let threshold = plan.after.threshold.saturating_to::<usize>();
+    let Some(&sender) = owners.first() else {
+        return Err(config_err("the planned Safe has no owners"));
+    };
+
+    let gas = session.max_tx_gas();
+    let approve = SignedSafeTx::approve_hash_calldata(prepared.safe_tx_hash);
+    for &owner in owners.iter().take(threshold) {
+        let approved = session.transact_commit(SimTx::relaxed(
+            owner,
+            safe,
+            U256::ZERO,
+            approve.clone(),
+            gas.min(READ_CALL_GAS),
+        ))?;
+        if let Some(reason) = failure_reason(approved) {
+            return Ok(Some(format!(
+                "approveHash by owner {owner} failed: {reason}"
+            )));
+        }
+    }
+    let signed = SignedSafeTx::empty(prepared.clone()).with_simulated_co_owners(owners, threshold);
+    let mut result = session.transact(SimTx::relaxed(
+        sender,
+        safe,
+        U256::ZERO,
+        signed.exec_calldata(),
+        gas,
+    ))?;
+    result.require_safe_success(safe, prepared.safe_tx_hash);
+    Ok(failure_reason(result))
+}
+
+/// Runs a zero-value self-call through `execTransactionFromModule`, sent by
+/// `module`.
+#[cfg(feature = "simulation")]
+fn followup_module_exec(
+    session: &mut ForkSession,
+    safe: Address,
+    module: Address,
+) -> Result<Option<String>> {
+    let call = ISafe::execTransactionFromModuleCall {
+        to: safe,
+        value: U256::ZERO,
+        data: alloy::primitives::Bytes::new(),
+        operation: 0,
+    };
+    let gas = session.max_tx_gas();
+    let result = session.transact(SimTx::relaxed(
+        module,
+        safe,
+        U256::ZERO,
+        call.abi_encode().into(),
+        gas,
+    ))?;
+    let output = result.return_data.clone();
+    if let Some(reason) = failure_reason(result) {
+        return Ok(Some(reason));
+    }
+    let success = ISafe::execTransactionFromModuleCall::abi_decode_returns(&output)
+        .map_err(|e| Error::Abi(e.to_string()))?;
+    Ok((!success).then(|| "execTransactionFromModule returned false".to_string()))
 }
 
 #[cfg(test)]

@@ -100,6 +100,11 @@ sol! {
         function swapOwner(address prevOwner, address oldOwner, address newOwner) external;
         function changeThreshold(uint256 _threshold) external;
 
+        /// Executes a call from an enabled module, without signatures
+        function execTransactionFromModule(address to, uint256 value, bytes memory data, uint8 operation)
+            external
+            returns (bool success);
+
         /// Approves a hash for pre-validated signatures (msg.sender must be an owner)
         function approveHash(bytes32 hashToApprove) external;
         /// Returns non-zero if `owner` has approved `hashToApprove` on-chain
