@@ -9,6 +9,7 @@ use url::Url;
 
 use crate::cli::SimArgs;
 
+pub mod approvals;
 pub mod call;
 pub mod config;
 pub mod create;

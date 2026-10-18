@@ -376,6 +376,14 @@ async fn multi_owner_offchain_bundle_collection_and_execution() {
     assert_eq!(first["threshold"], 2);
     assert_eq!(balance(&h, recipient).await, U256::ZERO);
     assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
+
+    // `safe approvals --bundle` counts the offchain signature; no --safe needed.
+    let pending = safe_cli(&h, &home, &["approvals", "--bundle", bundle]).json();
+    assert_eq!(pending["approvals"], 1);
+    assert_eq!(pending["executable"], false);
+    assert_eq!(pending["nonce_used"], false);
+    assert_eq!(pending["signed_offchain"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["pending"].as_array().unwrap().len(), 2);
     assert_eq!(
         h.provider
             .get_transaction_count(owner1.address())
@@ -398,6 +406,10 @@ async fn multi_owner_offchain_bundle_collection_and_execution() {
     assert_eq!(second["outcome"], "success");
     assert_eq!(balance(&h, recipient).await, U256::from(100));
     assert_eq!(h.safe_nonce(safe).await, U256::from(1));
+
+    let executed = safe_cli(&h, &home, &["approvals", "--bundle", bundle]).json();
+    assert_eq!(executed["approvals"], 2);
+    assert_eq!(executed["nonce_used"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -529,6 +541,27 @@ async fn multi_owner_onchain_approve_hash_flow() {
         .unwrap();
     assert_eq!(onchain_flag, U256::from(1));
     assert_eq!(balance(&h, recipient).await, U256::ZERO);
+
+    let info = safe_cli(&h, &home, &["info", &safe.to_string()]).json();
+    assert_eq!(info["balance"], "0x3e8"); // 1000 wei
+
+    // `safe approvals <hash>` reads approvedHashes per owner, with no log scan.
+    let hash = safe_tx_hash.to_string();
+    let approvals = safe_cli(
+        &h,
+        &home,
+        &["approvals", &hash, "--safe", &safe.to_string()],
+    )
+    .json();
+    assert_eq!(approvals["approvals"], 1);
+    assert_eq!(approvals["threshold"], 2);
+    assert_eq!(approvals["executable"], false);
+    let approved_onchain: Vec<Address> =
+        serde_json::from_value(approvals["approved_onchain"].clone()).unwrap();
+    assert_eq!(approved_onchain, vec![owner1.address()]);
+    let pending: Vec<Address> = serde_json::from_value(approvals["pending"].clone()).unwrap();
+    assert_eq!(pending, vec![owner2.address()]);
+    assert!(approvals.get("nonce_used").is_none());
 
     // Owner 2 runs the same `safe send` without a bundle file: automatically discovers
     // owner 1's on-chain approval, combines v=1 + ECDSA signature, and executes!

@@ -267,6 +267,7 @@ Safe: 0xYourSafe
 Block: 21000000 (0x...)
 Version: 1.4.1
 Singleton: 0x41675C099F32341bf84BFc5382aF534df5C7461a
+Balance: 1.250000000000000000 ETH
 Nonce: 42
 Threshold: 1
 Owners:
@@ -276,7 +277,36 @@ Guard: none
 Fallback Handler: 0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99
 ```
 
-A v1.5.0 Safe also shows its `Module Guard` (`module_guard` in `--json`).
+A v1.5.0 Safe also shows its `Module Guard` (`module_guard` in `--json`). `--json` gives the balance in wei.
+
+### `safe approvals`
+
+Show how far a Safe transaction is from execution, without scanning logs: for each current owner it reads `approvedHashes(owner, safeTxHash)` at one block (`--block`, default: latest).
+
+```bash
+safe approvals <safeTxHash> --safe <address> --rpc-url <url> [--block <n|hash|tag>]
+
+# Take the hash and Safe from a bundle, and count its offchain signatures too
+safe approvals --bundle tx.json --rpc-url $ETH_RPC_URL
+```
+
+Without `--safe` or `--bundle`, pass a key to use the signer's default Safe, as `send` does.
+
+Output:
+```
+Safe: 0xYourSafe
+Block: 21000000 (0x...)
+SafeTxHash: 0x...
+Safe nonce: 7
+Approvals: 1 / 2 threshold
+Approved on-chain:
+  0xOwner1
+Pending:
+  0xOwner2
+Status: one approval short (a pending owner can execute it directly)
+```
+
+Only current owners count, as in `execTransaction`. Safe 1.3 and later never clear `approvedHashes`, so a transaction that has already executed still shows its approvals. With `--bundle` the command also compares the transaction's nonce with the Safe's and reports when the nonce is used (`nonce_used` in `--json`).
 
 ### `safe config`
 
