@@ -130,7 +130,7 @@ fn test_simulation_debug_output_delegatecall_operation() {
 async fn test_safe_debug_output_on_simulation_failure() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe
@@ -207,7 +207,7 @@ async fn test_safe_debug_output_on_simulation_failure() {
 async fn test_eoa_debug_output_on_simulation_failure() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     // Create temp directory for debug output
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");

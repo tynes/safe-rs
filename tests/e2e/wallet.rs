@@ -11,7 +11,7 @@ use safe_rs::{Account, WalletBuilder, WalletConfig};
 async fn test_wallet_connect_safe() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // First deploy a Safe manually
@@ -46,7 +46,7 @@ async fn test_wallet_connect_safe() {
 async fn test_wallet_connect_safe_with_config() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // First deploy a Safe manually
@@ -78,7 +78,7 @@ async fn test_wallet_connect_safe_with_config() {
 async fn test_wallet_connect_with_config_fails_when_no_safe() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     // Use a unique salt nonce to ensure no Safe exists at the computed address
     let config = WalletConfig::new().with_salt_nonce(U256::from(999_999));
@@ -95,7 +95,7 @@ async fn test_wallet_connect_with_config_fails_when_no_safe() {
 async fn test_wallet_connect_eoa() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
         .connect_eoa(harness._anvil.endpoint_url())
@@ -121,7 +121,7 @@ async fn test_wallet_connect_eoa() {
 async fn test_wallet_deploy_creates_safe() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     // Use a unique salt nonce to ensure no Safe exists
     let config = WalletConfig::new().with_salt_nonce(U256::from(20001));
@@ -157,7 +157,7 @@ async fn test_wallet_deploy_creates_safe() {
 async fn test_wallet_deploy_uses_existing_safe() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // First deploy a Safe manually
@@ -190,7 +190,7 @@ async fn test_wallet_deploy_uses_existing_safe() {
 async fn test_wallet_compute_address() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     let salt_nonce = U256::from(40001);
@@ -220,7 +220,7 @@ async fn test_wallet_compute_address() {
 async fn test_wallet_config_salt_nonce() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     // Two different salt nonces should produce different addresses
     let config1 = WalletConfig::new().with_salt_nonce(U256::from(50001));
@@ -246,7 +246,7 @@ async fn test_wallet_config_salt_nonce() {
 async fn test_wallet_config_additional_owners() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner2 = alloy::primitives::address!("0x1111111111111111111111111111111111111111");
 
     // Config with single owner (default)
@@ -278,7 +278,7 @@ async fn test_wallet_config_additional_owners() {
 async fn test_wallet_deploy_with_threshold() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner2 = alloy::primitives::address!("0x2222222222222222222222222222222222222222");
 
     let config = WalletConfig::new()
@@ -310,7 +310,7 @@ async fn test_wallet_deploy_with_threshold() {
 async fn test_wallet_config_invalid_threshold() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     // Threshold of 2 with only 1 owner (signer) should fail
     let config = WalletConfig::new()
@@ -337,7 +337,7 @@ async fn test_wallet_config_invalid_threshold() {
 async fn test_wallet_config_zero_threshold() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     let config = WalletConfig::new()
         .with_salt_nonce(U256::from(90001))
@@ -358,7 +358,7 @@ async fn test_wallet_config_zero_threshold() {
 async fn test_wallet_builder_signer() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
 
     let signer = builder.signer();
@@ -370,7 +370,7 @@ async fn test_wallet_builder_signer() {
 async fn test_wallet_builder_signer_address() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
 
     let signer_address = builder.signer_address();
@@ -382,7 +382,7 @@ async fn test_wallet_builder_signer_address() {
 async fn test_wallet_builder_provider() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let builder = WalletBuilder::new(harness.provider.clone(), harness.signer.clone());
 
     // Just verify we can call provider() and it returns something
@@ -399,7 +399,7 @@ async fn test_wallet_builder_provider() {
 async fn test_wallet_inner_returns_account() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe
@@ -424,7 +424,7 @@ async fn test_wallet_inner_returns_account() {
 async fn test_wallet_into_inner_consumes() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe
@@ -454,7 +454,7 @@ async fn test_wallet_into_inner_consumes() {
 async fn test_wallet_safe_accessor() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Deploy a Safe
@@ -484,7 +484,7 @@ async fn test_wallet_safe_accessor() {
 async fn test_wallet_eoa_accessor() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     let wallet = WalletBuilder::new(harness.provider.clone(), harness.signer.clone())
         .connect_eoa(harness._anvil.endpoint_url())
@@ -501,7 +501,7 @@ async fn test_wallet_eoa_accessor() {
 async fn test_wallet_generic_methods() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let owner = harness.signer_address();
 
     // Test with Safe wallet

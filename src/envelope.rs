@@ -484,7 +484,8 @@ impl SignedSafeTx {
     /// Splits `packed` into 65-byte chunks, recovers the owner of each chunk against `safe_tx_hash`,
     /// verifies strictly ascending owner address order, and returns the map.
     pub fn unpack_signatures(safe_tx_hash: B256, packed: &[u8]) -> Result<BTreeMap<Address, Bytes>> {
-        if !packed.len().is_multiple_of(65) {
+        let (chunks, rest) = packed.as_chunks::<65>();
+        if !rest.is_empty() {
             return Err(Error::Signing(format!(
                 "invalid packed signatures length {}: must be a multiple of 65",
                 packed.len()
@@ -492,7 +493,7 @@ impl SignedSafeTx {
         }
         let mut map = BTreeMap::new();
         let mut prev: Option<Address> = None;
-        for chunk in packed.chunks_exact(65) {
+        for chunk in chunks {
             let owner = recover_signer(safe_tx_hash, chunk)?;
             if let Some(last) = prev {
                 if owner <= last {

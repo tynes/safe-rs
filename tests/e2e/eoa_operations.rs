@@ -17,7 +17,7 @@ use safe_rs::{Account, Call, CallBuilder, ChainConfig, Eoa, Error, IERC20};
 async fn test_eoa_new_with_explicit_config() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let config = ChainConfig::new(1); // Mainnet
 
     let eoa = Eoa::new(
@@ -36,7 +36,7 @@ async fn test_eoa_new_with_explicit_config() {
 async fn test_eoa_connect_auto_detects_chain() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     let eoa = Eoa::connect(
         harness.provider.clone(),
@@ -56,7 +56,7 @@ async fn test_eoa_connect_auto_detects_chain() {
 async fn test_eoa_nonce_returns_current_nonce() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
 
     let eoa = Eoa::connect(
         harness.provider.clone(),
@@ -87,7 +87,7 @@ async fn test_eoa_nonce_returns_current_nonce() {
 async fn test_builder_call_count() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -116,7 +116,7 @@ async fn test_builder_call_count() {
 async fn test_builder_add_typed() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -143,7 +143,7 @@ async fn test_builder_add_typed() {
 async fn test_builder_simulation_results_none_before_simulate() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -168,7 +168,7 @@ async fn test_builder_simulation_results_none_before_simulate() {
 async fn test_simulate_empty_batch_returns_error() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -187,7 +187,7 @@ async fn test_simulate_empty_batch_returns_error() {
 async fn test_execute_empty_batch_returns_error() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -206,7 +206,7 @@ async fn test_execute_empty_batch_returns_error() {
 async fn test_simulate_rejects_delegatecall() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -228,7 +228,7 @@ async fn test_simulate_rejects_delegatecall() {
 async fn test_execute_rejects_delegatecall() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -254,7 +254,7 @@ async fn test_execute_rejects_delegatecall() {
 async fn test_eoa_single_eth_transfer() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -305,7 +305,7 @@ async fn test_eoa_single_eth_transfer() {
 async fn test_eoa_single_erc20_transfer() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -365,7 +365,7 @@ async fn test_eoa_single_erc20_transfer() {
 async fn test_eoa_nonce_increments_per_transaction() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -409,7 +409,7 @@ async fn test_eoa_nonce_increments_per_transaction() {
 async fn test_eoa_batch_unique_tx_hashes() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -458,7 +458,7 @@ async fn test_eoa_batch_unique_tx_hashes() {
 async fn test_eoa_consecutive_batches_nonce_continuity() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -525,7 +525,7 @@ async fn test_eoa_consecutive_batches_nonce_continuity() {
 async fn test_eoa_stops_on_first_failure_by_default() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -578,7 +578,7 @@ async fn test_eoa_stops_on_first_failure_by_default() {
 async fn test_eoa_continue_on_failure_executes_all() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -637,7 +637,7 @@ async fn test_eoa_continue_on_failure_executes_all() {
 async fn test_eoa_simulate_populates_results() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -679,7 +679,7 @@ async fn test_eoa_simulate_populates_results() {
 async fn test_eoa_total_gas_used() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -721,7 +721,7 @@ async fn test_eoa_total_gas_used() {
 async fn test_eoa_simulate_then_execute() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -774,7 +774,7 @@ async fn test_eoa_simulate_then_execute() {
 async fn test_eoa_simulate_failure_returns_revert_reason() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -829,7 +829,7 @@ async fn test_eoa_simulate_failure_returns_revert_reason() {
 async fn test_eoa_with_debug_output_dir() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     let eoa = Eoa::connect(
@@ -850,7 +850,7 @@ async fn test_eoa_with_debug_output_dir() {
 async fn test_eoa_simulation_success_error_when_not_simulated() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -874,7 +874,7 @@ async fn test_eoa_simulation_success_error_when_not_simulated() {
 async fn test_eoa_simulation_success_error_on_failure() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -913,7 +913,7 @@ async fn test_eoa_simulation_success_error_on_failure() {
 async fn test_eoa_simulation_success_ok_on_success() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -949,7 +949,7 @@ async fn test_eoa_simulation_success_ok_on_success() {
 async fn test_eoa_simulation_success_chained_with_execute() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),
@@ -1005,7 +1005,7 @@ async fn test_eoa_simulation_success_chained_with_execute() {
 async fn test_eoa_mixed_eth_and_erc20_batch() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let eoa = Eoa::connect(
         harness.provider.clone(),
         harness.signer.clone(),

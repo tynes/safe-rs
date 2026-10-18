@@ -53,7 +53,7 @@ async fn set_usdc_balance(
 async fn test_tracing_usdc_transfer() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let sender = harness.signer_address();
     let recipient = address!("0xdead000000000000000000000000000000000000");
     let transfer_amount = U256::from(1_000_000u64); // 1 USDC (6 decimals)
@@ -123,7 +123,7 @@ async fn test_tracing_usdc_transfer() {
 async fn test_tracing_captures_transfer_event() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let sender = harness.signer_address();
     let recipient = address!("0xbeef000000000000000000000000000000000000");
     let transfer_amount = U256::from(500_000u64); // 0.5 USDC
@@ -175,7 +175,7 @@ async fn test_tracing_captures_transfer_event() {
 async fn test_tracing_on_revert() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let sender = harness.signer_address();
     let recipient = address!("0xcafe000000000000000000000000000000000000");
     let transfer_amount = U256::from(1_000_000_000u64); // 1000 USDC - more than we have
@@ -220,7 +220,7 @@ async fn test_tracing_on_revert() {
 async fn test_tracing_disabled_returns_none() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let sender = harness.signer_address();
     let recipient = address!("0xaaaa000000000000000000000000000000000000");
     let transfer_amount = U256::from(100_000u64);
@@ -263,7 +263,7 @@ async fn test_tracing_disabled_returns_none() {
 async fn test_format_traces_output() {
     skip_if_no_rpc!();
 
-    let harness = TestHarness::new().await;
+    let harness = TestHarness::new();
     let sender = harness.signer_address();
     let recipient = address!("0xbbbb000000000000000000000000000000000000");
     let transfer_amount = U256::from(250_000u64);
