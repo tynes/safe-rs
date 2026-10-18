@@ -1226,7 +1226,10 @@ async fn rotation_of_the_middle_owner_keeps_list_order() {
     )
     .unwrap();
     assert_eq!(plan.swaps[0].prev_owner, first);
-    assert_eq!(plan.prepared.params.to, safe, "rotation only: a direct self-call");
+    assert_eq!(
+        plan.prepared.params.to, safe,
+        "rotation only: a direct self-call"
+    );
 
     let outer = h.sign_exec(&plan.prepared, OUTER_GAS).await;
     let receipt = h.send(&outer).await;

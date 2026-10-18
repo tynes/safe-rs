@@ -118,7 +118,9 @@ impl WalletConfig {
 
     /// The Safe deployment addresses in effect.
     pub fn addresses(&self) -> ChainAddresses {
-        self.addresses.clone().unwrap_or_else(ChainAddresses::v1_4_1)
+        self.addresses
+            .clone()
+            .unwrap_or_else(ChainAddresses::v1_4_1)
     }
 
     /// The Safe owners: the signer followed by the additional owners, without
@@ -262,7 +264,13 @@ where
         let safe_address = self.compute_address(&config).await?;
 
         // Check if Safe is deployed
-        if !is_safe_with(&self.provider, safe_address, &[config.addresses().safe_singleton]).await? {
+        if !is_safe_with(
+            &self.provider,
+            safe_address,
+            &[config.addresses().safe_singleton],
+        )
+        .await?
+        {
             return Err(Error::InvalidConfig(format!(
                 "No Safe deployed at computed address {}",
                 safe_address
@@ -325,7 +333,8 @@ where
     /// Predicts the Safe address for `config` and returns it with the initializer.
     async fn predict(&self, config: &WalletConfig) -> Result<(Address, Bytes)> {
         let addresses = config.addresses();
-        let creation_code = fetch_proxy_creation_code(&self.provider, addresses.proxy_factory).await?;
+        let creation_code =
+            fetch_proxy_creation_code(&self.provider, addresses.proxy_factory).await?;
         Ok(predict_safe_address(
             addresses.proxy_factory,
             addresses.safe_singleton,
@@ -364,7 +373,11 @@ where
 
     /// Like [`WalletBuilder::deploy`], and also reports the deployment
     /// transaction hash (`None` when the Safe was already deployed).
-    pub async fn deploy_detailed(&self, rpc_url: Url, config: WalletConfig) -> Result<SafeDeployment> {
+    pub async fn deploy_detailed(
+        &self,
+        rpc_url: Url,
+        config: WalletConfig,
+    ) -> Result<SafeDeployment> {
         config.validate(self.signer.address())?;
         let addresses = config.addresses();
         let (safe_address, initializer) = self.predict(&config).await?;
@@ -393,9 +406,12 @@ where
                 reason: format!("Failed to send deployment transaction: {}", e),
             })?;
 
-        let receipt = pending_tx.get_receipt().await.map_err(|e| Error::ExecutionFailed {
-            reason: format!("Failed to get deployment receipt: {}", e),
-        })?;
+        let receipt = pending_tx
+            .get_receipt()
+            .await
+            .map_err(|e| Error::ExecutionFailed {
+                reason: format!("Failed to get deployment receipt: {}", e),
+            })?;
 
         // Check if the transaction was successful
         if !receipt.inner.inner.status() {
@@ -411,7 +427,10 @@ where
         // to avoid stale-read issues from different RPC nodes
         if !is_safe_with(&wallet_provider, safe_address, &[addresses.safe_singleton]).await? {
             return Err(Error::ExecutionFailed {
-                reason: format!("Deployment failed: no Safe at expected address {}", safe_address),
+                reason: format!(
+                    "Deployment failed: no Safe at expected address {}",
+                    safe_address
+                ),
             });
         }
 
@@ -519,7 +538,9 @@ impl<A: Account> Wallet<A> {
         data: Bytes,
         operation: Operation,
     ) -> Result<ExecutionResult> {
-        self.account.execute_single(to, value, data, operation).await
+        self.account
+            .execute_single(to, value, data, operation)
+            .await
     }
 
     /// Returns a reference to the underlying account.

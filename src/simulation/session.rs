@@ -529,10 +529,16 @@ mod tests {
             input: Bytes::from(vec![1, 2]),
         };
         let tx = SimTx::from_outer(&outer, TxChecks::STRICT);
-        assert_eq!((tx.from, tx.to, tx.value), (outer.from, outer.to, outer.value));
+        assert_eq!(
+            (tx.from, tx.to, tx.value),
+            (outer.from, outer.to, outer.value)
+        );
         assert_eq!(tx.input, outer.input);
         assert_eq!((tx.gas_limit, tx.nonce), (50_000, Some(9)));
-        assert_eq!((tx.max_fee_per_gas, tx.max_priority_fee_per_gas), (30, Some(2)));
+        assert_eq!(
+            (tx.max_fee_per_gas, tx.max_priority_fee_per_gas),
+            (30, Some(2))
+        );
         assert_eq!(tx.checks, TxChecks::STRICT);
     }
 

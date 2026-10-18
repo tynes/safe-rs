@@ -169,7 +169,9 @@ async fn test_simulate_then_execute() {
         .expect("Simulation should succeed");
 
     // Inspect simulation result
-    let sim_result = builder.simulation_result().expect("Should have simulation result");
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
     assert!(sim_result.success, "Simulation should succeed");
     assert!(sim_result.gas_used > 0, "Should use some gas");
 
@@ -228,7 +230,11 @@ async fn test_nonce_increments() {
 
     // Check nonce incremented
     let nonce_after_first = safe.nonce().await.expect("Failed to get nonce");
-    assert_eq!(nonce_after_first, U256::from(1), "Nonce should be 1 after first tx");
+    assert_eq!(
+        nonce_after_first,
+        U256::from(1),
+        "Nonce should be 1 after first tx"
+    );
 
     // Execute another transaction
     safe.execute_single(
@@ -242,5 +248,9 @@ async fn test_nonce_increments() {
 
     // Check nonce incremented again
     let nonce_after_second = safe.nonce().await.expect("Failed to get nonce");
-    assert_eq!(nonce_after_second, U256::from(2), "Nonce should be 2 after second tx");
+    assert_eq!(
+        nonce_after_second,
+        U256::from(2),
+        "Nonce should be 2 after second tx"
+    );
 }

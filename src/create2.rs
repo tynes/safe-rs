@@ -95,7 +95,11 @@ pub fn compute_create2_address(
 ///
 /// Proxy creation and initialization happen in the same call, so the proxy is
 /// never left uninitialized and claimable.
-pub fn encode_create_proxy_with_nonce(singleton: Address, initializer: Bytes, salt_nonce: U256) -> Bytes {
+pub fn encode_create_proxy_with_nonce(
+    singleton: Address,
+    initializer: Bytes,
+    salt_nonce: U256,
+) -> Bytes {
     Bytes::from(
         ISafeProxyFactory::createProxyWithNonceCall {
             _singleton: singleton,
@@ -136,7 +140,8 @@ pub fn predict_safe_address(
     creation_code: &Bytes,
 ) -> (Address, Bytes) {
     let initializer = encode_setup_call(owners, threshold, fallback_handler);
-    let address = compute_create2_address(factory, singleton, &initializer, salt_nonce, creation_code);
+    let address =
+        compute_create2_address(factory, singleton, &initializer, salt_nonce, creation_code);
     (address, initializer)
 }
 
@@ -186,21 +191,11 @@ mod tests {
         let salt_nonce = U256::from(42);
         let creation_code = Bytes::from(vec![0x60, 0x80, 0x60, 0x40]);
 
-        let addr1 = compute_create2_address(
-            factory,
-            singleton,
-            &initializer,
-            salt_nonce,
-            &creation_code,
-        );
+        let addr1 =
+            compute_create2_address(factory, singleton, &initializer, salt_nonce, &creation_code);
 
-        let addr2 = compute_create2_address(
-            factory,
-            singleton,
-            &initializer,
-            salt_nonce,
-            &creation_code,
-        );
+        let addr2 =
+            compute_create2_address(factory, singleton, &initializer, salt_nonce, &creation_code);
 
         assert_eq!(addr1, addr2, "CREATE2 address should be deterministic");
     }
@@ -229,6 +224,9 @@ mod tests {
             &creation_code,
         );
 
-        assert_ne!(addr1, addr2, "Different salt nonces should produce different addresses");
+        assert_ne!(
+            addr1, addr2,
+            "Different salt nonces should produce different addresses"
+        );
     }
 }

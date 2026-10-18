@@ -43,7 +43,9 @@ async fn test_simulation_gas_matches_execution() {
         .await
         .expect("Simulation should succeed");
 
-    let sim_result = builder.simulation_result().expect("Should have simulation result");
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
     let simulated_gas = sim_result.gas_used;
 
     // Execute and get receipt
@@ -67,16 +69,13 @@ async fn test_simulation_gas_matches_execution() {
     // The actual transaction goes through Safe.execTransaction which adds overhead.
     // The key test is that simulation succeeds and provides a usable estimate.
     // We just verify that both values are non-zero and reasonable.
-    assert!(
-        simulated_gas > 0,
-        "Simulated gas should be non-zero"
-    );
-    assert!(
-        actual_gas > 0,
-        "Actual gas should be non-zero"
-    );
+    assert!(simulated_gas > 0, "Simulated gas should be non-zero");
+    assert!(actual_gas > 0, "Actual gas should be non-zero");
     // The execution succeeded, which means the gas estimation was sufficient
-    assert!(exec_result.success, "Transaction should succeed with simulated gas");
+    assert!(
+        exec_result.success,
+        "Transaction should succeed with simulated gas"
+    );
 }
 
 /// Test that simulation logs match execution logs (Transfer events)
@@ -133,7 +132,10 @@ async fn test_simulation_logs_match_execution() {
         .await
         .expect("Simulation should succeed");
 
-    let sim_result = builder.simulation_result().expect("Should have simulation result").clone();
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result")
+        .clone();
 
     // Check simulation emitted Transfer event
     assert!(
@@ -235,7 +237,9 @@ async fn test_simulation_success_matches_execution() {
         .await
         .expect("Simulation should succeed");
 
-    let sim_result = builder.simulation_result().expect("Should have simulation result");
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
     assert!(sim_result.success, "Simulation should report success");
 
     // Execute - should also succeed
@@ -379,7 +383,9 @@ async fn test_simulation_multiple_transfers() {
         .await
         .expect("Simulation should succeed");
 
-    let sim_result = builder.simulation_result().expect("Should have simulation result");
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
     assert!(sim_result.success, "Simulation should succeed");
 
     // Should have multiple Transfer events

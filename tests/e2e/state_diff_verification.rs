@@ -47,7 +47,9 @@ async fn test_state_diff_balance_changes() {
         .await
         .expect("Simulation should succeed");
 
-    let sim_result = builder.simulation_result().expect("Should have simulation result");
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
     assert!(sim_result.success, "Simulation should succeed");
 
     // Check state diff contains recipient balance change
@@ -142,7 +144,10 @@ async fn test_state_diff_storage_changes() {
     let recipient_balance_slot = compute_balance_slot(recipient, balance_mapping_slot);
 
     // Get pre-state storage via RPC
-    let pre_safe_storage = harness.get_storage_at(token_address, safe_balance_slot).await.unwrap();
+    let pre_safe_storage = harness
+        .get_storage_at(token_address, safe_balance_slot)
+        .await
+        .unwrap();
     let pre_recipient_storage = harness
         .get_storage_at(token_address, recipient_balance_slot)
         .await
@@ -167,7 +172,9 @@ async fn test_state_diff_storage_changes() {
         .await
         .expect("Simulation should succeed");
 
-    let sim_result = builder.simulation_result().expect("Should have simulation result");
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
     assert!(sim_result.success, "Simulation should succeed");
 
     // Check state diff for token storage changes
@@ -175,7 +182,10 @@ async fn test_state_diff_storage_changes() {
 
     // Verify token contract is in state diff
     if let Some(post_token_state) = state_diff.post.get(&token_address) {
-        println!("Token state diff storage changes: {:?}", post_token_state.storage.len());
+        println!(
+            "Token state diff storage changes: {:?}",
+            post_token_state.storage.len()
+        );
 
         // The storage should have changed
         assert!(
@@ -189,7 +199,10 @@ async fn test_state_diff_storage_changes() {
     assert!(exec_result.success);
 
     // Get post-state storage via RPC
-    let post_safe_storage = harness.get_storage_at(token_address, safe_balance_slot).await.unwrap();
+    let post_safe_storage = harness
+        .get_storage_at(token_address, safe_balance_slot)
+        .await
+        .unwrap();
     let post_recipient_storage = harness
         .get_storage_at(token_address, recipient_balance_slot)
         .await
@@ -242,7 +255,10 @@ async fn test_state_diff_nonce_increment() {
 
     // Safe nonce is stored at slot 5
     let nonce_slot = U256::from(5);
-    let pre_nonce_storage = harness.get_storage_at(safe_address, nonce_slot).await.unwrap();
+    let pre_nonce_storage = harness
+        .get_storage_at(safe_address, nonce_slot)
+        .await
+        .unwrap();
     println!("Pre nonce from storage: {:?}", pre_nonce_storage);
 
     let recipient = alloy::primitives::address!("0x3333333333333333333333333333333333333333");
@@ -266,7 +282,10 @@ async fn test_state_diff_nonce_increment() {
     assert_eq!(post_nonce, U256::from(1), "Nonce should increment to 1");
 
     // Verify via storage
-    let post_nonce_storage = harness.get_storage_at(safe_address, nonce_slot).await.unwrap();
+    let post_nonce_storage = harness
+        .get_storage_at(safe_address, nonce_slot)
+        .await
+        .unwrap();
     println!("Post nonce from storage: {:?}", post_nonce_storage);
 
     assert_eq!(
@@ -318,7 +337,9 @@ async fn test_state_diff_multiple_accounts() {
         .await
         .expect("Simulation should succeed");
 
-    let sim_result = builder.simulation_result().expect("Should have simulation result");
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
     assert!(sim_result.success);
 
     // State diff should contain both recipients
@@ -330,7 +351,10 @@ async fn test_state_diff_multiple_accounts() {
 
     println!("State diff has recipient1: {}", has_recipient1);
     println!("State diff has recipient2: {}", has_recipient2);
-    println!("Total accounts in post state diff: {}", state_diff.post.len());
+    println!(
+        "Total accounts in post state diff: {}",
+        state_diff.post.len()
+    );
 
     // Execute
     let exec_result = builder.execute().await.expect("Execution should succeed");
@@ -393,7 +417,9 @@ async fn test_state_diff_pre_values_match_rpc() {
         .await
         .expect("Simulation should succeed");
 
-    let sim_result = builder.simulation_result().expect("Should have simulation result");
+    let sim_result = builder
+        .simulation_result()
+        .expect("Should have simulation result");
     let state_diff = &sim_result.state_diff;
 
     // Check if Safe's pre-state balance matches what we queried

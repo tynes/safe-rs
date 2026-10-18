@@ -213,7 +213,10 @@ impl SimulationDebugOutput {
                     .iter()
                     .map(|t| format!("0x{}", alloy::primitives::hex::encode(t)))
                     .collect(),
-                data: format!("0x{}", alloy::primitives::hex::encode(log.data.data.as_ref())),
+                data: format!(
+                    "0x{}",
+                    alloy::primitives::hex::encode(log.data.data.as_ref())
+                ),
             })
             .collect();
 
@@ -401,7 +404,11 @@ where
     ///
     /// The `account_address` is the Safe or EOA address that will be recorded
     /// in the debug output.
-    pub fn with_debug_output_dir(mut self, dir: impl Into<PathBuf>, account_address: Address) -> Self {
+    pub fn with_debug_output_dir(
+        mut self,
+        dir: impl Into<PathBuf>,
+        account_address: Address,
+    ) -> Self {
         self.debug_output_dir = Some(dir.into());
         self.debug_account_address = Some(account_address);
         self
@@ -518,7 +525,11 @@ where
     ///
     /// All calls are simulated, including those after a failure; a failed call
     /// still consumes the sender nonce, as it would on chain.
-    pub async fn simulate_calls(&self, from: Address, calls: &[Call]) -> Result<Vec<SimulationResult>> {
+    pub async fn simulate_calls(
+        &self,
+        from: Address,
+        calls: &[Call],
+    ) -> Result<Vec<SimulationResult>> {
         let mut db = self.fork_for(from).await?;
         calls
             .iter()
@@ -552,7 +563,9 @@ where
         if !result.success {
             return Err(Error::GasEstimation(format!(
                 "Simulation failed: {}",
-                result.revert_reason.unwrap_or_else(|| "unknown".to_string())
+                result
+                    .revert_reason
+                    .unwrap_or_else(|| "unknown".to_string())
             )));
         }
 
@@ -636,7 +649,9 @@ where
         operation: Operation,
         result: &SimulationResult,
     ) {
-        if let (Some(dir), Some(account_address)) = (&self.debug_output_dir, self.debug_account_address) {
+        if let (Some(dir), Some(account_address)) =
+            (&self.debug_output_dir, self.debug_account_address)
+        {
             let debug_output = SimulationDebugOutput::new(
                 self.chain_id,
                 account_address,
@@ -654,52 +669,52 @@ where
 
 /// Decodes `Error(string)` and `Panic(uint256)` revert payloads; falls back to hex.
 pub fn decode_revert_reason(output: &[u8]) -> String {
-        if output.len() < 4 {
-            return "Unknown revert".to_string();
-        }
+    if output.len() < 4 {
+        return "Unknown revert".to_string();
+    }
 
-        // Check for Error(string) selector: 0x08c379a0
-        if output[0..4] == [0x08, 0xc3, 0x79, 0xa0] && output.len() >= 68 {
-            // Skip selector (4) + offset (32) + length position
-            let offset = 4 + 32;
-            if output.len() > offset + 32 {
-                let len = u32::from_be_bytes([
-                    output[offset + 28],
-                    output[offset + 29],
-                    output[offset + 30],
-                    output[offset + 31],
-                ]) as usize;
+    // Check for Error(string) selector: 0x08c379a0
+    if output[0..4] == [0x08, 0xc3, 0x79, 0xa0] && output.len() >= 68 {
+        // Skip selector (4) + offset (32) + length position
+        let offset = 4 + 32;
+        if output.len() > offset + 32 {
+            let len = u32::from_be_bytes([
+                output[offset + 28],
+                output[offset + 29],
+                output[offset + 30],
+                output[offset + 31],
+            ]) as usize;
 
-                let str_start = offset + 32;
-                if output.len() >= str_start + len {
-                    if let Ok(s) = String::from_utf8(output[str_start..str_start + len].to_vec()) {
-                        return s;
-                    }
+            let str_start = offset + 32;
+            if output.len() >= str_start + len {
+                if let Ok(s) = String::from_utf8(output[str_start..str_start + len].to_vec()) {
+                    return s;
                 }
             }
         }
+    }
 
-        // Check for Panic(uint256) selector: 0x4e487b71
-        if output[0..4] == [0x4e, 0x48, 0x7b, 0x71] && output.len() >= 36 {
-            let panic_code =
-                u32::from_be_bytes([output[32], output[33], output[34], output[35]]) as usize;
-            return match panic_code {
-                0x00 => "Panic: generic/compiler panic",
-                0x01 => "Panic: assertion failed",
-                0x11 => "Panic: arithmetic overflow/underflow",
-                0x12 => "Panic: division by zero",
-                0x21 => "Panic: invalid enum value",
-                0x22 => "Panic: access to incorrectly encoded storage",
-                0x31 => "Panic: pop on empty array",
-                0x32 => "Panic: array out of bounds",
-                0x41 => "Panic: memory overflow",
-                0x51 => "Panic: call to zero-initialized function",
-                _ => "Panic: unknown code",
-            }
-            .to_string();
+    // Check for Panic(uint256) selector: 0x4e487b71
+    if output[0..4] == [0x4e, 0x48, 0x7b, 0x71] && output.len() >= 36 {
+        let panic_code =
+            u32::from_be_bytes([output[32], output[33], output[34], output[35]]) as usize;
+        return match panic_code {
+            0x00 => "Panic: generic/compiler panic",
+            0x01 => "Panic: assertion failed",
+            0x11 => "Panic: arithmetic overflow/underflow",
+            0x12 => "Panic: division by zero",
+            0x21 => "Panic: invalid enum value",
+            0x22 => "Panic: access to incorrectly encoded storage",
+            0x31 => "Panic: pop on empty array",
+            0x32 => "Panic: array out of bounds",
+            0x41 => "Panic: memory overflow",
+            0x51 => "Panic: call to zero-initialized function",
+            _ => "Panic: unknown code",
         }
+        .to_string();
+    }
 
-        format!("Revert: 0x{}", alloy::primitives::hex::encode(output))
+    format!("Revert: 0x{}", alloy::primitives::hex::encode(output))
 }
 
 /// Returns the decoded revert reason of the deepest reverted call in a trace.

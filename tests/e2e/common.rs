@@ -6,7 +6,9 @@ use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
-use safe_rs::{compute_create2_address, encode_setup_call, ChainAddresses, ISafeProxyFactory, Safe};
+use safe_rs::{
+    compute_create2_address, encode_setup_call, ChainAddresses, ISafeProxyFactory, Safe,
+};
 
 /// Macro to skip tests when ETH_RPC_URL is not set
 #[macro_export]
@@ -101,10 +103,7 @@ impl TestHarness {
 
         // Spawn Anvil with forking (use cancun hardfork for PUSH0 opcode support)
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let anvil = Anvil::new()
-            .fork(rpc_url)
-            .args(args_ref)
-            .spawn();
+        let anvil = Anvil::new().fork(rpc_url).args(args_ref).spawn();
 
         // Get the first default account's private key
         let signer: PrivateKeySigner = anvil.keys()[0].clone().into();
@@ -164,7 +163,8 @@ impl TestHarness {
             .wallet(wallet)
             .connect_http(self._anvil.endpoint_url());
 
-        let factory_with_wallet = ISafeProxyFactory::new(self.addresses.proxy_factory, &wallet_provider);
+        let factory_with_wallet =
+            ISafeProxyFactory::new(self.addresses.proxy_factory, &wallet_provider);
 
         // Deploy the Safe
         let pending_tx = factory_with_wallet
@@ -188,12 +188,7 @@ impl TestHarness {
         &self,
         safe_address: Address,
     ) -> Result<Safe<TestProvider>, Box<dyn std::error::Error>> {
-        let safe = Safe::connect(
-            self.provider.clone(),
-            self.signer.clone(),
-            safe_address,
-        )
-        .await?;
+        let safe = Safe::connect(self.provider.clone(), self.signer.clone(), safe_address).await?;
         Ok(safe)
     }
 
@@ -219,10 +214,7 @@ impl TestHarness {
         to: Address,
         amount: U256,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let params = serde_json::json!([
-            format!("{:?}", to),
-            format!("0x{:x}", amount)
-        ]);
+        let params = serde_json::json!([format!("{:?}", to), format!("0x{:x}", amount)]);
 
         // anvil_setBalance returns null on success
         self.provider
@@ -272,6 +264,4 @@ impl TestHarness {
 
         Ok(())
     }
-
 }
-

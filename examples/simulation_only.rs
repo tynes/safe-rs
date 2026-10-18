@@ -163,7 +163,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(simulated) => {
             println!("  ✓ Raw calldata simulation successful!");
-            println!("    Gas used: {}", simulated.simulation_result().unwrap().gas_used);
+            println!(
+                "    Gas used: {}",
+                simulated.simulation_result().unwrap().gas_used
+            );
         }
         Err(e) => {
             println!("  ✗ Raw calldata simulation failed: {}", e);
@@ -184,7 +187,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(simulated) => {
             println!("  ✓ ETH transfer simulation successful!");
-            println!("    Gas used: {}", simulated.simulation_result().unwrap().gas_used);
+            println!(
+                "    Gas used: {}",
+                simulated.simulation_result().unwrap().gas_used
+            );
         }
         Err(e) => {
             println!("  ✗ ETH transfer simulation failed: {}", e);

@@ -53,9 +53,13 @@ async fn test_safe_connect_auto_detects_chain() {
         .await
         .expect("Failed to deploy Safe");
 
-    let safe = Safe::connect(harness.provider.clone(), harness.signer.clone(), safe_address)
-        .await
-        .expect("Failed to connect");
+    let safe = Safe::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        safe_address,
+    )
+    .await
+    .expect("Failed to connect");
 
     // Should detect mainnet chain ID (1) from forked Anvil
     assert_eq!(safe.address(), safe_address);
@@ -79,10 +83,14 @@ async fn test_safe_with_debug_output_dir() {
 
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
-    let safe = Safe::connect(harness.provider.clone(), harness.signer.clone(), safe_address)
-        .await
-        .expect("Failed to connect")
-        .with_debug_output_dir(temp_dir.path());
+    let safe = Safe::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        safe_address,
+    )
+    .await
+    .expect("Failed to connect")
+    .with_debug_output_dir(temp_dir.path());
 
     // Verify debug output dir is set
     assert_eq!(safe.debug_output_dir(), Some(temp_dir.path()));
@@ -188,7 +196,10 @@ async fn test_safe_is_owner_true_for_owner() {
         .await
         .expect("Failed to create Safe client");
 
-    let is_owner = safe.is_owner(owner).await.expect("Failed to check is_owner");
+    let is_owner = safe
+        .is_owner(owner)
+        .await
+        .expect("Failed to check is_owner");
     assert!(is_owner);
 }
 
@@ -302,7 +313,10 @@ async fn test_safe_verify_single_owner_fails_not_owner() {
     let result = safe.verify_single_owner().await;
     assert!(result.is_err());
     match result {
-        Err(safe_rs::Error::NotOwner { signer, safe: safe_addr }) => {
+        Err(safe_rs::Error::NotOwner {
+            signer,
+            safe: safe_addr,
+        }) => {
             assert_eq!(signer, harness.signer_address());
             assert_eq!(safe_addr, safe_address);
         }

@@ -98,37 +98,37 @@ pub use chain::{ChainAddresses, ChainConfig};
 #[cfg(feature = "simulation")]
 pub use config::{check_config_post_state, check_new_guards_allow_followup};
 pub use config::{plan_config, ConfigChanges, ConfigOp, ConfigPlan, ExpectedConfig};
-pub use contracts::{IERC20, IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup};
+pub use contracts::{IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup, IERC20};
 pub use create2::{
     compute_create2_address, encode_create_proxy_with_nonce, encode_setup_call,
     fetch_proxy_creation_code, predict_safe_address,
 };
 pub use encoding::SafeTxParams;
-pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
-pub use error::{Error, Result};
-#[cfg(feature = "simulation")]
-pub use exec::{simulate_approve_hash, simulate_exec, simulate_exec_with_threshold, ExecSimulation};
-pub use exec::{submit_and_wait, Submission};
-#[cfg(feature = "hd-wallet")]
-pub use hd::HdWallet;
-#[cfg(feature = "ledger")]
-pub use ledger::LedgerKeys;
-pub use safe::{
-    detect_addresses, is_gs013_revert, is_safe, ExecutionResult, Safe, SafeBuilder,
-    SAFE_SINGLETON_SLOT,
-};
 pub use envelope::{
     batch_params, decode_exec_calldata, recover_signer, BatchTarget, DecodedExecTransaction,
     PreparedSafeTx, SafeTxGasPolicy, SignedSafeTx,
 };
+pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
+pub use error::{Error, Result};
+#[cfg(feature = "simulation")]
+pub use exec::{
+    simulate_approve_hash, simulate_exec, simulate_exec_with_threshold, ExecSimulation,
+};
+pub use exec::{submit_and_wait, Submission};
+#[cfg(feature = "hd-wallet")]
+pub use hd::HdWallet;
 pub use inspect::{
     has_module_guard, is_safe_with, prev_in_list, read_approved_owners, read_safe_state,
     require_batch_target, ModuleList, ReadSafeStateOptions, SafeState,
 };
-pub use outer::{
-    decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
-};
+#[cfg(feature = "ledger")]
+pub use ledger::LedgerKeys;
+pub use outer::{decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx};
 pub use rotation::{OwnerSwap, RotationPlan};
+pub use safe::{
+    detect_addresses, is_gs013_revert, is_safe, ExecutionResult, Safe, SafeBuilder,
+    SAFE_SINGLETON_SLOT,
+};
 #[cfg(feature = "simulation")]
 pub use simulation::{
     ethereum_spec_at, AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator,

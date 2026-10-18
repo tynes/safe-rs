@@ -1,0 +1,5 @@
+# Commits that `git blame` skips. GitHub reads this file; locally, run
+# `git config blame.ignoreRevsFile .git-blame-ignore-revs`.
+
+# style: format the tree with cargo fmt
+88a4ce4c35dc886a51bc834f728c25270ba14a94

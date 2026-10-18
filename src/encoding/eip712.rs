@@ -258,7 +258,8 @@ mod tests {
         let hash = compute_transaction_hash(domain, safe_tx_hash);
 
         // The result should be keccak256("\x19\x01" + 64 zero bytes)
-        let expected_input = hex!("1901").iter()
+        let expected_input = hex!("1901")
+            .iter()
             .chain([0u8; 64].iter())
             .copied()
             .collect::<Vec<u8>>();

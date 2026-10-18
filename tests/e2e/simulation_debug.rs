@@ -7,7 +7,7 @@ use std::fs;
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
 use safe_rs::simulation::{SimulationDebugOutput, SimulationResult};
-use safe_rs::{Account, CallBuilder, Eoa, IERC20, Operation, Safe};
+use safe_rs::{Account, CallBuilder, Eoa, Operation, Safe, IERC20};
 
 // ============================================================================
 // SimulationDebugOutput Unit Tests
@@ -34,8 +34,15 @@ fn test_simulation_debug_output_new() {
         traces: None,
     };
 
-    let debug_output =
-        SimulationDebugOutput::new(chain_id, account_address, to, value, &data, &operation, &result);
+    let debug_output = SimulationDebugOutput::new(
+        chain_id,
+        account_address,
+        to,
+        value,
+        &data,
+        &operation,
+        &result,
+    );
 
     assert_eq!(debug_output.chain_id, chain_id);
     assert_eq!(debug_output.account_address, account_address);
@@ -71,8 +78,15 @@ fn test_simulation_debug_output_write_to_dir() {
         traces: None,
     };
 
-    let debug_output =
-        SimulationDebugOutput::new(chain_id, account_address, to, value, &data, &operation, &result);
+    let debug_output = SimulationDebugOutput::new(
+        chain_id,
+        account_address,
+        to,
+        value,
+        &data,
+        &operation,
+        &result,
+    );
 
     // Write to temp directory
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -115,8 +129,15 @@ fn test_simulation_debug_output_delegatecall_operation() {
         traces: None,
     };
 
-    let debug_output =
-        SimulationDebugOutput::new(chain_id, account_address, to, value, &data, &operation, &result);
+    let debug_output = SimulationDebugOutput::new(
+        chain_id,
+        account_address,
+        to,
+        value,
+        &data,
+        &operation,
+        &result,
+    );
 
     assert_eq!(debug_output.call.operation, "DelegateCall");
 }
@@ -144,10 +165,14 @@ async fn test_safe_debug_output_on_simulation_failure() {
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Configure Safe with debug output directory
-    let safe = Safe::connect(harness.provider.clone(), harness.signer.clone(), safe_address)
-        .await
-        .expect("Failed to connect")
-        .with_debug_output_dir(temp_dir.path());
+    let safe = Safe::connect(
+        harness.provider.clone(),
+        harness.signer.clone(),
+        safe_address,
+    )
+    .await
+    .expect("Failed to connect")
+    .with_debug_output_dir(temp_dir.path());
 
     // Deploy a token without giving Safe any balance
     let token_address = harness

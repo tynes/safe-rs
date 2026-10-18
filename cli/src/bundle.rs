@@ -294,7 +294,6 @@ impl BundleFile {
     }
 }
 
-
 /// Parses bundle JSON content and returns its `Vec<Call>`
 #[cfg(test)]
 pub fn parse_bundle(content: &str) -> Result<Vec<Call>> {

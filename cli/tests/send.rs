@@ -140,7 +140,10 @@ fn send_with_payer_only(
         .args(args)
         .args(["--safe", &safe.to_string()])
         .args(["--rpc-url", h.url().as_str()])
-        .args(["--payer-private-key", &hex::encode_prefixed(payer.to_bytes())])
+        .args([
+            "--payer-private-key",
+            &hex::encode_prefixed(payer.to_bytes()),
+        ])
         .arg("--json")
         .env("SAFE_RS_HOME", home);
     for name in [
@@ -519,12 +522,7 @@ async fn multi_owner_onchain_approve_hash_flow() {
         &home,
         safe,
         &owner1,
-        &[
-            &recipient.to_string(),
-            "--value",
-            "50",
-            "--approve-hash",
-        ],
+        &[&recipient.to_string(), "--value", "50", "--approve-hash"],
     )
     .json();
     assert_eq!(approved["success"], true);
@@ -625,7 +623,11 @@ async fn send_and_call_default_to_the_signers_one_of_one_safe() {
     }
 
     // Before it is deployed, nothing is guessed.
-    let missing = safe_cli(&h, home, &["send", &recipient.to_string(), "--private-key", &key]);
+    let missing = safe_cli(
+        &h,
+        home,
+        &["send", &recipient.to_string(), "--private-key", &key],
+    );
     assert!(!missing.ok);
     assert!(
         missing.stderr.contains("nothing is deployed"),
@@ -634,7 +636,11 @@ async fn send_and_call_default_to_the_signers_one_of_one_safe() {
     );
     let anonymous = safe_cli(&h, home, &["call", &recipient.to_string(), "owner()"]);
     assert!(!anonymous.ok);
-    assert!(anonymous.stderr.contains("No Safe specified"), "{}", anonymous.stderr);
+    assert!(
+        anonymous.stderr.contains("No Safe specified"),
+        "{}",
+        anonymous.stderr
+    );
 
     let created = safe_cli(
         &h,

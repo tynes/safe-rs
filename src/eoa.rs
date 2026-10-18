@@ -5,9 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::network::primitives::ReceiptResponse;
 use alloy::network::TransactionBuilder;
+use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::primitives::{Address, Bytes, TxHash, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
@@ -164,9 +164,14 @@ where
     ///
     /// # Panics
     /// Panics if called before adding any calls to the batch.
-    #[allow(clippy::expect_used, reason = "documented panic: misuse of the builder API")]
+    #[allow(
+        clippy::expect_used,
+        reason = "documented panic: misuse of the builder API"
+    )]
     pub fn with_gas_limit(mut self, gas_limit: u64) -> Self {
-        let last_call = self.calls.last_mut()
+        let last_call = self
+            .calls
+            .last_mut()
             .expect("with_gas_limit called before adding any calls");
         last_call.gas_limit = Some(gas_limit);
         self
@@ -196,7 +201,9 @@ where
         }
 
         // One fork for the whole batch: each call sees the effects of the ones before it.
-        let simulation_results = simulator.simulate_calls(self.eoa.address(), &self.calls).await?;
+        let simulation_results = simulator
+            .simulate_calls(self.eoa.address(), &self.calls)
+            .await?;
 
         self.aggregated_result = Some(Self::aggregate_results(&simulation_results));
         self.simulation_results = Some(simulation_results);
@@ -229,7 +236,10 @@ where
                             reason: format!(
                                 "Call {} failed: {}",
                                 i,
-                                result.revert_reason.clone().unwrap_or_else(|| "Unknown".to_string())
+                                result
+                                    .revert_reason
+                                    .clone()
+                                    .unwrap_or_else(|| "Unknown".to_string())
                             ),
                         });
                     }
@@ -271,7 +281,10 @@ where
     /// The gas call `i` used in `simulate()`, if it was simulated
     #[cfg(feature = "simulation")]
     fn simulated_gas(&self, i: usize) -> Option<u64> {
-        self.simulation_results.as_ref()?.get(i).map(|r| r.gas_spent)
+        self.simulation_results
+            .as_ref()?
+            .get(i)
+            .map(|r| r.gas_spent)
     }
 
     /// Without the `simulation` feature no call is ever simulated
@@ -313,12 +326,13 @@ where
                 gas_used + gas_used / 10
             } else {
                 // Build transaction for gas estimation
-                let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
-                    .with_from(self.eoa.address())
-                    .with_to(call.to)
-                    .with_value(call.value)
-                    .with_input(call.data.clone())
-                    .with_nonce(nonce);
+                let tx_request =
+                    <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
+                        .with_from(self.eoa.address())
+                        .with_to(call.to)
+                        .with_value(call.value)
+                        .with_input(call.data.clone())
+                        .with_nonce(nonce);
 
                 let gas_limit = self
                     .eoa
@@ -358,12 +372,14 @@ where
                 })?;
 
             // Wait for receipt
-            let receipt = pending_tx.get_receipt().await.map_err(|e| {
-                Error::TransactionSendFailed {
-                    index: i,
-                    reason: e.to_string(),
-                }
-            })?;
+            let receipt =
+                pending_tx
+                    .get_receipt()
+                    .await
+                    .map_err(|e| Error::TransactionSendFailed {
+                        index: i,
+                        reason: e.to_string(),
+                    })?;
 
             let success = receipt.status();
             let tx_hash = receipt.transaction_hash;
@@ -485,7 +501,10 @@ where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
 {
     type Provider = P;
-    type Builder<'a> = EoaBuilder<'a, P> where Self: 'a;
+    type Builder<'a>
+        = EoaBuilder<'a, P>
+    where
+        Self: 'a;
 
     fn address(&self) -> Address {
         self.signer.address()

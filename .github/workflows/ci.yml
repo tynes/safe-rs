@@ -1,5 +1,6 @@
-# Lints and tests every pull request and every push to master, with the
-# checks the release workflow runs before it publishes.
+# Checks the formatting of every pull request and every push to master, and
+# lints and tests them with the checks the release workflow runs before it
+# publishes.
 name: CI
 
 on:
@@ -18,6 +19,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Rustfmt
+        run: cargo fmt -- --check
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
