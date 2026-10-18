@@ -176,6 +176,37 @@ impl TxChecks {
     };
 }
 
+/// The EVM spec active at `timestamp` on a known Ethereum L1 network
+/// (mainnet, Sepolia, Holesky, Hoodi), or `None` for any other chain.
+///
+/// Forks since the Merge activate by timestamp, so this is the spec a block
+/// with that timestamp executes under; earlier timestamps give `None`.
+/// Blob-parameter-only forks (BPO) keep the execution rules of the fork
+/// before them.
+pub fn ethereum_spec_at(chain_id: u64, timestamp: u64) -> Option<SpecId> {
+    use alloy_chains::{Chain, NamedChain};
+    use alloy_hardforks::EthereumHardfork as Fork;
+
+    let chain = Chain::from_id(chain_id);
+    if !matches!(
+        chain.named(),
+        Some(NamedChain::Mainnet | NamedChain::Sepolia | NamedChain::Holesky | NamedChain::Hoodi)
+    ) {
+        return None;
+    }
+    Some(match Fork::from_chain_and_timestamp(chain, timestamp)? {
+        Fork::Paris => SpecId::MERGE,
+        Fork::Shanghai => SpecId::SHANGHAI,
+        Fork::Cancun => SpecId::CANCUN,
+        Fork::Prague => SpecId::PRAGUE,
+        Fork::Osaka | Fork::Bpo1 | Fork::Bpo2 | Fork::Bpo3 | Fork::Bpo4 | Fork::Bpo5 => {
+            SpecId::OSAKA
+        }
+        Fork::Amsterdam => SpecId::AMSTERDAM,
+        _ => return None,
+    })
+}
+
 /// A transaction to simulate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimTx {
@@ -438,6 +469,31 @@ impl ForkSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_spec_follows_the_fork_schedule_of_known_ethereum_networks() {
+        use alloy_hardforks::sepolia::{SEPOLIA_AMSTERDAM_TIMESTAMP, SEPOLIA_OSAKA_TIMESTAMP};
+
+        let sepolia = 11_155_111;
+        assert_eq!(
+            ethereum_spec_at(sepolia, SEPOLIA_OSAKA_TIMESTAMP - 1),
+            Some(SpecId::PRAGUE)
+        );
+        // BPO forks keep Osaka's execution rules.
+        assert_eq!(
+            ethereum_spec_at(sepolia, SEPOLIA_AMSTERDAM_TIMESTAMP - 1),
+            Some(SpecId::OSAKA)
+        );
+        assert_eq!(
+            ethereum_spec_at(sepolia, SEPOLIA_AMSTERDAM_TIMESTAMP),
+            Some(SpecId::AMSTERDAM)
+        );
+        assert_eq!(ethereum_spec_at(1, 1_700_000_000), Some(SpecId::SHANGHAI));
+        // Pre-Merge mainnet, an OP Stack chain and an unknown chain.
+        assert_eq!(ethereum_spec_at(1, 1_600_000_000), None);
+        assert_eq!(ethereum_spec_at(10, SEPOLIA_AMSTERDAM_TIMESTAMP), None);
+        assert_eq!(ethereum_spec_at(31_337, SEPOLIA_AMSTERDAM_TIMESTAMP), None);
+    }
 
     #[test]
     fn next_block_env_follows_parent() {

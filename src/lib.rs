@@ -131,8 +131,8 @@ pub use outer::{
 pub use rotation::{OwnerSwap, RotationPlan};
 #[cfg(feature = "simulation")]
 pub use simulation::{
-    AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator, ParentHeader, SimBlockEnv,
-    SimTx, SimulationResult, SpecId, TxChecks,
+    ethereum_spec_at, AccountState, CallTraceArena, DiffMode, ForkSession, ForkSimulator,
+    ParentHeader, SimBlockEnv, SimTx, SimulationResult, SpecId, TxChecks,
 };
 pub use submit::{
     broadcast_raw, decode_safe_outcome, receipt_logs, safe_outcome_for_receipt, wait_for_receipt,

@@ -4,10 +4,10 @@ use alloy::network::AnyNetwork;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use color_eyre::eyre::Result;
 use safe_rs::simulation::session::READ_CALL_GAS;
-use safe_rs::{ForkSession, SpecId};
+use safe_rs::{ethereum_spec_at, ForkSession, ParentHeader, SimBlockEnv, SpecId};
 use url::Url;
 
-use crate::cli::SimArgs;
+use crate::cli::{EvmSpec, SimArgs};
 
 pub mod approvals;
 pub mod call;
@@ -40,21 +40,40 @@ pub async fn fork_session(
     sim: &SimArgs,
     tracing: bool,
 ) -> Result<ForkSession> {
-    let spec = SpecId::from(sim.spec);
-    let mut session = ForkSession::fork_next_block(
-        provider,
-        chain_id,
-        sim.block.unwrap_or(BlockId::latest()),
-        sim.block_time,
-        BaseFeeParams::ethereum(),
-        spec,
-    )
-    .await?
-    .with_tracing(tracing);
+    let parent = ParentHeader::fetch(&provider, sim.block.unwrap_or(BlockId::latest())).await?;
+    let env = SimBlockEnv::next_after(&parent, sim.block_time, BaseFeeParams::ethereum());
+    let spec = sim_spec(sim.spec, chain_id, env.timestamp);
+    let mut session =
+        ForkSession::new(provider, chain_id, parent.block_id(), env, spec).with_tracing(tracing);
     if spec.is_enabled_in(SpecId::OSAKA) {
         session = session.with_tx_gas_cap(READ_CALL_GAS);
     }
     Ok(session)
+}
+
+/// The EVM spec to simulate a block with `timestamp` under: `explicit` (from
+/// `--spec`) if given, else the fork active then on a known Ethereum network,
+/// else Osaka.
+pub fn sim_spec(explicit: Option<EvmSpec>, chain_id: u64, timestamp: u64) -> SpecId {
+    explicit
+        .map(SpecId::from)
+        .or_else(|| ethereum_spec_at(chain_id, timestamp))
+        .unwrap_or(SpecId::OSAKA)
+}
+
+/// [`sim_spec`] for the block after the latest one, `block_time` seconds
+/// later: the spec for runs that always simulate at the head of the chain.
+pub async fn latest_sim_spec(
+    provider: &HttpProvider,
+    chain_id: u64,
+    explicit: Option<EvmSpec>,
+    block_time: u64,
+) -> Result<SpecId> {
+    if let Some(spec) = explicit {
+        return Ok(spec.into());
+    }
+    let latest = ParentHeader::fetch(provider, BlockId::latest()).await?;
+    Ok(sim_spec(None, chain_id, latest.timestamp + block_time))
 }
 
 /// EIP-1559 fees for an outer transaction: the node estimate, with any

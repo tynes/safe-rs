@@ -13,14 +13,14 @@ use safe_rs::rotation::{
 };
 use safe_rs::{
     encode_create_proxy_with_nonce, fetch_proxy_creation_code, is_safe_with, predict_safe_address,
-    sign_outer_tx, submit_and_wait, ChainAddresses, OuterTxParams, SignedOuterTx, SpecId,
-    Submission, WalletBuilder, WalletConfig,
+    sign_outer_tx, submit_and_wait, ChainAddresses, OuterTxParams, SignedOuterTx, Submission,
+    WalletBuilder, WalletConfig,
 };
 use serde::Serialize;
 
 use crate::cli::CreateArgs;
 use crate::commands::rotation::{print_warnings, rotation_config};
-use crate::commands::{http_provider, HttpProvider};
+use crate::commands::{http_provider, latest_sim_spec, HttpProvider};
 use crate::keys::CliKeys;
 use crate::output::{confirm_prompt, CreateOutput, OwnerOutput, Report, SweepOutput};
 use crate::wallet::{create_payer, create_signer, open_wallet};
@@ -416,7 +416,8 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
     // Set up the Safe with the next keys at hand.
     ring.look_ahead(SETUP_LOOKAHEAD).await?;
 
-    let mut config = rotation_config(None, SpecId::OSAKA, 12, DEPLOY_TIMEOUT);
+    let spec = latest_sim_spec(&provider, chain_id, None, 12).await?;
+    let mut config = rotation_config(None, spec, 12, DEPLOY_TIMEOUT);
     config.sweep_reserve = args.sweep.sweep_reserve;
     let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     let report = rotating.sweep_all().await?;
