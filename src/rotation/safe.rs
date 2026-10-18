@@ -830,7 +830,21 @@ where
     ///
     /// Call this before writing the transaction anywhere or broadcasting it.
     /// Arming the same transaction twice is a no-op.
+    ///
+    /// Fails with [`Error::InsufficientSignatures`] if `tx` calls
+    /// `execTransaction` with fewer signatures than the threshold: it would
+    /// revert on chain and publish the owner's signature while the owner is
+    /// unchanged. Nothing is recorded then. An `approveHash` transaction is
+    /// not checked.
     pub fn arm(&mut self, tx: &RotationTx) -> Result<()> {
+        let approves_hash = tx.outer.params.input
+            == SignedSafeTx::approve_hash_calldata(tx.plan.prepared.safe_tx_hash);
+        if !approves_hash && tx.signatures_collected < tx.threshold {
+            return Err(Error::InsufficientSignatures {
+                required: tx.threshold,
+                present: tx.signatures_collected,
+            });
+        }
         let binding = self.binding()?;
         if binding
             .pending
@@ -882,6 +896,7 @@ where
     /// A transaction the node rejects, or whose receipt does not arrive in
     /// time, is [`Error::Unconfirmed`]: the state keeps it as pending and the
     /// owner as exposed, and the next [`RotatingSafe::open`] resolves it.
+    /// Below the threshold nothing is broadcast (see [`RotatingSafe::arm`]).
     pub async fn submit(&mut self, tx: RotationTx) -> Result<RotationOutcome> {
         self.arm(&tx)?;
         let unconfirmed = |reason: String| Error::Unconfirmed {
@@ -965,6 +980,11 @@ where
     /// A sweep still owed from an earlier rotation runs first, so the current
     /// owner has its gas; if it fails, that is a warning and the transaction is
     /// attempted anyway.
+    ///
+    /// On a Safe whose threshold the wallet's signature and the on-chain
+    /// approvals do not meet, this is [`Error::InsufficientSignatures`] and
+    /// nothing is broadcast: collect the co-owners' signatures and pass them
+    /// to [`RotatingSafe::prepare`] in [`ExecOptions::co_signatures`].
     pub async fn execute(&mut self, calls: &[Call]) -> Result<RotationOutcome> {
         self.sweep_or_warn().await;
         let tx = self.prepare(calls, ExecOptions::default()).await?;

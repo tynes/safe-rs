@@ -575,7 +575,7 @@ let params = OuterTxParams::exec_transaction(&signed, payer.address(), eoa_nonce
 // then sign_outer_tx and broadcast_raw, as above
 ```
 
-`recover_signer` checks a signature that arrives from elsewhere. `OuterTxParams::approve_hash` builds an owner's on-chain approval. With the `simulation` feature, `simulate_exec_with_threshold` simulates the transaction before every owner has signed, and `simulate_approve_hash` simulates the approval. `RotatingSafe::prepare` takes the co-owners' signatures in `ExecOptions::co_signatures`; check `signatures_collected` against `threshold` on the result before you `submit` it.
+`recover_signer` checks a signature that arrives from elsewhere. `OuterTxParams::approve_hash` builds an owner's on-chain approval. With the `simulation` feature, `simulate_exec_with_threshold` simulates the transaction before every owner has signed, and `simulate_approve_hash` simulates the approval. `RotatingSafe::prepare` takes the co-owners' signatures in `ExecOptions::co_signatures` and reports `signatures_collected` and `threshold` on the result. Below the threshold, `arm`, `submit` and `execute` return `Error::InsufficientSignatures` before anything is broadcast, so the owner key is not exposed; an `approve_hash` transaction is not held to the threshold.
 
 ### Simulation-Only Mode
 

@@ -773,6 +773,53 @@ async fn a_batch_whose_target_has_no_code_is_refused_before_signing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn below_the_threshold_nothing_is_broadcast() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let co_owner = Address::repeat_byte(0x63);
+    let safe = h.deploy_safe_with(&[key(1), co_owner], 2, 123).await;
+    h.fund(key(1), eth(1)).await;
+    track(&h, safe, &state);
+
+    // The simulation fills in the co-owner's approval and passes, but the
+    // transaction carries one signature of two: on chain it would revert with
+    // the owner's signature public and the owner unchanged.
+    let mut rotating = open(&h, safe, &state).await;
+    let refused = rotating.execute(&[]).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(Error::InsufficientSignatures {
+                required: 2,
+                present: 1
+            })
+        ),
+        "{refused:?}"
+    );
+    let binding = rotating.binding().unwrap();
+    assert_eq!(binding.exposed, None, "no signature left the process");
+    assert_eq!(binding.pending, None);
+    assert_eq!(eoa_nonce(&h, key(1)).await, 0, "nothing was broadcast");
+    assert_eq!(h.owners(safe).await, vec![key(1), co_owner]);
+    assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
+
+    // An on-chain approval counts toward the threshold, so it is not held to it.
+    let tx = rotating
+        .prepare(
+            &[],
+            ExecOptions {
+                approve_hash: true,
+                ..ExecOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!((tx.signatures_collected, tx.threshold), (1, 2));
+    rotating.arm(&tx).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sync_finds_used_keys_by_nonce_and_restores_history_from_logs() {
     let h = LocalHarness::new().await;
     let dir = tempfile::tempdir().unwrap();
