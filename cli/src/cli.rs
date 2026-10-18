@@ -76,9 +76,10 @@ pub struct SimArgs {
     #[arg(long, value_parser = parse_block_id)]
     pub block: Option<BlockId>,
 
-    /// EVM specification used for simulation
-    #[arg(long, value_enum, default_value_t = EvmSpec::Osaka)]
-    pub spec: EvmSpec,
+    /// EVM specification used for simulation (default: the fork active at the
+    /// simulated block on mainnet, Sepolia, Holesky and Hoodi; osaka elsewhere)
+    #[arg(long, value_enum)]
+    pub spec: Option<EvmSpec>,
 
     /// Seconds between blocks, used for the simulated block's timestamp
     #[arg(long, default_value_t = 12)]
@@ -90,6 +91,7 @@ pub enum EvmSpec {
     Cancun,
     Prague,
     Osaka,
+    Amsterdam,
 }
 
 /// Safe versions `safe create` can deploy, newest first.
@@ -108,6 +110,7 @@ impl From<EvmSpec> for SpecId {
             EvmSpec::Cancun => SpecId::CANCUN,
             EvmSpec::Prague => SpecId::PRAGUE,
             EvmSpec::Osaka => SpecId::OSAKA,
+            EvmSpec::Amsterdam => SpecId::AMSTERDAM,
         }
     }
 }

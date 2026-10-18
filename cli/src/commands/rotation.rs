@@ -22,7 +22,7 @@ use url::Url;
 
 use crate::bundle::{BundleFile, BundleRotationSwap};
 use crate::cli::{SimArgs, SweepArgs};
-use crate::commands::{http_provider, outer_fees};
+use crate::commands::{http_provider, latest_sim_spec, outer_fees};
 use crate::keys::CliKeys;
 use crate::output::{
     confirm_prompt, rotation_summary, ApproveHashOutput, BundleSavedOutput, Console, Report,
@@ -147,9 +147,11 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
                 .multi_send_call_only
         }
     };
+    let chain_id = provider.get_chain_id().await?;
+    let spec = latest_sim_spec(&provider, chain_id, run.sim.spec, run.sim.block_time).await?;
     let mut config = rotation_config(
         Some(multi_send_call_only),
-        SpecId::from(run.sim.spec),
+        spec,
         run.sim.block_time,
         run.timeout,
     );

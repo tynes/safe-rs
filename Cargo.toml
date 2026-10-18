@@ -19,10 +19,15 @@ include = ["/src", "/tests", "/examples", "/README.md"]
 # Default features (HTTP provider over rustls, contract, local signer) plus
 # k256, which recovering the sender of a signed outer transaction needs.
 alloy = { version = "2.5", features = ["k256"] }
+alloy-chains = { version = "0.2", default-features = false, optional = true }
+alloy-hardforks = { version = "0.4.10", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
-foundry-fork-db = { version = "0.27", optional = true }
-revm = { version = "41", default-features = false, features = ["std", "optional_eip3607", "optional_no_base_fee", "optional_balance_check"], optional = true }
-revm-inspectors = { version = "0.41", default-features = false, features = ["std"], optional = true }
+# revm 43 (Amsterdam) support is on foundry-core main but not yet released;
+# switch back to a crates.io version once one ships, since `cargo publish`
+# rejects git dependencies.
+foundry-fork-db = { git = "https://github.com/foundry-rs/foundry-core", rev = "7bb4be7eee62822816b43e8724b2e6ef34a3b5ac", optional = true }
+revm = { version = "43", default-features = false, features = ["std", "optional_eip3607", "optional_no_base_fee", "optional_balance_check"], optional = true }
+revm-inspectors = { version = "0.44", default-features = false, features = ["std"], optional = true }
 serde_json = "1"
 tokio = { version = "1", features = ["time"] }
 thiserror = "2"
@@ -45,7 +50,7 @@ default = ["simulation"]
 # Fork simulation with foundry-fork-db and revm: `simulate()` on the builders,
 # `ForkSession` and the `simulate_exec*` functions. Without it the builders
 # still execute, with gas estimated over RPC.
-simulation = ["dep:foundry-fork-db", "dep:revm", "dep:revm-inspectors", "dep:chrono", "alloy/rpc-types-trace", "tokio/rt"]
+simulation = ["dep:alloy-chains", "dep:alloy-hardforks", "dep:foundry-fork-db", "dep:revm", "dep:revm-inspectors", "dep:chrono", "alloy/rpc-types-trace", "tokio/rt"]
 # Encrypted mnemonic keystores, HD key derivation and the rotating Safe client
 # (implies simulation, which every rotation runs).
 hd-wallet = ["simulation", "dep:chrono", "alloy/signer-mnemonic", "dep:scrypt", "dep:aes", "dep:ctr", "dep:rand", "dep:zeroize"]

@@ -12,7 +12,7 @@ use safe_rs::keystore::{encrypt_mnemonic_keystore, keystore_address, ScryptParam
 use safe_rs::rotation::store::write_private;
 use safe_rs::rotation::KeySource;
 use safe_rs::rotation::{Binding, Exposure, RotatingSafe, RotationState};
-use safe_rs::{HdWallet, SpecId};
+use safe_rs::HdWallet;
 use serde::Serialize;
 use zeroize::Zeroizing;
 
@@ -21,8 +21,8 @@ use crate::cli::{
     WalletSweepArgs, WalletSyncArgs,
 };
 use crate::commands::default_safe::recorded_safe;
-use crate::commands::http_provider;
 use crate::commands::rotation::{print_warnings, rotation_config};
+use crate::commands::{http_provider, latest_sim_spec};
 use crate::output::{OwnerOutput, Report, SweepOutput};
 use crate::paths;
 use crate::wallet::{new_password, open_keys, open_state, open_wallet, wallet_id};
@@ -428,12 +428,14 @@ impl Report for WalletSyncOutput {
 
 async fn sync(args: WalletSyncArgs, json: bool) -> Result<()> {
     let ring = open_wallet(&args.hd, &args.password).await?;
-    let mut config = rotation_config(args.multi_send_call_only, SpecId::OSAKA, 12, 120);
-    config.scan_limit = args.scan_limit;
     let provider = http_provider(&args.rpc.rpc_url);
+    let chain_id = provider.get_chain_id().await?;
+    let spec = latest_sim_spec(&provider, chain_id, None, 12).await?;
+    let mut config = rotation_config(args.multi_send_call_only, spec, 12, 120);
+    config.scan_limit = args.scan_limit;
     let safe = match args.safe.safe {
         Some(safe) => safe,
-        None => recorded_safe(ring.state(), provider.get_chain_id().await?, "--safe")?,
+        None => recorded_safe(ring.state(), chain_id, "--safe")?,
     };
     let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     let report = rotating.sync(args.from_block, args.chunk).await?;
@@ -455,12 +457,14 @@ async fn sync(args: WalletSyncArgs, json: bool) -> Result<()> {
 
 async fn sweep(args: WalletSweepArgs, json: bool) -> Result<()> {
     let ring = open_wallet(&args.hd, &args.password).await?;
-    let mut config = rotation_config(None, SpecId::OSAKA, 12, args.timeout);
-    config.sweep_reserve = args.sweep_reserve;
     let provider = http_provider(&args.rpc.rpc_url);
+    let chain_id = provider.get_chain_id().await?;
+    let spec = latest_sim_spec(&provider, chain_id, None, 12).await?;
+    let mut config = rotation_config(None, spec, 12, args.timeout);
+    config.sweep_reserve = args.sweep_reserve;
     let safe = match args.safe.safe {
         Some(safe) => safe,
-        None => recorded_safe(ring.state(), provider.get_chain_id().await?, "--safe")?,
+        None => recorded_safe(ring.state(), chain_id, "--safe")?,
     };
     let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     rotating.schedule_retired_sweeps().await?;

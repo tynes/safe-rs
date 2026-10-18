@@ -180,7 +180,7 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 | `--timeout <secs>` | How long to wait for the receipt (default 120) |
 | `--trace` | Print call traces of the simulation |
 | `--block <n\|hash\|tag>` | Simulate on top of this block (default: latest) |
-| `--spec <cancun\|prague\|osaka>` | EVM spec for simulation (default: osaka) |
+| `--spec <cancun\|prague\|osaka\|amsterdam>` | EVM spec for simulation (default: the fork active at the simulated block on mainnet, Sepolia, Holesky and Hoodi; osaka elsewhere) |
 | `--multi-send <addr>` / `--multi-send-call-only <addr>` | MultiSend contracts to batch through (default: the canonical ones for the Safe's version) |
 | `--no-confirm` | Skip confirmation prompt |
 | `--json` | Output as JSON |

@@ -443,7 +443,20 @@ pub async fn execute(
                         .unwrap_or("unknown reason")
                 );
             }
-            (sim.payer_nonce, sim.gas_limit)
+            let gas = if args.gas_limit.is_some() {
+                sim.gas_limit
+            } else {
+                let tx = <AnyNetwork as Network>::TransactionRequest::default()
+                    .with_from(approver)
+                    .with_to(safe_address)
+                    .with_input(SignedSafeTx::approve_hash_calldata(prepared.safe_tx_hash));
+                let est = provider
+                    .estimate_gas(tx)
+                    .await
+                    .map_err(|e| node_estimate_failed(eyre!("{e}"), "approveHash"))?;
+                cross_check_gas_limit(sim.gas_limit, est + est / 5)
+            };
+            (sim.payer_nonce, gas)
         };
 
         let outer = sign_outer_tx(
@@ -563,8 +576,17 @@ pub async fn execute(
         .map(|(&k, v)| (k, v.clone()))
         .collect();
 
-    let (eoa_nonce, gas_limit) = if let Some(info) = sim_info {
-        info
+    let (eoa_nonce, gas_limit) = if let Some((nonce, simulated)) = sim_info {
+        let gas_limit = if args.gas_limit.is_some() {
+            simulated
+        } else {
+            let est = provider
+                .estimate_gas(exec_request(&exec_signed, from))
+                .await
+                .map_err(|e| node_estimate_failed(eyre!("{e}"), "execTransaction"))?;
+            cross_check_gas_limit(simulated, est + est / 5)
+        };
+        (nonce, gas_limit)
     } else {
         let nonce = provider.get_transaction_count(from).await?;
         let gas_limit = if let Some(gas) = args.gas_limit {
@@ -766,11 +788,7 @@ async fn estimate_outer_gas(
     signed: &SignedSafeTx,
     from: Address,
 ) -> Result<u64> {
-    let tx = <AnyNetwork as Network>::TransactionRequest::default()
-        .with_from(from)
-        .with_to(signed.prepared.safe)
-        .with_input(signed.exec_calldata());
-    let estimate = provider.estimate_gas(tx).await.map_err(|e| {
+    let estimate = provider.estimate_gas(exec_request(signed, from)).await.map_err(|e| {
         let reason = e.to_string();
         if is_gs013_revert(&reason) {
             eyre!(
@@ -781,6 +799,63 @@ async fn estimate_outer_gas(
         }
     })?;
     Ok(estimate + estimate / 5)
+}
+
+/// The outer `execTransaction` call for `signed`, sent by `from`.
+fn exec_request(
+    signed: &SignedSafeTx,
+    from: Address,
+) -> <AnyNetwork as Network>::TransactionRequest {
+    <AnyNetwork as Network>::TransactionRequest::default()
+        .with_from(from)
+        .with_to(signed.prepared.safe)
+        .with_input(signed.exec_calldata())
+}
+
+/// How far apart (in percent of the lower) the simulated and node gas limits
+/// may be before [`cross_check_gas_limit`] warns.
+const GAS_DIVERGENCE_WARN_PERCENT: u64 = 25;
+
+/// The higher of the simulated gas limit and the node's (`eth_estimateGas`
+/// plus 20%), warning on stderr when they differ by more than
+/// [`GAS_DIVERGENCE_WARN_PERCENT`]: the local EVM may not model the gas
+/// schedule of the chain's current fork, and a limit sized by it alone can run
+/// out of gas on chain even though the simulation succeeded.
+fn cross_check_gas_limit(simulated: u64, node: u64) -> u64 {
+    let (gas_limit, warning) = reconcile_gas_limits(simulated, node);
+    if let Some(warning) = warning {
+        eprintln!("warning: {warning}");
+    }
+    gas_limit
+}
+
+fn reconcile_gas_limits(simulated: u64, node: u64) -> (u64, Option<String>) {
+    let (low, high) = (simulated.min(node), simulated.max(node));
+    let diverges =
+        (high - low).saturating_mul(100) > low.saturating_mul(GAS_DIVERGENCE_WARN_PERCENT);
+    let warning = diverges.then(|| {
+        if node > simulated {
+            format!(
+                "the node estimates more gas than the simulation ({node} vs {simulated}); \
+                 the local EVM may not match the chain's current fork, using {high}"
+            )
+        } else {
+            format!(
+                "the simulation needs more gas than the node estimates ({simulated} vs {node}); \
+                 using {high}"
+            )
+        }
+    });
+    (high, warning)
+}
+
+/// The error for a node gas estimate that fails after the simulation passed.
+fn node_estimate_failed(error: color_eyre::eyre::Report, what: &str) -> color_eyre::eyre::Report {
+    eyre!(
+        "the simulation succeeded but the node's gas estimate for {what} failed, so the \
+         transaction would likely revert on chain (the local EVM may not match the chain's \
+         current fork); pass --gas-limit to send it anyway: {error}"
+    )
 }
 
 /// Canonical addresses for the Safe's version with the `--multi-send*`
@@ -825,4 +900,28 @@ fn build_cli_calls(args: &SendArgs) -> Result<Vec<Call>> {
     };
 
     Ok(vec![Call::new(to, args.value, data)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_gas_limits;
+
+    #[test]
+    fn close_gas_limits_take_the_higher_without_a_warning() {
+        assert_eq!(reconcile_gas_limits(100_000, 110_000), (110_000, None));
+        assert_eq!(reconcile_gas_limits(125_000, 100_000), (125_000, None));
+    }
+
+    #[test]
+    fn divergent_gas_limits_take_the_higher_and_warn() {
+        // The Sepolia case: the local EVM measured 74,674 (limit 89,608) while
+        // the node estimated 161,826 (limit 194,191).
+        let (gas, warning) = reconcile_gas_limits(89_608, 194_191);
+        assert_eq!(gas, 194_191);
+        assert!(warning.unwrap().contains("node estimates more gas"));
+
+        let (gas, warning) = reconcile_gas_limits(200_000, 100_000);
+        assert_eq!(gas, 200_000);
+        assert!(warning.unwrap().contains("simulation needs more gas"));
+    }
 }
