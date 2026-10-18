@@ -4,6 +4,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use alloy::primitives::{Address, TxHash};
+use alloy::providers::Provider;
 use color_eyre::eyre::{bail, eyre, Result, WrapErr};
 use rand::rngs::OsRng;
 use safe_rs::hd::{key_path, normalize_phrase};
@@ -19,6 +20,7 @@ use crate::cli::{
     WalletAddressArgs, WalletCommand, WalletImportArgs, WalletNewArgs, WalletStatusArgs,
     WalletSweepArgs, WalletSyncArgs,
 };
+use crate::commands::default_safe::recorded_safe;
 use crate::commands::http_provider;
 use crate::commands::rotation::{print_warnings, rotation_config};
 use crate::output::{OwnerOutput, Report, SweepOutput};
@@ -429,14 +431,18 @@ async fn sync(args: WalletSyncArgs, json: bool) -> Result<()> {
     let mut config = rotation_config(args.multi_send_call_only, SpecId::OSAKA, 12, 120);
     config.scan_limit = args.scan_limit;
     let provider = http_provider(&args.rpc.rpc_url);
-    let mut rotating = RotatingSafe::with_keyring(provider, args.safe.safe, ring, config).await?;
+    let safe = match args.safe.safe {
+        Some(safe) => safe,
+        None => recorded_safe(ring.state(), provider.get_chain_id().await?, "--safe")?,
+    };
+    let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     let report = rotating.sync(args.from_block, args.chunk).await?;
     let warnings = rotating.take_warnings();
     if !json {
         print_warnings(&warnings);
     }
     WalletSyncOutput {
-        safe: args.safe.safe,
+        safe,
         owner: report.current.into(),
         used: report.used,
         events: report.events,
@@ -452,7 +458,11 @@ async fn sweep(args: WalletSweepArgs, json: bool) -> Result<()> {
     let mut config = rotation_config(None, SpecId::OSAKA, 12, args.timeout);
     config.sweep_reserve = args.sweep_reserve;
     let provider = http_provider(&args.rpc.rpc_url);
-    let mut rotating = RotatingSafe::with_keyring(provider, args.safe.safe, ring, config).await?;
+    let safe = match args.safe.safe {
+        Some(safe) => safe,
+        None => recorded_safe(ring.state(), provider.get_chain_id().await?, "--safe")?,
+    };
+    let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     rotating.schedule_retired_sweeps().await?;
     let report = rotating.sweep_all().await?;
     print_warnings(&rotating.take_warnings());

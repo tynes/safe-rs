@@ -134,6 +134,14 @@ Execute transactions through a Safe. `send` freezes the Safe transaction (nonce,
 safe send <to> <signature> [args...] --safe <address> --rpc-url <url>
 ```
 
+**Choosing the Safe:** `--safe` (or `SAFE_ADDRESS`) is optional. Without it, `send` and `call` use the signer's default Safe, the same 1:1 Safe that `safe info` finds: the one `safe create` deploys for that key without options. The CLI checks that a Safe is deployed at that deterministic address, v1.5.0 first and then v1.4.1, and fails if neither has code. When `send` continues a bundle that already holds a prepared transaction, the bundle's Safe is used, so co-signers need no `--safe`. With `--rotate`, and in `wallet sync` and `wallet sweep`, the default is the HD wallet's only recorded Safe on the connected chain.
+
+**Amounts:** `--value`, `--sweep-reserve`, `--max-fee-per-gas` and `--max-priority-fee-per-gas` accept amounts in the same forms as cast. A plain number is wei, in decimal or `0x` hex. A number with a unit is converted, such as `1ether`, `0.5 ether`, `10gwei` or `1e18`.
+
+```bash
+safe send 0xRecipient --value 0.5ether --rpc-url $ETH_RPC_URL --private-key $PRIVATE_KEY
+```
+
 **Multiple calls:**
 ```bash
 safe send \
@@ -166,7 +174,7 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 | `--nonce <n>` | Safe nonce to sign for; fails if the on-chain nonce differs |
 | `--safe-tx-gas <n>` | Explicit `safeTxGas` (default 0; non-zero lets a failed inner call consume the nonce) |
 | `--gas-limit <n>` | Outer gas limit (default: simulated gas + 20%) |
-| `--max-fee-per-gas <wei>` / `--max-priority-fee-per-gas <wei>` | Override the node's fee estimate |
+| `--max-fee-per-gas <wei>` / `--max-priority-fee-per-gas <wei>` | Override the node's fee estimate (units accepted, such as `30gwei`) |
 | `--raw-out <path\|->` | Write the signed transaction as JSON before broadcasting (`-` = stdout; progress then goes to stderr) |
 | `--no-submit` | Sign but don't broadcast (implies `--raw-out -` unless set) |
 | `--timeout <secs>` | How long to wait for the receipt (default 120) |
@@ -230,6 +238,8 @@ Simulate a call made by the Safe without executing it. It runs in the block afte
 ```bash
 safe call <to> <signature> [args...] --safe <address> --rpc-url <url> [--block <n>] [--trace]
 ```
+
+Without `--safe`, pass `--private-key`, `--keystore` or `--interactive` to call from the signer's default Safe, as `send` does.
 
 ### `safe info`
 
@@ -346,7 +356,7 @@ safe wallet sweep   --hd-wallet <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL
 
 ### Wallet Options
 
-Commands that sign with a single key, and `safe info` when it derives the Safe address from the signer, support:
+Commands that sign with a single key, and `safe info` and `safe call` when they derive the Safe address from the signer, support:
 
 | Flag | Description |
 |------|-------------|
@@ -777,8 +787,8 @@ All chains use the same contract addresses (deployed via CREATE2). A Safe's batc
 | Variable | Description |
 |----------|-------------|
 | `ETH_RPC_URL` | RPC endpoint URL |
-| `SAFE_ADDRESS` | Safe address for `send` and `call` |
-| `PRIVATE_KEY` | Signer private key |
+| `SAFE_ADDRESS` | Safe address for `send`, `call`, `wallet sync` and `wallet sweep` (default: the signer's default Safe) |
+| `PRIVATE_KEY` | Signer private key (also picks the default Safe when no Safe is given) |
 | `SAFE_PAYER_PRIVATE_KEY` | Key that pays for gas instead of the owner key |
 | `SAFE_HD_WALLET` | Default `--hd-wallet` (`--ledger` overrides it) |
 | `SAFE_PASSWORD_FILE` | Default `--password-file` |

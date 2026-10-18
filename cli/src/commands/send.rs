@@ -18,6 +18,7 @@ use safe_rs::{
 
 use crate::bundle::{BundleCall, BundleFile};
 use crate::cli::SendArgs;
+use crate::commands::default_safe::{recorded_safe, safe_or_default};
 use crate::commands::rotation::{self, RotationRun};
 use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
 use crate::output::{
@@ -125,8 +126,15 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
 
     let provider = http_provider(&args.rpc.rpc_url);
     let chain_id = provider.get_chain_id().await?;
-    let safe_address = args.safe.safe;
-    let addresses = chain_addresses(&provider, &args).await;
+    // A prepared bundle names its Safe, so co-signers need not pass --safe.
+    let safe_address = safe_or_default(
+        &provider,
+        args.safe.safe.or(bundle.tx.as_ref().map(|tx| tx.safe)),
+        signer_opt.as_ref(),
+        BlockId::latest(),
+    )
+    .await?;
+    let addresses = chain_addresses(&provider, &args, safe_address).await;
     let config = ChainConfig::with_addresses(chain_id, addresses.clone());
 
     let sim_block = args.sim.block.unwrap_or_else(BlockId::latest);
@@ -628,9 +636,11 @@ async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
         );
     }
     let cli_calls = build_cli_calls(&args)?;
+    let mut bundle_safe = None;
     let calls = if let Some(bundle_path) = &args.bundle {
         if bundle_path.exists() {
             let loaded = BundleFile::load(bundle_path)?;
+            bundle_safe = loaded.tx.as_ref().map(|tx| tx.safe);
             let loaded_calls = loaded.calls()?;
             let cli_bundle_calls: Vec<BundleCall> =
                 cli_calls.iter().map(BundleCall::from).collect();
@@ -658,9 +668,15 @@ async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
     }
     let payer = create_payer(&args.payer)?;
     let ring = open_wallet(&args.hd, &args.password).await?;
+    let safe = if let Some(safe) = args.safe.safe.or(bundle_safe) {
+        safe
+    } else {
+        let chain_id = http_provider(&args.rpc.rpc_url).get_chain_id().await?;
+        recorded_safe(ring.state(), chain_id, "--safe")?
+    };
     rotation::run(RotationRun {
         rpc_url: &args.rpc.rpc_url,
-        safe: args.safe.safe,
+        safe,
         ring,
         legacy_owner: None,
         sweep_legacy: false,
@@ -739,8 +755,12 @@ async fn estimate_outer_gas(
 
 /// Canonical addresses for the Safe's version with the `--multi-send*`
 /// overrides applied.
-async fn chain_addresses(provider: &HttpProvider, args: &SendArgs) -> ChainAddresses {
-    let mut addresses = detect_addresses(provider, args.safe.safe).await;
+async fn chain_addresses(
+    provider: &HttpProvider,
+    args: &SendArgs,
+    safe: Address,
+) -> ChainAddresses {
+    let mut addresses = detect_addresses(provider, safe).await;
     if let Some(multi_send) = args.multi_send {
         addresses.multi_send = multi_send;
     }

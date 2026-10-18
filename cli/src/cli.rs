@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, U256};
+use alloy_dyn_abi::DynSolType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use safe_rs::{ChainAddresses, SpecId};
 use url::Url;
@@ -52,9 +53,11 @@ pub struct RpcArgs {
 
 #[derive(Args, Clone)]
 pub struct SafeArgs {
-    /// Safe contract address
+    /// Safe contract address (default: the signer's default Safe, the one
+    /// `safe create` deploys for it without options; with an HD wallet, its
+    /// sole recorded Safe on this chain)
     #[arg(long, env = "SAFE_ADDRESS")]
-    pub safe: Address,
+    pub safe: Option<Address>,
 }
 
 /// Local fork simulation settings.
@@ -128,6 +131,25 @@ pub fn parse_block_id(s: &str) -> Result<BlockId, String> {
     s.parse::<BlockId>().map_err(|e| e.to_string())
 }
 
+/// Parses an amount of wei as cast does: a decimal or 0x-hex number of wei, or
+/// a number with a unit ("1ether", "0.1 ether", "10gwei", "1e18").
+pub fn parse_ether_value(s: &str) -> Result<U256, String> {
+    if let Some(hex) = s.strip_prefix("0x") {
+        return U256::from_str_radix(hex, 16).map_err(|e| e.to_string());
+    }
+    DynSolType::Uint(256)
+        .coerce_str(s)
+        .map_err(|e| e.to_string())?
+        .as_uint()
+        .map(|(value, _)| value)
+        .ok_or_else(|| format!("invalid amount {s}"))
+}
+
+/// [`parse_ether_value`] for fee flags, which must fit in a u128.
+pub fn parse_fee_value(s: &str) -> Result<u128, String> {
+    u128::try_from(parse_ether_value(s)?).map_err(|_| format!("fee {s} does not fit in 128 bits"))
+}
+
 #[derive(Parser, Clone)]
 pub struct SendArgs {
     /// Target address (for single call mode)
@@ -148,8 +170,8 @@ pub struct SendArgs {
     #[command(flatten)]
     pub rpc: RpcArgs,
 
-    /// ETH value to send (in wei)
-    #[arg(long, default_value = "0")]
+    /// ETH value to send: wei, or a number with a unit ("1ether", "10gwei")
+    #[arg(long, default_value = "0", value_parser = parse_ether_value)]
     pub value: U256,
 
     /// Call specification for multicall mode (format: "0xAddr:sig(types):arg1,arg2")
@@ -196,12 +218,14 @@ pub struct SendArgs {
     #[arg(long)]
     pub gas_limit: Option<u64>,
 
-    /// maxFeePerGas of the outer transaction in wei (default: node estimate)
-    #[arg(long)]
+    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
+    /// ("30gwei") (default: node estimate)
+    #[arg(long, value_parser = parse_fee_value)]
     pub max_fee_per_gas: Option<u128>,
 
-    /// maxPriorityFeePerGas of the outer transaction in wei (default: node estimate)
-    #[arg(long)]
+    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
+    /// unit ("1gwei") (default: node estimate)
+    #[arg(long, value_parser = parse_fee_value)]
     pub max_priority_fee_per_gas: Option<u128>,
 
     /// Write the signed transaction as JSON to PATH ("-" for stdout) before it
@@ -278,8 +302,8 @@ pub struct CallArgs {
     #[command(flatten)]
     pub rpc: RpcArgs,
 
-    /// ETH value to send (in wei)
-    #[arg(long, default_value = "0")]
+    /// ETH value to send: wei, or a number with a unit ("1ether", "10gwei")
+    #[arg(long, default_value = "0", value_parser = parse_ether_value)]
     pub value: U256,
 
     /// Print call traces
@@ -288,6 +312,12 @@ pub struct CallArgs {
 
     #[command(flatten)]
     pub sim: SimArgs,
+
+    #[command(flatten)]
+    pub wallet: WalletArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
 }
 
 #[derive(Parser, Clone)]
@@ -422,12 +452,14 @@ pub struct RotateArgs {
     #[arg(long)]
     pub gas_limit: Option<u64>,
 
-    /// maxFeePerGas of the outer transaction in wei (default: node estimate)
-    #[arg(long)]
+    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
+    /// ("30gwei") (default: node estimate)
+    #[arg(long, value_parser = parse_fee_value)]
     pub max_fee_per_gas: Option<u128>,
 
-    /// maxPriorityFeePerGas of the outer transaction in wei (default: node estimate)
-    #[arg(long)]
+    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
+    /// unit ("1gwei") (default: node estimate)
+    #[arg(long, value_parser = parse_fee_value)]
     pub max_priority_fee_per_gas: Option<u128>,
 
     /// Seconds to wait for the receipt after broadcasting
@@ -585,8 +617,9 @@ pub struct WalletSweepArgs {
     #[command(flatten)]
     pub rpc: RpcArgs,
 
-    /// Wei to leave on the retired owner (default: what the chain charges outside gas)
-    #[arg(long, value_name = "WEI")]
+    /// Wei to leave on the retired owner, or a number with a unit ("0.01ether")
+    /// (default: what the chain charges outside gas)
+    #[arg(long, value_name = "WEI", value_parser = parse_ether_value)]
     pub sweep_reserve: Option<U256>,
 
     /// Seconds to wait for the receipt after broadcasting
@@ -660,9 +693,10 @@ pub struct SweepArgs {
     #[arg(long)]
     pub no_sweep: bool,
 
-    /// Wei to leave on the retired owner key when sweeping (default: what the
-    /// chain charges outside gas, which is nothing on most chains)
-    #[arg(long, value_name = "WEI", conflicts_with = "no_sweep")]
+    /// Wei to leave on the retired owner key when sweeping, or a number with a
+    /// unit ("0.01ether") (default: what the chain charges outside gas, which is
+    /// nothing on most chains)
+    #[arg(long, value_name = "WEI", conflicts_with = "no_sweep", value_parser = parse_ether_value)]
     pub sweep_reserve: Option<U256>,
 }
 
@@ -689,6 +723,56 @@ mod tests {
     }
 
     const SAFE: &str = "0x1111111111111111111111111111111111111111";
+
+    #[test]
+    fn ether_values_parse_like_cast() {
+        let ether = U256::from(10).pow(U256::from(18));
+        let ok = |s: &str| parse_ether_value(s).unwrap();
+        assert_eq!(ok("1000000000000000000"), ether);
+        assert_eq!(ok("1ether"), ether);
+        assert_eq!(ok("1 ether"), ether);
+        assert_eq!(ok("0.1ether"), ether / U256::from(10));
+        assert_eq!(ok("10gwei"), U256::from(10_000_000_000_u64));
+        assert_eq!(ok("1e18"), ether);
+        assert_eq!(ok("0x10"), U256::from(16));
+        assert_eq!(ok("0"), U256::ZERO);
+        for bad in ["1.5", "-1", "1 parsec", "0xzz", ""] {
+            assert!(parse_ether_value(bad).is_err(), "{bad} must not parse");
+        }
+        assert_eq!(parse_fee_value("30gwei").unwrap(), 30_000_000_000);
+        assert!(parse_fee_value("1e40").is_err());
+    }
+
+    #[test]
+    fn value_flags_take_units() {
+        let Commands::Send(args) = send(&["--value", "1.5ether", "--max-fee-per-gas", "2gwei"])
+            .unwrap()
+            .command
+        else {
+            unreachable!()
+        };
+        assert_eq!(args.value, U256::from(1_500_000_000_000_000_000_u128));
+        assert_eq!(args.max_fee_per_gas, Some(2_000_000_000));
+        assert!(send(&["--rotate", "--sweep-reserve", "0.01ether"]).is_ok());
+    }
+
+    #[test]
+    fn send_and_call_take_the_safe_as_optional() {
+        let rpc = ["--rpc-url", "http://localhost:8545"];
+        let mut args = vec!["send", TO, "--private-key", "0x01"];
+        args.extend(rpc);
+        let Commands::Send(send) = parse(&args).unwrap().command else {
+            unreachable!()
+        };
+        assert_eq!(send.safe.safe, None);
+        let mut args = vec!["call", TO, "owner()", "--private-key", "0x01"];
+        args.extend(rpc);
+        let Commands::Call(call) = parse(&args).unwrap().command else {
+            unreachable!()
+        };
+        assert_eq!(call.safe.safe, None);
+        assert!(call.wallet.is_set());
+    }
 
     fn parse_info(args: &[&str]) -> Result<InfoArgs, clap::Error> {
         let args = [
