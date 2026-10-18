@@ -26,6 +26,7 @@ fn test_simulation_debug_output_new() {
     let result = SimulationResult {
         success: false,
         gas_used: 21000,
+        gas_spent: 21000,
         return_data: Bytes::from(vec![0x08, 0xc3, 0x79, 0xa0]),
         logs: vec![],
         revert_reason: Some("ERC20: transfer amount exceeds balance".to_string()),
@@ -62,6 +63,7 @@ fn test_simulation_debug_output_write_to_dir() {
     let result = SimulationResult {
         success: false,
         gas_used: 50000,
+        gas_spent: 50000,
         return_data: Bytes::new(),
         logs: vec![],
         revert_reason: Some("Insufficient balance".to_string()),
@@ -105,6 +107,7 @@ fn test_simulation_debug_output_delegatecall_operation() {
     let result = SimulationResult {
         success: true,
         gas_used: 100_000,
+        gas_spent: 100_000,
         return_data: Bytes::new(),
         logs: vec![],
         revert_reason: None,
@@ -269,6 +272,7 @@ fn test_format_traces_returns_none_without_tracing() {
     let result = SimulationResult {
         success: true,
         gas_used: 21000,
+        gas_spent: 21000,
         return_data: Bytes::new(),
         logs: vec![],
         revert_reason: None,
@@ -285,6 +289,7 @@ fn test_simulation_result_accessors() {
     let result = SimulationResult {
         success: true,
         gas_used: 50000,
+        gas_spent: 50000,
         return_data: Bytes::new(),
         logs: vec![],
         revert_reason: None,
@@ -298,6 +303,7 @@ fn test_simulation_result_accessors() {
     let failed_result = SimulationResult {
         success: false,
         gas_used: 21000,
+        gas_spent: 21000,
         return_data: Bytes::new(),
         logs: vec![],
         revert_reason: Some("Transfer failed".to_string()),

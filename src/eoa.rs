@@ -271,7 +271,7 @@ where
     /// The gas call `i` used in `simulate()`, if it was simulated
     #[cfg(feature = "simulation")]
     fn simulated_gas(&self, i: usize) -> Option<u64> {
-        self.simulation_results.as_ref()?.get(i).map(|r| r.gas_used)
+        self.simulation_results.as_ref()?.get(i).map(|r| r.gas_spent)
     }
 
     /// Without the `simulation` feature no call is ever simulated
@@ -438,6 +438,7 @@ where
         SimulationResult {
             success,
             gas_used,
+            gas_spent: results.iter().map(|r| r.gas_spent).sum(),
             return_data,
             logs,
             revert_reason,

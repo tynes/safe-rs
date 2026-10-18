@@ -46,8 +46,8 @@ pub struct ExecSimulation {
 /// in `session`'s block with all validity checks (nonce, fees, balance).
 ///
 /// Without `gas_limit`, gas is first measured at the largest limit the session
-/// accepts (without requiring the payer to afford it) and the limit is that
-/// plus 20%.
+/// accepts (without requiring the payer to afford it) and the limit is the gas
+/// spent before refunds plus 20%.
 ///
 /// `session` itself is left untouched: the runs happen on checkpoints, and the
 /// one the transaction was committed to is returned in
@@ -78,7 +78,7 @@ pub fn simulate_exec(
                 post: None,
             });
         }
-        (measured.gas_used + measured.gas_used / 5).min(max)
+        (measured.gas_spent + measured.gas_spent / 5).min(max)
     };
 
     let mut post = session.checkpoint();
@@ -185,7 +185,7 @@ pub fn simulate_approve_hash(
                 post: None,
             });
         }
-        (measured.gas_used + measured.gas_used / 5).min(max)
+        (measured.gas_spent + measured.gas_spent / 5).min(max)
     };
 
     let mut post = session.checkpoint();

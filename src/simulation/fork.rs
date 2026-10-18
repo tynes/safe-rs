@@ -29,8 +29,12 @@ use crate::types::{Call, Operation};
 pub struct SimulationResult {
     /// Whether the simulation succeeded
     pub success: bool,
-    /// Gas used during simulation
+    /// Gas used during simulation, after refunds (what the receipt reports)
     pub gas_used: u64,
+    /// Gas spent before refunds, and at least the EIP-7623 calldata floor. A
+    /// gas limit must cover this, not `gas_used`: refunds are only paid back
+    /// once execution has finished
+    pub gas_spent: u64,
     /// Return data from the call
     pub return_data: Bytes,
     /// Logs emitted during simulation
@@ -552,8 +556,8 @@ where
             )));
         }
 
-        // Add 10% buffer to the gas used
-        let gas_with_buffer = result.gas_used + (result.gas_used / 10);
+        // Add 10% buffer to the gas spent before refunds
+        let gas_with_buffer = result.gas_spent + (result.gas_spent / 10);
         Ok(U256::from(gas_with_buffer))
     }
 
@@ -741,6 +745,7 @@ mod tests {
         let result = SimulationResult {
             success: true,
             gas_used: 21000,
+            gas_spent: 21000,
             return_data: Bytes::new(),
             logs: vec![],
             revert_reason: None,
@@ -758,6 +763,7 @@ mod tests {
         let result = SimulationResult {
             success: false,
             gas_used: 21000,
+            gas_spent: 21000,
             return_data: Bytes::new(),
             logs: vec![],
             revert_reason: Some("ERC20: insufficient balance".to_string()),
@@ -801,6 +807,7 @@ mod tests {
         let result = SimulationResult {
             success: true,
             gas_used: 21000,
+            gas_spent: 21000,
             return_data: Bytes::new(),
             logs: vec![],
             revert_reason: None,
@@ -864,6 +871,7 @@ mod tests {
         let result = SimulationResult {
             success: true,
             gas_used: 50000,
+            gas_spent: 50000,
             return_data: Bytes::new(),
             logs: vec![],
             revert_reason: None,

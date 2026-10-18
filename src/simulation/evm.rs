@@ -9,7 +9,7 @@ use alloy::network::AnyNetwork;
 use alloy::primitives::{Bytes, Log, B256};
 use alloy::providers::Provider;
 use foundry_fork_db::{cache::BlockchainDbMeta, BlockchainDb, SharedBackend};
-use revm::context::result::{ExecResultAndState, ExecutionResult, Output};
+use revm::context::result::{ExecResultAndState, ExecutionResult, Output, ResultGas};
 use revm::context::TxEnv;
 use revm::database::CacheDB;
 use revm::primitives::hardfork::SpecId;
@@ -127,6 +127,12 @@ pub(crate) fn execute(
     Ok(sim)
 }
 
+/// Gas a limit must cover: everything spent before refunds, and at least the
+/// EIP-7623 calldata floor, which `total_gas_spent` leaves out.
+fn gas_spent(gas: &ResultGas) -> u64 {
+    gas.total_gas_spent().max(gas.tx_gas_used())
+}
+
 /// Converts a revm execution result into a [`SimulationResult`].
 fn to_simulation_result<H>(result: ExecutionResult<H>, state: &EvmState) -> SimulationResult
 where
@@ -151,6 +157,7 @@ where
             SimulationResult {
                 success: true,
                 gas_used: gas.tx_gas_used(),
+                gas_spent: gas_spent(&gas),
                 return_data,
                 logs,
                 revert_reason: None,
@@ -161,6 +168,7 @@ where
         ExecutionResult::Revert { gas, output, .. } => SimulationResult {
             success: false,
             gas_used: gas.tx_gas_used(),
+            gas_spent: gas_spent(&gas),
             revert_reason: Some(decode_revert_reason(&output)),
             return_data: Bytes::from(output.to_vec()),
             logs: vec![],
@@ -170,6 +178,7 @@ where
         ExecutionResult::Halt { gas, reason, .. } => SimulationResult {
             success: false,
             gas_used: gas.tx_gas_used(),
+            gas_spent: gas_spent(&gas),
             return_data: Bytes::new(),
             logs: vec![],
             revert_reason: Some(format!("Halted: {:?}", reason)),
