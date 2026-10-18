@@ -315,16 +315,13 @@ pub async fn execute(
 
     let have = signed.signatures.len();
     if !signer_is_owner && (args.approve_hash || args.sign_only || have < need) {
-        let bad_signer = signer_opt
-            .as_ref()
-            .map_or(from, |s| s.address());
+        let bad_signer = signer_opt.as_ref().map_or(from, |s| s.address());
         return Err(Error::NotOwner {
             signer: bad_signer,
             safe: safe_address,
         }
         .into());
     }
-
 
     console.line(format!("Safe: {}", safe_address));
     if let Some(signer) = &signer_opt {
@@ -473,7 +470,8 @@ pub async fn execute(
         )
         .await?;
 
-        let prompt = format!("Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?");
+        let prompt =
+            format!("Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?");
         if !args.no_confirm && !json && !confirm_prompt(&prompt) {
             console.line("Aborted");
             return Ok(());

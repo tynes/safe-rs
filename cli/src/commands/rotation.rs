@@ -303,9 +303,8 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         } else {
             None
         };
-        let prompt = format!(
-            "Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?"
-        );
+        let prompt =
+            format!("Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?");
         if prompts && !confirm_prompt(&prompt) {
             console.line("Aborted");
             return Ok(());
@@ -324,20 +323,16 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         }
         console.line(format!("Sent {}, waiting for receipt...", tx.outer.tx_hash));
         let timeout = Duration::from_secs(run.timeout);
-        let receipt = match wait_for_receipt(
-            &provider,
-            tx.outer.tx_hash,
-            timeout,
-            RECEIPT_POLL_INTERVAL,
-        )
-        .await?
-        {
-            ReceiptWait::Mined(receipt) => receipt,
-            ReceiptWait::TimedOut { tx_hash } => bail!(
-                "no receipt for {tx_hash} after {}s; it may still be pending",
-                run.timeout
-            ),
-        };
+        let receipt =
+            match wait_for_receipt(&provider, tx.outer.tx_hash, timeout, RECEIPT_POLL_INTERVAL)
+                .await?
+            {
+                ReceiptWait::Mined(receipt) => receipt,
+                ReceiptWait::TimedOut { tx_hash } => bail!(
+                    "no receipt for {tx_hash} after {}s; it may still be pending",
+                    run.timeout
+                ),
+            };
         let success = receipt.status();
         emit(
             &ApproveHashOutput {

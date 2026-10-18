@@ -37,10 +37,7 @@ pub const SAFE_SINGLETON_SLOT: U256 = U256::ZERO;
 /// # Returns
 /// `true` if the address is a Safe proxy pointing to a known Safe singleton,
 /// `false` otherwise (including if the address has no code or no implementation slot).
-pub async fn is_safe<P: Provider<N>, N: Network>(
-    provider: &P,
-    address: Address,
-) -> Result<bool> {
+pub async fn is_safe<P: Provider<N>, N: Network>(provider: &P, address: Address) -> Result<bool> {
     let known = [
         ChainAddresses::v1_4_1().safe_singleton,
         ChainAddresses::v1_3_0().safe_singleton,
@@ -91,7 +88,12 @@ where
     P: Provider<AnyNetwork> + Clone + 'static,
 {
     /// Creates a new Safe client
-    pub fn new(provider: P, signer: PrivateKeySigner, address: Address, config: ChainConfig) -> Self {
+    pub fn new(
+        provider: P,
+        signer: PrivateKeySigner,
+        address: Address,
+        config: ChainConfig,
+    ) -> Self {
         Self {
             provider,
             signer,
@@ -133,28 +135,20 @@ where
     /// Gets the threshold of the Safe
     pub async fn threshold(&self) -> Result<u64> {
         let safe = ISafe::new(self.address, &self.provider);
-        let threshold = safe
-            .getThreshold()
-            .call()
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "threshold",
-                reason: e.to_string(),
-            })?;
+        let threshold = safe.getThreshold().call().await.map_err(|e| Error::Fetch {
+            what: "threshold",
+            reason: e.to_string(),
+        })?;
         Ok(threshold.to::<u64>())
     }
 
     /// Gets the owners of the Safe
     pub async fn owners(&self) -> Result<Vec<Address>> {
         let safe = ISafe::new(self.address, &self.provider);
-        let owners = safe
-            .getOwners()
-            .call()
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "owners",
-                reason: e.to_string(),
-            })?;
+        let owners = safe.getOwners().call().await.map_err(|e| Error::Fetch {
+            what: "owners",
+            reason: e.to_string(),
+        })?;
         Ok(owners)
     }
 
@@ -408,7 +402,7 @@ where
                     co_owner,
                     Call::call(
                         self.safe.address,
-                         crate::envelope::SignedSafeTx::approve_hash_calldata(prepared.safe_tx_hash),
+                        crate::envelope::SignedSafeTx::approve_hash_calldata(prepared.safe_tx_hash),
                     ),
                 )
             })
@@ -632,7 +626,10 @@ where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
 {
     type Provider = P;
-    type Builder<'a> = SafeBuilder<'a, P> where Self: 'a;
+    type Builder<'a>
+        = SafeBuilder<'a, P>
+    where
+        Self: 'a;
 
     fn address(&self) -> Address {
         self.address
@@ -656,14 +653,10 @@ where
 
     async fn nonce(&self) -> Result<U256> {
         let safe = ISafe::new(self.address, &self.provider);
-        let nonce = safe
-            .nonce()
-            .call()
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "nonce",
-                reason: e.to_string(),
-            })?;
+        let nonce = safe.nonce().call().await.map_err(|e| Error::Fetch {
+            what: "nonce",
+            reason: e.to_string(),
+        })?;
         Ok(nonce)
     }
 
@@ -723,7 +716,10 @@ fn map_execution_error(reason: String) -> Error {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports, reason = "glob import shared by tests that use varying subsets")]
+    #[allow(
+        unused_imports,
+        reason = "glob import shared by tests that use varying subsets"
+    )]
     use super::*;
     use alloy::primitives::address;
 

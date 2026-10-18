@@ -42,9 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let recipient: Address = std::env::var("RECIPIENT")
         .expect("RECIPIENT required")
         .parse()?;
-    let amount: U256 = std::env::var("AMOUNT")
-        .expect("AMOUNT required")
-        .parse()?;
+    let amount: U256 = std::env::var("AMOUNT").expect("AMOUNT required").parse()?;
 
     // Create provider and signer
     let provider = ProviderBuilder::new()

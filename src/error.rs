@@ -124,7 +124,10 @@ pub enum Error {
 
     /// A signature does not recover to the expected owner
     #[error("Signature mismatch: expected signer {expected}, recovered {recovered}")]
-    SignatureMismatch { expected: Address, recovered: Address },
+    SignatureMismatch {
+        expected: Address,
+        recovered: Address,
+    },
 
     /// Not enough owner signatures have been collected to meet the Safe threshold
     #[error("Insufficient signatures: Safe threshold requires {required}, have {present}")]

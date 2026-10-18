@@ -131,7 +131,12 @@ pub fn batch_params(calls: &[Call], target: BatchTarget) -> Result<SafeTxParams>
             IMultiSend::multiSendCall { transactions }.abi_encode(),
         ),
     };
-    Ok(SafeTxParams::new(to, U256::ZERO, data, Operation::DelegateCall))
+    Ok(SafeTxParams::new(
+        to,
+        U256::ZERO,
+        data,
+        Operation::DelegateCall,
+    ))
 }
 
 /// A Safe transaction whose every field, including the nonce, is fixed.
@@ -250,11 +255,8 @@ impl PreparedSafeTx {
             ));
         }
         let signature = signer.sign_typed_data(&typed, &domain).await?;
-        let signed = SignedSafeTx::new(
-            self.clone(),
-            signer.address(),
-            encode_signature(&signature),
-        );
+        let signed =
+            SignedSafeTx::new(self.clone(), signer.address(), encode_signature(&signature));
         signed.verify()?;
         Ok(signed)
     }
@@ -483,7 +485,10 @@ impl SignedSafeTx {
 
     /// Splits `packed` into 65-byte chunks, recovers the owner of each chunk against `safe_tx_hash`,
     /// verifies strictly ascending owner address order, and returns the map.
-    pub fn unpack_signatures(safe_tx_hash: B256, packed: &[u8]) -> Result<BTreeMap<Address, Bytes>> {
+    pub fn unpack_signatures(
+        safe_tx_hash: B256,
+        packed: &[u8],
+    ) -> Result<BTreeMap<Address, Bytes>> {
         let (chunks, rest) = packed.as_chunks::<65>();
         if !rest.is_empty() {
             return Err(Error::Signing(format!(
@@ -665,8 +670,7 @@ mod tests {
 
     #[test]
     fn call_only_target_uses_multisend_call_only() {
-        let batch =
-            batch_params(&[call(SAFE), call(MSCO)], BatchTarget::CallOnly(MSCO)).unwrap();
+        let batch = batch_params(&[call(SAFE), call(MSCO)], BatchTarget::CallOnly(MSCO)).unwrap();
         assert!(IMultiSendCallOnly::multiSendCall::abi_decode(&batch.data).is_ok());
         assert!(batch.safe_tx_gas.is_zero() && batch.nonce.is_zero());
     }
@@ -742,7 +746,11 @@ mod tests {
         let raw = crate::signing::sign_hash(&signer, p.safe_tx_hash)
             .await
             .unwrap();
-        assert_eq!(typed.packed_signatures(), raw, "same key, same hash, same bytes");
+        assert_eq!(
+            typed.packed_signatures(),
+            raw,
+            "same key, same hash, same bytes"
+        );
     }
 
     #[tokio::test]
@@ -785,11 +793,16 @@ mod tests {
         let s1 = PrivateKeySigner::random();
         let s2 = PrivateKeySigner::random();
         let s3 = PrivateKeySigner::random();
-        let p = PreparedSafeTx::single_call(1, SAFE, &call(MSCO), U256::ZERO, SafeTxGasPolicy::Zero)
-            .unwrap();
+        let p =
+            PreparedSafeTx::single_call(1, SAFE, &call(MSCO), U256::ZERO, SafeTxGasPolicy::Zero)
+                .unwrap();
 
-        let sig1 = crate::signing::sign_hash(&s1, p.safe_tx_hash).await.unwrap();
-        let sig2 = crate::signing::sign_hash(&s2, p.safe_tx_hash).await.unwrap();
+        let sig1 = crate::signing::sign_hash(&s1, p.safe_tx_hash)
+            .await
+            .unwrap();
+        let sig2 = crate::signing::sign_hash(&s2, p.safe_tx_hash)
+            .await
+            .unwrap();
         let _sig3 = encode_pre_validated_signature(s3.address());
 
         let mut signed = SignedSafeTx::empty(p.clone());
@@ -830,16 +843,23 @@ mod tests {
     async fn insert_signature_rejects_wrong_owner_or_corrupt_bytes() {
         let s1 = PrivateKeySigner::random();
         let s2 = PrivateKeySigner::random();
-        let p = PreparedSafeTx::single_call(1, SAFE, &call(MSCO), U256::ZERO, SafeTxGasPolicy::Zero)
+        let p =
+            PreparedSafeTx::single_call(1, SAFE, &call(MSCO), U256::ZERO, SafeTxGasPolicy::Zero)
+                .unwrap();
+        let sig1 = crate::signing::sign_hash(&s1, p.safe_tx_hash)
+            .await
             .unwrap();
-        let sig1 = crate::signing::sign_hash(&s1, p.safe_tx_hash).await.unwrap();
 
         let mut signed = SignedSafeTx::empty(p.clone());
-        let err = signed.insert_signature(s2.address(), sig1.clone()).unwrap_err();
+        let err = signed
+            .insert_signature(s2.address(), sig1.clone())
+            .unwrap_err();
         assert!(matches!(err, Error::SignatureMismatch { .. }));
 
         // Reversed order in unpack_signatures is rejected
-        let sig2 = crate::signing::sign_hash(&s2, p.safe_tx_hash).await.unwrap();
+        let sig2 = crate::signing::sign_hash(&s2, p.safe_tx_hash)
+            .await
+            .unwrap();
         let (high_sig, low_sig) = if s1.address() > s2.address() {
             (sig1, sig2)
         } else {

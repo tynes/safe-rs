@@ -107,7 +107,10 @@ impl ChainConfig {
 
     /// Creates a chain configuration with custom addresses
     pub fn with_addresses(chain_id: u64, addresses: ChainAddresses) -> Self {
-        Self { chain_id, addresses }
+        Self {
+            chain_id,
+            addresses,
+        }
     }
 
     /// Returns configuration for Ethereum mainnet

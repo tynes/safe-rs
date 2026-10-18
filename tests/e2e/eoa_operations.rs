@@ -803,7 +803,9 @@ async fn test_eoa_simulate_failure_returns_revert_reason() {
         .simulate()
         .await
         .expect("Simulation should run");
-    let results = builder.simulation_results().expect("Results should be stored");
+    let results = builder
+        .simulation_results()
+        .expect("Results should be stored");
     assert!(!results[0].success);
     assert!(results[0].revert_reason.is_some());
 
@@ -1076,10 +1078,7 @@ async fn test_eoa_mixed_eth_and_erc20_batch() {
         .get_balance(eth_recipient)
         .await
         .expect("Failed to get final ETH balance");
-    assert_eq!(
-        final_eth_balance,
-        initial_eth_balance + eth_transfer_amount
-    );
+    assert_eq!(final_eth_balance, initial_eth_balance + eth_transfer_amount);
 
     // Verify token transfer
     let final_token_balance = token

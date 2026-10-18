@@ -65,7 +65,10 @@ async fn test_wallet_connect_safe_with_config() {
         .expect("Failed to connect wallet");
 
     assert!(wallet.is_safe(), "Wallet should be Safe when deployed");
-    assert!(!wallet.is_eoa(), "Wallet should not be EOA when Safe is deployed");
+    assert!(
+        !wallet.is_eoa(),
+        "Wallet should not be EOA when Safe is deployed"
+    );
     assert_eq!(
         wallet.signer_address(),
         harness.signer_address(),
@@ -133,7 +136,10 @@ async fn test_wallet_deploy_creates_safe() {
         .await
         .expect("Failed to deploy Safe");
 
-    let wallet = builder.connect(address).await.expect("Failed to connect to Safe");
+    let wallet = builder
+        .connect(address)
+        .await
+        .expect("Failed to connect to Safe");
 
     assert!(wallet.is_safe(), "Wallet should be Safe after deployment");
     assert!(!wallet.is_eoa(), "Wallet should not be EOA");
@@ -181,7 +187,10 @@ async fn test_wallet_deploy_uses_existing_safe() {
         "Should return existing Safe address"
     );
 
-    let wallet = builder.connect(deployed_address).await.expect("Failed to connect");
+    let wallet = builder
+        .connect(deployed_address)
+        .await
+        .expect("Failed to connect");
     assert!(wallet.is_safe(), "Wallet should be Safe");
 }
 
@@ -238,7 +247,10 @@ async fn test_wallet_config_salt_nonce() {
         .await
         .expect("Failed to compute address 2");
 
-    assert_ne!(addr1, addr2, "Different salt nonces should produce different addresses");
+    assert_ne!(
+        addr1, addr2,
+        "Different salt nonces should produce different addresses"
+    );
 }
 
 /// Test WalletConfig with additional owners
@@ -270,7 +282,10 @@ async fn test_wallet_config_additional_owners() {
         .expect("Failed to compute address 2");
 
     // Different owners should produce different addresses (even with same salt)
-    assert_ne!(addr1, addr2, "Different owners should produce different addresses");
+    assert_ne!(
+        addr1, addr2,
+        "Different owners should produce different addresses"
+    );
 }
 
 /// Test WalletConfig with different threshold

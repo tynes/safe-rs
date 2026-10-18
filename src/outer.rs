@@ -334,7 +334,10 @@ mod tests {
         assert_eq!(outer.chain_id, 10);
         assert_eq!(outer.to, safe);
         assert_eq!(outer.value, U256::ZERO);
-        assert_eq!((outer.max_fee_per_gas, outer.max_priority_fee_per_gas), (7, 2));
+        assert_eq!(
+            (outer.max_fee_per_gas, outer.max_priority_fee_per_gas),
+            (7, 2)
+        );
         let decoded = decode_exec_calldata(&outer.input).unwrap();
         assert_eq!(decoded.into_params(U256::from(3)), prepared.params);
     }

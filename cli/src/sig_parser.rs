@@ -41,8 +41,12 @@ fn parse_param_types(sig: &str) -> Result<Vec<String>> {
     let sig = sig.trim();
 
     // Find the opening paren
-    let open_paren = sig.find('(').ok_or_else(|| eyre!("Invalid signature: missing '('"))?;
-    let close_paren = sig.rfind(')').ok_or_else(|| eyre!("Invalid signature: missing ')'"))?;
+    let open_paren = sig
+        .find('(')
+        .ok_or_else(|| eyre!("Invalid signature: missing '('"))?;
+    let close_paren = sig
+        .rfind(')')
+        .ok_or_else(|| eyre!("Invalid signature: missing ')'"))?;
 
     if close_paren <= open_paren {
         return Err(eyre!("Invalid signature format"));
@@ -107,7 +111,9 @@ fn parse_args(types: &[String], args: &[String]) -> Result<Vec<DynSolValue>> {
 
 /// Parses a single argument
 fn parse_arg(ty: &str, arg: &str) -> Result<DynSolValue> {
-    let sol_type: DynSolType = ty.parse().map_err(|e| eyre!("Invalid type '{}': {}", ty, e))?;
+    let sol_type: DynSolType = ty
+        .parse()
+        .map_err(|e| eyre!("Invalid type '{}': {}", ty, e))?;
     parse_value(&sol_type, arg)
 }
 
@@ -115,7 +121,9 @@ fn parse_arg(ty: &str, arg: &str) -> Result<DynSolValue> {
 fn parse_value(sol_type: &DynSolType, arg: &str) -> Result<DynSolValue> {
     match sol_type {
         DynSolType::Address => {
-            let addr: Address = arg.parse().map_err(|e| eyre!("Invalid address '{}': {}", arg, e))?;
+            let addr: Address = arg
+                .parse()
+                .map_err(|e| eyre!("Invalid address '{}': {}", arg, e))?;
             Ok(DynSolValue::Address(addr))
         }
         DynSolType::Bool => {
@@ -141,11 +149,7 @@ fn parse_value(sol_type: &DynSolType, arg: &str) -> Result<DynSolValue> {
         DynSolType::FixedBytes(len) => {
             let bytes = parse_bytes(arg)?;
             if bytes.len() != *len {
-                return Err(eyre!(
-                    "Expected {} bytes, got {}",
-                    len,
-                    bytes.len()
-                ));
+                return Err(eyre!("Expected {} bytes, got {}", len, bytes.len()));
             }
             // Pad to 32 bytes (right-padded with zeros)
             let mut padded = [0u8; 32];
@@ -158,25 +162,15 @@ fn parse_value(sol_type: &DynSolType, arg: &str) -> Result<DynSolValue> {
         DynSolType::String => Ok(DynSolValue::String(arg.to_string())),
         DynSolType::Array(inner) => {
             let elements = parse_array_arg(arg)?;
-            let values: Result<Vec<_>> = elements
-                .iter()
-                .map(|el| parse_value(inner, el))
-                .collect();
+            let values: Result<Vec<_>> = elements.iter().map(|el| parse_value(inner, el)).collect();
             Ok(DynSolValue::Array(values?))
         }
         DynSolType::FixedArray(inner, len) => {
             let elements = parse_array_arg(arg)?;
             if elements.len() != *len {
-                return Err(eyre!(
-                    "Expected {} elements, got {}",
-                    len,
-                    elements.len()
-                ));
+                return Err(eyre!("Expected {} elements, got {}", len, elements.len()));
             }
-            let values: Result<Vec<_>> = elements
-                .iter()
-                .map(|el| parse_value(inner, el))
-                .collect();
+            let values: Result<Vec<_>> = elements.iter().map(|el| parse_value(inner, el)).collect();
             Ok(DynSolValue::FixedArray(values?))
         }
         DynSolType::Tuple(types) => {
@@ -223,9 +217,11 @@ fn parse_int(s: &str, bits: usize) -> Result<alloy::primitives::I256> {
         if abs_value > max_neg {
             return Err(eyre!("Value out of range for int{}", bits));
         }
-        Ok(-alloy::primitives::I256::try_from(abs_value).map_err(|e| eyre!("Int conversion error: {}", e))?)
+        Ok(-alloy::primitives::I256::try_from(abs_value)
+            .map_err(|e| eyre!("Int conversion error: {}", e))?)
     } else {
-        alloy::primitives::I256::try_from(abs_value).map_err(|e| eyre!("Int conversion error: {}", e))
+        alloy::primitives::I256::try_from(abs_value)
+            .map_err(|e| eyre!("Int conversion error: {}", e))
     }
 }
 
@@ -252,8 +248,12 @@ fn parse_array_arg(s: &str) -> Result<Vec<String>> {
 /// Parses a tuple argument like "(val1,val2)"
 fn parse_tuple_arg(s: &str) -> Result<Vec<String>> {
     let s = s.trim();
-    let s = s.strip_prefix('(').ok_or_else(|| eyre!("Tuple must start with '('"))?;
-    let s = s.strip_suffix(')').ok_or_else(|| eyre!("Tuple must end with ')'"))?;
+    let s = s
+        .strip_prefix('(')
+        .ok_or_else(|| eyre!("Tuple must start with '('"))?;
+    let s = s
+        .strip_suffix(')')
+        .ok_or_else(|| eyre!("Tuple must end with ')'"))?;
 
     if s.is_empty() {
         return Ok(Vec::new());
@@ -340,7 +340,9 @@ mod tests {
 
         assert_eq!(
             to,
-            "0x1234567890123456789012345678901234567890".parse::<Address>().unwrap()
+            "0x1234567890123456789012345678901234567890"
+                .parse::<Address>()
+                .unwrap()
         );
         assert!(!data.is_empty());
     }
@@ -659,10 +661,8 @@ mod tests {
 
     #[test]
     fn test_parse_call_spec_no_args() {
-        let (to, data) = parse_call_spec(
-            "0x1234567890123456789012345678901234567890:totalSupply()",
-        )
-        .unwrap();
+        let (to, data) =
+            parse_call_spec("0x1234567890123456789012345678901234567890:totalSupply()").unwrap();
 
         assert_eq!(
             to,
@@ -676,10 +676,8 @@ mod tests {
 
     #[test]
     fn test_parse_call_spec_with_empty_args() {
-        let (to, data) = parse_call_spec(
-            "0x1234567890123456789012345678901234567890:totalSupply():",
-        )
-        .unwrap();
+        let (to, data) =
+            parse_call_spec("0x1234567890123456789012345678901234567890:totalSupply():").unwrap();
 
         assert_eq!(
             to,
@@ -699,7 +697,9 @@ mod tests {
 
     #[test]
     fn test_parse_call_spec_invalid_address() {
-        let result = parse_call_spec("invalid:transfer(address,uint256):0x1111111111111111111111111111111111111111,100");
+        let result = parse_call_spec(
+            "invalid:transfer(address,uint256):0x1111111111111111111111111111111111111111,100",
+        );
         assert!(result.is_err());
     }
 

@@ -194,7 +194,8 @@ pub async fn read_safe_state<P: Provider<N>, N: Network>(
     }
     let code_hash = keccak256(&code);
 
-    let singleton = storage_address(provider, safe, SAFE_SINGLETON_SLOT, block, "singleton").await?;
+    let singleton =
+        storage_address(provider, safe, SAFE_SINGLETON_SLOT, block, "singleton").await?;
     let guard = storage_address(provider, safe, GUARD_STORAGE_SLOT.into(), block, "guard").await?;
     let fallback_handler = storage_address(
         provider,

@@ -249,7 +249,9 @@ async fn run_hd(args: CreateArgs, json: bool) -> Result<()> {
             .creation
             .clone()
             .ok_or_else(|| {
-                eyre!("{key} was not created by this wallet, so its creation parameters are unknown")
+                eyre!(
+                    "{key} was not created by this wallet, so its creation parameters are unknown"
+                )
             })?;
         Creation {
             owner: Reserved {

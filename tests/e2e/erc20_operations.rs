@@ -35,7 +35,11 @@ async fn test_deploy_mock_erc20() {
 
     // Verify Safe balance using IERC20 interface
     let token = IERC20::new(token_address, &harness.provider);
-    let balance = token.balanceOf(safe_address).call().await.expect("Failed to get balance");
+    let balance = token
+        .balanceOf(safe_address)
+        .call()
+        .await
+        .expect("Failed to get balance");
 
     assert_eq!(balance, mint_amount, "Safe should have 1000 tokens");
 }
@@ -101,8 +105,16 @@ async fn test_erc20_transfer_via_safe() {
 
     // Verify balances
     let token = IERC20::new(token_address, &harness.provider);
-    let safe_balance = token.balanceOf(safe_address).call().await.expect("Failed to get Safe balance");
-    let recipient_balance = token.balanceOf(recipient).call().await.expect("Failed to get recipient balance");
+    let safe_balance = token
+        .balanceOf(safe_address)
+        .call()
+        .await
+        .expect("Failed to get Safe balance");
+    let recipient_balance = token
+        .balanceOf(recipient)
+        .call()
+        .await
+        .expect("Failed to get recipient balance");
 
     assert_eq!(
         safe_balance,
@@ -170,7 +182,11 @@ async fn test_erc20_approve() {
 
     // Verify allowance
     let token = IERC20::new(token_address, &harness.provider);
-    let allowance = token.allowance(safe_address, spender).call().await.expect("Failed to get allowance");
+    let allowance = token
+        .allowance(safe_address, spender)
+        .call()
+        .await
+        .expect("Failed to get allowance");
 
     assert_eq!(allowance, approve_amount, "Allowance should be 500 tokens");
 }
@@ -266,9 +282,18 @@ async fn test_batch_erc20_operations() {
         mint_amount - transfer_amount - transfer_amount,
         "Safe should have 900 tokens"
     );
-    assert_eq!(balance1, transfer_amount, "Recipient1 should have 50 tokens");
-    assert_eq!(balance2, transfer_amount, "Recipient2 should have 50 tokens");
-    assert_eq!(allowance, approve_amount, "Spender should have max allowance");
+    assert_eq!(
+        balance1, transfer_amount,
+        "Recipient1 should have 50 tokens"
+    );
+    assert_eq!(
+        balance2, transfer_amount,
+        "Recipient2 should have 50 tokens"
+    );
+    assert_eq!(
+        allowance, approve_amount,
+        "Spender should have max allowance"
+    );
 }
 
 /// Regression test for the MultiSend batch gas-estimation bug (see #2/#3): a

@@ -6,7 +6,7 @@ use alloy::sol_types::SolCall;
 
 use crate::common::TestHarness;
 use crate::skip_if_no_rpc;
-use safe_rs::{ForkSimulator, IERC20, Operation};
+use safe_rs::{ForkSimulator, Operation, IERC20};
 
 /// USDC contract address on Ethereum mainnet
 const USDC_ADDRESS: Address = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
