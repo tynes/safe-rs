@@ -55,6 +55,8 @@ impl Console {
 #[derive(Serialize)]
 pub struct SafeInfoOutput {
     pub address: Address,
+    /// Native balance in wei
+    pub balance: U256,
     pub nonce: U256,
     pub threshold: u64,
     pub owners: Vec<Address>,
@@ -74,9 +76,10 @@ pub struct SafeInfoOutput {
 }
 
 impl SafeInfoOutput {
-    pub fn new(state: SafeState, block_number: u64, block_hash: B256) -> Self {
+    pub fn new(state: SafeState, balance: U256, block_number: u64, block_hash: B256) -> Self {
         Self {
             address: state.address,
+            balance,
             nonce: state.nonce,
             threshold: state.threshold.saturating_to(),
             owners: state.owners,
@@ -105,6 +108,7 @@ impl Report for SafeInfoOutput {
             self.version.as_deref().unwrap_or("unknown")
         );
         let _ = writeln!(s, "Singleton: {}", self.singleton);
+        let _ = writeln!(s, "Balance: {} ETH", format_ether(self.balance));
         let _ = writeln!(s, "Nonce: {}", self.nonce);
         let _ = writeln!(s, "Threshold: {}", self.threshold);
         let _ = writeln!(s, "Owners:");
@@ -131,6 +135,130 @@ impl Report for SafeInfoOutput {
             "Fallback Handler: {}",
             optional_address(self.fallback_handler)
         );
+        s
+    }
+}
+
+/// How far a Safe transaction is from execution, read at one block.
+#[derive(Serialize)]
+pub struct SafeApprovalsOutput {
+    pub safe: Address,
+    pub safe_tx_hash: B256,
+    pub threshold: u64,
+    /// Owners that approved on-chain or signed offchain
+    pub approvals: u64,
+    /// Current owners with `approvedHashes(owner, safe_tx_hash) != 0`
+    pub approved_onchain: Vec<Address>,
+    /// Current owners with a valid signature in the bundle and no on-chain approval
+    pub signed_offchain: Vec<Address>,
+    /// Current owners that have neither approved nor signed
+    pub pending: Vec<Address>,
+    /// Enough approvals for anyone to execute
+    pub executable: bool,
+    /// The Safe's current nonce
+    pub safe_nonce: U256,
+    /// The transaction's nonce; known only from a bundle
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_nonce: Option<U256>,
+    /// True when the Safe's nonce is past the transaction's (executed or
+    /// replaced); known only from a bundle
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce_used: Option<bool>,
+    pub block_number: u64,
+    pub block_hash: B256,
+}
+
+impl SafeApprovalsOutput {
+    pub fn new(
+        state: &SafeState,
+        safe_tx_hash: B256,
+        approved_onchain: Vec<Address>,
+        signed_offchain: Vec<Address>,
+        tx_nonce: Option<U256>,
+        block_number: u64,
+        block_hash: B256,
+    ) -> Self {
+        let pending = state
+            .owners
+            .iter()
+            .filter(|owner| !approved_onchain.contains(owner) && !signed_offchain.contains(owner))
+            .copied()
+            .collect();
+        let approvals = (approved_onchain.len() + signed_offchain.len()) as u64;
+        let threshold: u64 = state.threshold.saturating_to();
+        Self {
+            safe: state.address,
+            safe_tx_hash,
+            threshold,
+            approvals,
+            approved_onchain,
+            signed_offchain,
+            pending,
+            executable: approvals >= threshold,
+            safe_nonce: state.nonce,
+            tx_nonce,
+            nonce_used: tx_nonce.map(|nonce| nonce < state.nonce),
+            block_number,
+            block_hash,
+        }
+    }
+}
+
+impl Report for SafeApprovalsOutput {
+    fn human(&self) -> String {
+        let mut s = String::new();
+        let _ = writeln!(s, "Safe: {}", self.safe);
+        let _ = writeln!(s, "Block: {} ({})", self.block_number, self.block_hash);
+        let _ = writeln!(s, "SafeTxHash: {}", self.safe_tx_hash);
+        match (self.tx_nonce, self.nonce_used) {
+            (Some(nonce), Some(true)) => {
+                let _ = writeln!(
+                    s,
+                    "Nonce: {nonce} (already used, Safe nonce is {}: executed or replaced)",
+                    self.safe_nonce
+                );
+            }
+            (Some(nonce), _) => {
+                let _ = writeln!(s, "Nonce: {nonce} (Safe nonce is {})", self.safe_nonce);
+            }
+            (None, _) => {
+                let _ = writeln!(s, "Safe nonce: {}", self.safe_nonce);
+            }
+        }
+        let _ = writeln!(
+            s,
+            "Approvals: {} / {} threshold",
+            self.approvals, self.threshold
+        );
+        for (label, owners) in [
+            ("Approved on-chain", &self.approved_onchain),
+            ("Signed offchain", &self.signed_offchain),
+            ("Pending", &self.pending),
+        ] {
+            if owners.is_empty() {
+                continue;
+            }
+            let _ = writeln!(s, "{label}:");
+            for owner in owners {
+                let _ = writeln!(s, "  {owner}");
+            }
+        }
+        let status = if self.nonce_used == Some(true) {
+            "Status: nonce already used"
+        } else if self.executable {
+            "Status: ready to execute"
+        } else if self.approvals + 1 == self.threshold {
+            "Status: one approval short (a pending owner can execute it directly)"
+        } else {
+            "Status: waiting for approvals"
+        };
+        let _ = write!(s, "{status}");
+        if self.tx_nonce.is_none() {
+            let _ = write!(
+                s,
+                "\nNote: on-chain approvals stay after execution; pass --bundle to check the nonce"
+            );
+        }
         s
     }
 }
@@ -755,7 +883,9 @@ pub fn confirm_prompt(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::eips::BlockId;
     use alloy::primitives::{address, b256};
+    use safe_rs::ModuleList;
 
     fn to_json(value: &impl Serialize) -> serde_json::Value {
         serde_json::from_str(&serde_json::to_string_pretty(value).unwrap()).unwrap()
@@ -764,6 +894,7 @@ mod tests {
     fn info(owners: Vec<Address>) -> SafeInfoOutput {
         SafeInfoOutput {
             address: address!("0x1234567890123456789012345678901234567890"),
+            balance: U256::from(1_500_000_000_000_000_000u128),
             nonce: U256::from(42),
             threshold: 2,
             owners,
@@ -797,6 +928,77 @@ mod tests {
         assert_eq!(parsed["version"], "1.4.1");
         assert_eq!(parsed["modules_complete"], true);
         assert_eq!(parsed["block_number"], 7);
+        assert_eq!(parsed["balance"], "0x14d1120d7b160000"); // 1.5 ether in wei
+    }
+
+    fn approvals(
+        approved: Vec<Address>,
+        offchain: Vec<Address>,
+        tx_nonce: Option<U256>,
+    ) -> SafeApprovalsOutput {
+        let state = SafeState {
+            address: address!("0x1234567890123456789012345678901234567890"),
+            code_hash: B256::ZERO,
+            singleton: Address::ZERO,
+            version: None,
+            owners: vec![
+                address!("0x1111111111111111111111111111111111111111"),
+                address!("0x2222222222222222222222222222222222222222"),
+                address!("0x3333333333333333333333333333333333333333"),
+            ],
+            threshold: U256::from(2),
+            nonce: U256::from(5),
+            modules: ModuleList {
+                modules: vec![],
+                complete: true,
+            },
+            guard: Address::ZERO,
+            fallback_handler: Address::ZERO,
+            module_guard: None,
+            block: BlockId::latest(),
+        };
+        SafeApprovalsOutput::new(
+            &state,
+            B256::ZERO,
+            approved,
+            offchain,
+            tx_nonce,
+            7,
+            B256::ZERO,
+        )
+    }
+
+    #[test]
+    fn test_safe_approvals_counts_onchain_and_offchain() {
+        let one = address!("0x1111111111111111111111111111111111111111");
+        let two = address!("0x2222222222222222222222222222222222222222");
+        let output = approvals(vec![one], vec![], None);
+        assert_eq!(output.approvals, 1);
+        assert!(!output.executable);
+        assert_eq!(output.pending.len(), 2);
+        assert!(output.human().contains("one approval short"));
+        let parsed = to_json(&output);
+        assert!(parsed.get("nonce_used").is_none());
+
+        let output = approvals(vec![one], vec![two], Some(U256::from(5)));
+        assert_eq!(output.approvals, 2);
+        assert!(output.executable);
+        assert_eq!(output.nonce_used, Some(false));
+        assert!(output.human().contains("ready to execute"));
+    }
+
+    #[test]
+    fn test_safe_approvals_flags_a_used_nonce() {
+        let output = approvals(vec![], vec![], Some(U256::from(4)));
+        assert_eq!(output.nonce_used, Some(true));
+        assert!(output.human().contains("nonce already used"));
+    }
+
+    #[test]
+    fn test_safe_info_human_shows_balance_in_ether() {
+        assert!(info(vec![])
+            .human()
+            .contains("Balance: 1.500000000000000000 ETH"));
     }
 
     #[test]

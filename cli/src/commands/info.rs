@@ -1,4 +1,5 @@
 use alloy::eips::BlockId;
+use alloy::providers::Provider;
 use color_eyre::eyre::{bail, Result};
 use safe_rs::{read_safe_state, ParentHeader, ReadSafeStateOptions};
 
@@ -27,6 +28,8 @@ pub async fn run(args: InfoArgs, json: bool) -> Result<()> {
         read_default_safe(&provider, signer, block).await?
     };
 
-    SafeInfoOutput::new(state, header.number, header.hash).print(json);
+    let balance = provider.get_balance(state.address).block_id(block).await?;
+
+    SafeInfoOutput::new(state, balance, header.number, header.hash).print(json);
     Ok(())
 }

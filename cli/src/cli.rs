@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, B256, U256};
 use alloy_dyn_abi::DynSolType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use safe_rs::{ChainAddresses, SpecId};
@@ -30,6 +30,10 @@ pub enum Commands {
 
     /// Display Safe configuration (owners, threshold, nonce, modules, guard, ...)
     Info(InfoArgs),
+
+    /// Show how many owners have approved a Safe transaction: on-chain
+    /// approveHash approvals, plus offchain signatures saved in --bundle
+    Approvals(ApprovalsArgs),
 
     /// Change the Safe's owners, threshold, modules, guards or fallback
     /// handler, all in one Safe transaction
@@ -498,6 +502,38 @@ pub struct InfoArgs {
     pub password: PasswordArgs,
 }
 
+/// Reads `approvedHashes(owner, safeTxHash)` for each current owner, so no
+/// logs are scanned. Safe 1.3+ never clears these approvals, so with a bare
+/// hash an executed transaction still shows its approvals; pass --bundle to
+/// also check whether its nonce is used.
+#[derive(Parser, Clone)]
+pub struct ApprovalsArgs {
+    /// SafeTxHash of the transaction (default: the one prepared in --bundle)
+    #[arg(value_name = "SAFE_TX_HASH", required_unless_present = "bundle")]
+    pub safe_tx_hash: Option<B256>,
+
+    /// Bundle file holding the prepared transaction; its offchain signatures
+    /// are counted too
+    #[arg(long, value_name = "PATH")]
+    pub bundle: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub safe: SafeArgs,
+
+    #[command(flatten)]
+    pub rpc: RpcArgs,
+
+    /// Block to read at: a number, hash or tag (default: latest)
+    #[arg(long, value_parser = parse_block_id)]
+    pub block: Option<BlockId>,
+
+    #[command(flatten)]
+    pub wallet: WalletArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+}
+
 #[derive(Parser, Clone)]
 pub struct CreateArgs {
     #[command(flatten)]
@@ -940,6 +976,31 @@ mod tests {
             Commands::Info(info) => Ok(info),
             _ => unreachable!(),
         }
+    }
+
+    fn parse_approvals(args: &[&str]) -> Result<ApprovalsArgs, clap::Error> {
+        let args = [
+            &["safe", "approvals", "--rpc-url", "http://localhost:8545"],
+            args,
+        ]
+        .concat();
+        match Cli::try_parse_from(args)?.command {
+            Commands::Approvals(approvals) => Ok(approvals),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn approvals_needs_a_hash_or_a_bundle() {
+        const HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+        let approvals = parse_approvals(&[HASH, "--safe", SAFE]).unwrap();
+        assert_eq!(approvals.safe_tx_hash, Some(HASH.parse().unwrap()));
+        assert_eq!(approvals.safe.safe, Some(SAFE.parse().unwrap()));
+
+        let approvals = parse_approvals(&["--bundle", "tx.json"]).unwrap();
+        assert_eq!(approvals.safe_tx_hash, None);
+
+        assert!(parse_approvals(&["--safe", SAFE]).is_err());
     }
 
     #[test]
