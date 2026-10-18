@@ -20,6 +20,7 @@ use std::path::Path;
 use std::process::Command;
 
 use alloy::primitives::{hex, Address, B256, U256};
+use alloy::providers::ext::AnvilApi;
 use alloy::providers::Provider;
 use common::LocalHarness;
 use safe_rs::ChainAddresses;
@@ -385,7 +386,14 @@ async fn multi_owner_offchain_bundle_collection_and_execution() {
     );
 
     // Owner 2 loads tx.json, appends signature (2/2), and executes execTransaction on-chain.
-    let second = send_as(&h, &home, safe, &owner2, &["--bundle", bundle]).json();
+    // No --safe: the prepared bundle names its Safe, not owner 2's default one.
+    let owner2_key = hex::encode_prefixed(owner2.to_bytes());
+    let second = safe_cli(
+        &h,
+        &home,
+        &["send", "--bundle", bundle, "--private-key", &owner2_key],
+    )
+    .json();
     assert_eq!(second["success"], true);
     assert_eq!(second["outcome"], "success");
     assert_eq!(balance(&h, recipient).await, U256::from(100));
@@ -535,4 +543,112 @@ async fn multi_owner_onchain_approve_hash_flow() {
     assert_eq!(executed["success"], true);
     assert_eq!(executed["outcome"], "success");
     assert_eq!(balance(&h, recipient).await, U256::from(50));
+}
+
+/// Runs `safe <args> --json` against the harness chain, with none of the
+/// ambient environment variables the CLI reads.
+fn safe_cli(h: &LocalHarness, home: &Path, args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_safe"));
+    command
+        .args(args)
+        .args(["--rpc-url", h.url().as_str()])
+        .arg("--json")
+        .env("SAFE_RS_HOME", home);
+    for name in [
+        "PRIVATE_KEY",
+        "SAFE_ADDRESS",
+        "ETH_RPC_URL",
+        "SAFE_HD_WALLET",
+        "SAFE_PASSWORD_FILE",
+        "SAFE_PAYER_PRIVATE_KEY",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().expect("run safe");
+    Output {
+        ok: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_and_call_default_to_the_signers_one_of_one_safe() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let key = hex::encode_prefixed(h.owner.to_bytes());
+    let recipient = Address::repeat_byte(0x77);
+
+    // The default Safe lives at the canonical v1.4.1 addresses.
+    let canonical = ChainAddresses::v1_4_1();
+    for (target, source) in [
+        (canonical.proxy_factory, h.addresses.proxy_factory),
+        (canonical.safe_singleton, h.addresses.safe_singleton),
+        (canonical.fallback_handler, h.addresses.fallback_handler),
+    ] {
+        let code = h.provider.get_code_at(source).await.unwrap();
+        h.provider.anvil_set_code(target, code).await.unwrap();
+    }
+
+    // Before it is deployed, nothing is guessed.
+    let missing = safe_cli(&h, home, &["send", &recipient.to_string(), "--private-key", &key]);
+    assert!(!missing.ok);
+    assert!(
+        missing.stderr.contains("nothing is deployed"),
+        "{}",
+        missing.stderr
+    );
+    let anonymous = safe_cli(&h, home, &["call", &recipient.to_string(), "owner()"]);
+    assert!(!anonymous.ok);
+    assert!(anonymous.stderr.contains("No Safe specified"), "{}", anonymous.stderr);
+
+    let created = safe_cli(
+        &h,
+        home,
+        &[
+            "create",
+            "--private-key",
+            &key,
+            "--safe-version",
+            "1.4.1",
+            "--no-confirm",
+        ],
+    )
+    .json();
+    let safe: Address = created["safe_address"].as_str().unwrap().parse().unwrap();
+    let ether = U256::from(10).pow(U256::from(18));
+    h.fund(safe, ether).await;
+
+    let sent = safe_cli(
+        &h,
+        home,
+        &[
+            "send",
+            &recipient.to_string(),
+            "--value",
+            "0.5ether",
+            "--private-key",
+            &key,
+            "--no-confirm",
+        ],
+    );
+    assert!(sent.stderr.contains(&safe.to_string()), "{}", sent.stderr);
+    assert_eq!(sent.json()["success"], true);
+    assert_eq!(balance(&h, recipient).await, ether / U256::from(2));
+    assert_eq!(balance(&h, safe).await, ether / U256::from(2));
+
+    let called = safe_cli(
+        &h,
+        home,
+        &[
+            "call",
+            &safe.to_string(),
+            "getThreshold()",
+            "--private-key",
+            &key,
+        ],
+    )
+    .json();
+    assert_eq!(called["success"], true);
 }

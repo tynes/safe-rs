@@ -1,8 +1,10 @@
 use alloy::eips::BlockId;
+use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use clap::ValueEnum;
-use color_eyre::eyre::{bail, Result};
+use color_eyre::eyre::{bail, eyre, Result};
+use safe_rs::rotation::RotationState;
 use safe_rs::{
     read_safe_state, ChainAddresses, Error, ReadSafeStateOptions, SafeState, WalletBuilder,
     WalletConfig,
@@ -10,6 +12,33 @@ use safe_rs::{
 
 use crate::cli::SafeVersion;
 use crate::commands::HttpProvider;
+
+/// The Safe a `--safe` command acts on: `--safe` (or `SAFE_ADDRESS`) when
+/// given, else the signer's default Safe, read at `block`.
+pub(super) async fn safe_or_default(
+    provider: &HttpProvider,
+    safe: Option<Address>,
+    signer: Option<&PrivateKeySigner>,
+    block: BlockId,
+) -> Result<Address> {
+    if let Some(safe) = safe {
+        return Ok(safe);
+    }
+    let Some(signer) = signer else {
+        bail!(
+            "No Safe specified. Pass --safe (or set SAFE_ADDRESS), or --private-key, --keystore \
+             or --interactive to use the signer's default Safe"
+        );
+    };
+    let safe = read_default_safe(provider, signer.clone(), block)
+        .await?
+        .address;
+    eprintln!(
+        "Using the default Safe of signer {}: {safe}",
+        signer.address()
+    );
+    Ok(safe)
+}
 
 /// Reads the default Safe of a signer: the one `safe create` deploys
 /// when run without options.
@@ -52,4 +81,77 @@ pub(super) async fn read_default_safe(
         "No default Safe found for signer {signer_address}: {checked}. Deploy one with \
          `safe create`, or pass the address of a Safe created with other options"
     )
+}
+
+/// Select only within the connected chain; never guess between wallet bindings.
+///
+/// `choose` tells how to pass an address instead, such as "--safe <SAFE>".
+pub(super) fn recorded_safe(state: &RotationState, chain_id: u64, choose: &str) -> Result<Address> {
+    let mut candidates = Vec::new();
+    for key in state.safes.keys() {
+        let (chain, safe) = key
+            .split_once(':')
+            .ok_or_else(|| eyre!("invalid Safe binding {key}"))?;
+        let chain: u64 = chain
+            .parse()
+            .map_err(|_| eyre!("invalid chain ID in Safe binding {key}"))?;
+        if chain == chain_id {
+            let safe: Address = safe
+                .parse()
+                .map_err(|_| eyre!("invalid address in Safe binding {key}"))?;
+            candidates.push(safe);
+        }
+    }
+    match candidates.as_slice() {
+        [safe] => Ok(*safe),
+        [] => bail!(
+            "No Safe recorded for this wallet on chain {chain_id}. Pass its address with \
+             {choose}, or recover its state with \
+             `safe wallet sync --safe <SAFE>` using the same wallet and RPC URL"
+        ),
+        _ => bail!(
+            "Multiple Safes recorded for this wallet on chain {chain_id}: {}. \
+             Choose one with {choose}",
+            candidates
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use safe_rs::rotation::{binding_key, OwnerRef};
+
+    #[test]
+    fn recorded_safes_are_selected_only_when_unambiguous_on_this_chain() {
+        let mut state = RotationState::new(Address::ZERO, 1);
+        let first = Address::repeat_byte(1);
+        let second = Address::repeat_byte(2);
+        let owner = OwnerRef::Derived {
+            index: 1,
+            address: Address::repeat_byte(3),
+        };
+        state.bind(&binding_key(10, second), owner).unwrap();
+        let before = state.clone();
+        let error = recorded_safe(&state, 1, "--safe").unwrap_err().to_string();
+        assert!(error.contains("No Safe recorded"));
+        assert!(error.contains("wallet sync"));
+        assert_eq!(state, before);
+
+        state.bind(&binding_key(1, first), owner).unwrap();
+        assert_eq!(recorded_safe(&state, 1, "--safe").unwrap(), first);
+        assert_eq!(recorded_safe(&state, 10, "--safe").unwrap(), second);
+
+        state.bind(&binding_key(1, second), owner).unwrap();
+        let before = state.clone();
+        let error = recorded_safe(&state, 1, "--safe").unwrap_err().to_string();
+        assert!(error.contains("Multiple Safes"));
+        assert!(error.contains(&first.to_string()));
+        assert!(error.contains(&second.to_string()));
+        assert_eq!(state, before);
+    }
 }
