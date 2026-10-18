@@ -1,7 +1,8 @@
 //! Harness for tests against a fresh, non-forked Anvil chain.
 //!
-//! Safe v1.4.1 is deployed from the vendored npm artifacts through Anvil's
-//! deterministic CREATE2 deployer, so these tests need no RPC URL.
+//! Safe v1.4.1 (or, with [`LocalHarness::with_version`], v1.5.0) is deployed
+//! from the vendored npm artifacts through Anvil's deterministic CREATE2
+//! deployer, so these tests need no RPC URL.
 
 use std::time::Duration;
 
@@ -24,19 +25,26 @@ use safe_rs::{
 /// Anvil's default deterministic CREATE2 deployer (Arachnid).
 pub const CREATE2_DEPLOYER: Address = address!("0x4e59b44847b379578588920cA78FbF26c0B4956C");
 
-/// The vendored Safe artifacts. The harness is also compiled into the CLI
-/// crate's tests, whose manifest is one directory down.
-fn fixtures_dir() -> std::path::PathBuf {
+/// The Safe version [`LocalHarness::new`] deploys.
+pub const DEFAULT_VERSION: &str = "1.4.1";
+
+/// The vendored Safe artifacts of `version`. The harness is also compiled into
+/// the CLI crate's tests, whose manifest is one directory down.
+fn fixtures_dir(version: &str) -> std::path::PathBuf {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     [manifest.to_path_buf(), manifest.join("..")]
         .into_iter()
-        .map(|dir| dir.join("tests/fixtures/safe-1.4.1"))
+        .map(|dir| dir.join(format!("tests/fixtures/safe-{version}")))
         .find(|dir| dir.is_dir())
         .expect("Safe fixtures directory")
 }
 
 fn artifact_bytecode(name: &str) -> Bytes {
-    let path = fixtures_dir().join(format!("{name}.json"));
+    artifact_bytecode_of(DEFAULT_VERSION, name)
+}
+
+fn artifact_bytecode_of(version: &str, name: &str) -> Bytes {
+    let path = fixtures_dir(version).join(format!("{name}.json"));
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("read artifact"))
             .expect("parse artifact");
@@ -88,11 +96,19 @@ pub struct LocalHarness {
     pub chain_id: u64,
     pub addresses: ChainAddresses,
     pub safe_l2: Address,
+    /// `DebugTransactionGuard`; in v1.5.0 it is also a module guard
     pub guard: Address,
+    /// The Safe version deployed
+    pub version: &'static str,
 }
 
 impl LocalHarness {
     pub async fn new() -> Self {
+        Self::with_version(DEFAULT_VERSION).await
+    }
+
+    /// A harness with Safe `version` ("1.4.1" or "1.5.0") deployed.
+    pub async fn with_version(version: &'static str) -> Self {
         let anvil = Anvil::new().args(["--hardfork", "osaka"]).spawn();
         let deployer: PrivateKeySigner = anvil.keys()[0].clone().into();
         let owner: PrivateKeySigner = anvil.keys()[1].clone().into();
@@ -118,7 +134,9 @@ impl LocalHarness {
             addresses: ChainAddresses::v1_4_1(),
             safe_l2: Address::ZERO,
             guard: Address::ZERO,
+            version,
         };
+        let artifact_bytecode = |name: &str| artifact_bytecode_of(version, name);
         let singleton = harness.create2(artifact_bytecode("Safe")).await;
         let safe_l2 = harness.create2(artifact_bytecode("SafeL2")).await;
         let proxy_factory = harness.create2(artifact_bytecode("SafeProxyFactory")).await;
@@ -201,8 +219,11 @@ impl LocalHarness {
 
     /// Deploys another copy of `MultiSendCallOnly`, at an address set by `salt`.
     pub async fn deploy_multi_send_call_only(&self, salt: B256) -> Address {
-        self.create2_salted(salt, artifact_bytecode("MultiSendCallOnly"))
-            .await
+        self.create2_salted(
+            salt,
+            artifact_bytecode_of(self.version, "MultiSendCallOnly"),
+        )
+        .await
     }
 
     /// Gives `address` the code of `MultiSendCallOnly`, as on a chain where

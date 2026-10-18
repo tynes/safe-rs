@@ -276,6 +276,55 @@ Guard: none
 Fallback Handler: 0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99
 ```
 
+A v1.5.0 Safe also shows its `Module Guard` (`module_guard` in `--json`).
+
+### `safe config`
+
+Change the Safe's own configuration: owners, threshold, modules, transaction guard, module guard and fallback handler. Every change given in one run goes into a single Safe transaction, so co-owners sign once.
+
+```bash
+# Add an owner and require two signatures
+safe config --add-owner 0xNewOwner --threshold 2 --safe 0xYourSafe
+
+# Replace an owner in place, and install a guard
+safe config --swap-owner 0xOldOwner:0xNewOwner --guard 0xGuard
+
+# Remove a module and the guard (the zero address clears a setting)
+safe config --disable-module 0xModule --guard 0x0000000000000000000000000000000000000000
+```
+
+| Option | Description |
+|--------|-------------|
+| `--add-owner <addr>` | Add an owner (repeatable). New owners go to the head of the owner list |
+| `--remove-owner <addr>` | Remove an owner (repeatable) |
+| `--swap-owner <old>:<new>` | Replace an owner in its place in the list (repeatable) |
+| `--threshold <n>` | Threshold after the change (default: unchanged) |
+| `--enable-module <addr>` | Enable a module (repeatable) |
+| `--disable-module <addr>` | Disable a module (repeatable) |
+| `--guard <addr>` | Set the transaction guard; the zero address removes it |
+| `--fallback-handler <addr>` | Set the fallback handler; the zero address removes it |
+| `--module-guard <addr>` | Set the module guard (Safe v1.5.0 only); the zero address removes it |
+
+The `prevOwner` and `prevModule` arguments of the Safe's linked lists are worked out for you, including when one change moves the entry another depends on. The calls always run in this order: owner swaps, additions, removals, `changeThreshold`, module enables, disables, fallback handler, module guard, and the transaction guard last.
+
+The threshold is never lowered unless you pass `--threshold`. A change that would leave fewer owners than the current threshold is refused and asks for one. Also refused, before anything is signed: an address named in two changes, adding an existing owner, removing or swapping out a non-owner, enabling an enabled module or disabling one that isn't enabled, a module guard on a Safe before v1.5.0, and a request that changes nothing.
+
+After simulating, `config` reads the Safe back from the simulated state and checks that every owner (in list order), the threshold, the modules, the guards and the fallback handler match the plan. Several changes go through MultiSendCallOnly (`--multi-send-call-only` to override), never through a DELEGATECALL MultiSend.
+
+The signing, bundle, simulation and gas options are those of `safe send` (`--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`, `--simulate-only`, `--no-submit`, `--raw-out`, `--nonce`, fees and so on). `--safe-tx-gas` and `--rotate` are not offered: config changes are always fail-closed, and a config change cannot also rotate the signer. `--hd-wallet` and `--ledger` are refused for the same reason as in `send` without `--rotate`.
+
+On a multi-owner Safe, the first owner plans the change into a bundle. Co-owners then sign what is in the bundle instead of planning again, because `prevOwner` depends on the chain state the plan was made against:
+
+```bash
+# Owner 1 plans and signs (1/2)
+safe config --add-owner 0xNewOwner --threshold 3 --bundle config.json --safe 0xYourSafe --private-key $OWNER1_KEY
+
+# Owner 2 signs the planned change and executes (2/2)
+safe config --bundle config.json --private-key $OWNER2_KEY
+```
+
+`safe send --bundle config.json` works for co-owners too. A co-owner signing from the bundle gets the simulation and the Safe's own checks, but not the read-back of the planned configuration: only the run that planned the change knows what to expect.
+
 ### `safe create`
 
 Deploy a new Safe with deterministic addressing.
@@ -558,7 +607,7 @@ let outer = sign_outer_tx(&owner, params).await?;
 let outcome = broadcast_raw(&provider, &outer.raw, outer.tx_hash).await;
 ```
 
-`ForkSession` simulates `SimTx::from_outer(&outer.params, TxChecks::STRICT)` in the next block before you broadcast. `read_safe_state` returns a block-pinned snapshot of owners, threshold, nonce, modules, guard and fallback handler.
+`ForkSession` simulates `SimTx::from_outer(&outer.params, TxChecks::STRICT)` in the next block before you broadcast. `read_safe_state` returns a block-pinned snapshot of owners, threshold, nonce, modules, guard, fallback handler and (on v1.5.0) module guard. `plan_config` turns a `ConfigChanges` into the self-calls that make them and the configuration expected afterwards, which `check_config_post_state` compares against a simulated post-state.
 
 ### Multi-Owner Signatures
 
@@ -746,7 +795,7 @@ Reading the file recomputes `safe_tx_hash` from the `tx` fields and checks that 
 
 ## Supported Chains and Versions
 
-safe-rs supports Safe v1.5.0 (default) and v1.4.1. Specify the version with `safe create --safe-version 1.5.0` or `--safe-version 1.4.1`. The CLI defaults to v1.5.0.
+safe-rs supports Safe v1.5.0 (default) and v1.4.1. Specify the version with `safe create --safe-version 1.5.0` or `--safe-version 1.4.1`. The CLI defaults to v1.5.0. v1.5.0 adds a module guard, which `safe config --module-guard` sets and `safe info` shows.
 
 | Chain | Chain ID |
 |-------|----------|

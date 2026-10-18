@@ -31,6 +31,10 @@ pub enum Commands {
     /// Display Safe configuration (owners, threshold, nonce, modules, guard, ...)
     Info(InfoArgs),
 
+    /// Change the Safe's owners, threshold, modules, guards or fallback
+    /// handler, all in one Safe transaction
+    Config(Box<ConfigArgs>),
+
     /// Deploy a new Safe deterministically (same address across chains)
     Create(CreateArgs),
 
@@ -271,6 +275,152 @@ pub struct SendArgs {
 
     #[command(flatten)]
     pub sweep: SweepArgs,
+
+    #[command(flatten)]
+    pub wallet: WalletArgs,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+
+    #[command(flatten)]
+    pub payer: PayerArgs,
+}
+
+/// Parses an owner swap, `OLD:NEW`.
+pub fn parse_owner_swap(s: &str) -> Result<(Address, Address), String> {
+    let (old, new) = s
+        .split_once(':')
+        .ok_or_else(|| format!("expected OLD:NEW, got {s}"))?;
+    let parse = |a: &str| {
+        a.trim()
+            .parse::<Address>()
+            .map_err(|e| format!("invalid address {a}: {e}"))
+    };
+    Ok((parse(old)?, parse(new)?))
+}
+
+#[derive(Parser, Clone)]
+pub struct ConfigArgs {
+    #[command(flatten)]
+    pub safe: SafeArgs,
+
+    #[command(flatten)]
+    pub rpc: RpcArgs,
+
+    /// Add an owner (repeatable). New owners go to the head of the owner list
+    #[arg(long = "add-owner", value_name = "ADDR")]
+    pub add_owners: Vec<Address>,
+
+    /// Remove an owner (repeatable)
+    #[arg(long = "remove-owner", value_name = "ADDR")]
+    pub remove_owners: Vec<Address>,
+
+    /// Replace owner OLD with NEW in its place in the owner list (repeatable)
+    #[arg(long = "swap-owner", value_name = "OLD:NEW", value_parser = parse_owner_swap)]
+    pub swap_owners: Vec<(Address, Address)>,
+
+    /// Signature threshold after the change (default: unchanged; never lowered
+    /// unless given)
+    #[arg(long)]
+    pub threshold: Option<U256>,
+
+    /// Enable a module (repeatable)
+    #[arg(long = "enable-module", value_name = "ADDR")]
+    pub enable_modules: Vec<Address>,
+
+    /// Disable a module (repeatable)
+    #[arg(long = "disable-module", value_name = "ADDR")]
+    pub disable_modules: Vec<Address>,
+
+    /// Set the transaction guard; 0x0000000000000000000000000000000000000000
+    /// removes it
+    #[arg(long, value_name = "ADDR")]
+    pub guard: Option<Address>,
+
+    /// Set the fallback handler; the zero address removes it
+    #[arg(long, value_name = "ADDR")]
+    pub fallback_handler: Option<Address>,
+
+    /// Set the module guard (Safe v1.5.0); the zero address removes it
+    #[arg(long, value_name = "ADDR")]
+    pub module_guard: Option<Address>,
+
+    /// Path to bundle JSON file. Saves the planned transaction and signatures
+    /// when the threshold is not met; co-signers pass it without change flags
+    #[arg(long)]
+    pub bundle: Option<PathBuf>,
+
+    /// Merge offchain signatures from additional bundle file(s) into this run
+    #[arg(long = "merge-bundle", value_name = "PATH")]
+    pub merge_bundle: Vec<PathBuf>,
+
+    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
+    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
+    pub approve_hash: bool,
+
+    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
+    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
+    pub sign_only: bool,
+
+    /// Only simulate, don't sign or broadcast the outer transaction
+    #[arg(long)]
+    pub simulate_only: bool,
+
+    /// Skip simulation, and with it the check of the resulting configuration
+    /// (use with caution)
+    #[arg(long)]
+    pub skip_simulation: bool,
+
+    /// Safe nonce to sign for; fails if the on-chain nonce differs
+    #[arg(long)]
+    pub nonce: Option<U256>,
+
+    /// Gas limit of the outer transaction (default: simulated gas + 20%)
+    #[arg(long)]
+    pub gas_limit: Option<u64>,
+
+    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
+    /// ("30gwei") (default: node estimate)
+    #[arg(long, value_parser = parse_fee_value)]
+    pub max_fee_per_gas: Option<u128>,
+
+    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
+    /// unit ("1gwei") (default: node estimate)
+    #[arg(long, value_parser = parse_fee_value)]
+    pub max_priority_fee_per_gas: Option<u128>,
+
+    /// Write the signed transaction as JSON to PATH ("-" for stdout) before it
+    /// is broadcast
+    #[arg(long, value_name = "PATH", conflicts_with = "simulate_only")]
+    pub raw_out: Option<String>,
+
+    /// Sign the transaction but do not broadcast it (writes it to --raw-out,
+    /// stdout by default)
+    #[arg(long, conflicts_with_all = ["simulate_only"])]
+    pub no_submit: bool,
+
+    /// Seconds to wait for the receipt after broadcasting
+    #[arg(long, default_value_t = 120)]
+    pub timeout: u64,
+
+    /// Print call traces of the simulated transaction
+    #[arg(long)]
+    pub trace: bool,
+
+    #[command(flatten)]
+    pub sim: SimArgs,
+
+    /// MultiSendCallOnly address, used when there are several changes
+    /// (default: canonical for the Safe's version)
+    #[arg(long)]
+    pub multi_send_call_only: Option<Address>,
+
+    /// Skip confirmation prompt
+    #[arg(long)]
+    pub no_confirm: bool,
+
+    #[command(flatten)]
+    pub hd: HdArgs,
 
     #[command(flatten)]
     pub wallet: WalletArgs,
@@ -806,6 +956,45 @@ mod tests {
             let name = version.to_possible_value().unwrap();
             assert_eq!(version.to_string(), name.get_name());
         }
+    }
+
+    #[test]
+    fn config_parses_changes() {
+        let cli = parse(&[
+            "config",
+            "--safe",
+            SAFE,
+            "--rpc-url",
+            "http://localhost:8545",
+            "--add-owner",
+            TO,
+            "--add-owner",
+            SAFE,
+            "--swap-owner",
+            &format!("{TO}:{SAFE}"),
+            "--threshold",
+            "2",
+            "--guard",
+            "0x0000000000000000000000000000000000000000",
+        ])
+        .unwrap();
+        let Commands::Config(args) = cli.command else {
+            panic!("expected config");
+        };
+        let to: Address = TO.parse().unwrap();
+        let safe: Address = SAFE.parse().unwrap();
+        assert_eq!(args.add_owners, [to, safe]);
+        assert_eq!(args.swap_owners, [(to, safe)]);
+        assert_eq!(args.threshold, Some(U256::from(2)));
+        assert_eq!(args.guard, Some(Address::ZERO));
+        assert_eq!(args.fallback_handler, None);
+    }
+
+    #[test]
+    fn owner_swaps_need_two_addresses() {
+        assert!(parse_owner_swap(TO).is_err());
+        assert!(parse_owner_swap(&format!("{TO}:nope")).is_err());
+        assert!(parse_owner_swap(&format!("{TO}:{TO}")).is_ok());
     }
 
     #[test]

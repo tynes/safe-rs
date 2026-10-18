@@ -10,6 +10,7 @@ use url::Url;
 use crate::cli::SimArgs;
 
 pub mod call;
+pub mod config;
 pub mod create;
 mod default_safe;
 pub mod info;

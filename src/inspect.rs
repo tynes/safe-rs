@@ -22,8 +22,31 @@ pub const GUARD_STORAGE_SLOT: B256 =
 pub const FALLBACK_HANDLER_STORAGE_SLOT: B256 =
     b256!("0x6c9a6c4a39284e37ed1cf53d337577d14212a4870fb976a4366c693b939918d5");
 
+/// Storage slot holding the module guard in Safe v1.5.0
+/// (`keccak256("module_manager.module_guard.address")`).
+pub const MODULE_GUARD_STORAGE_SLOT: B256 =
+    b256!("0xb104e0b93118902c651344349b610029d694cfdec91c589c91ebafbcd0289947");
+
+/// The Safe versions that have a module guard.
+pub const MODULE_GUARD_VERSIONS: [&str; 1] = ["1.5.0"];
+
+/// Returns true if a Safe reporting `version` has a module guard.
+pub fn has_module_guard(version: Option<&str>) -> bool {
+    version.is_some_and(|v| MODULE_GUARD_VERSIONS.contains(&v))
+}
+
 /// Sentinel used by the Safe's owner and module linked lists.
 pub const SENTINEL: Address = address!("0x0000000000000000000000000000000000000001");
+
+/// The entry before `item` in one of the Safe's linked lists (owners or
+/// modules), given the list in order. The first entry is preceded by
+/// [`SENTINEL`]; `None` if `item` is not in the list.
+pub fn prev_in_list(list: &[Address], item: Address) -> Option<Address> {
+    match list.iter().position(|entry| *entry == item)? {
+        0 => Some(SENTINEL),
+        i => Some(list[i - 1]),
+    }
+}
 
 /// Enabled modules and whether the enumeration reached the end of the list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +98,8 @@ pub struct SafeState {
     pub guard: Address,
     /// Fallback handler (zero if none)
     pub fallback_handler: Address,
+    /// Module guard (zero if none); `None` for versions without one
+    pub module_guard: Option<Address>,
     /// Block the snapshot was read at
     pub block: BlockId,
 }
@@ -200,6 +225,20 @@ pub async fn read_safe_state<P: Provider<N>, N: Network>(
         .await
         .map_err(incomplete("nonce"))?;
     let version = contract.VERSION().block(block).call().await.ok();
+    let module_guard = if has_module_guard(version.as_deref()) {
+        Some(
+            storage_address(
+                provider,
+                safe,
+                MODULE_GUARD_STORAGE_SLOT.into(),
+                block,
+                "module guard",
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let modules = enumerate_modules(
         provider,
         safe,
@@ -220,6 +259,7 @@ pub async fn read_safe_state<P: Provider<N>, N: Network>(
         modules,
         guard,
         fallback_handler,
+        module_guard,
         block,
     })
 }
@@ -298,6 +338,10 @@ mod tests {
             keccak256("fallback_manager.handler.address"),
             FALLBACK_HANDLER_STORAGE_SLOT
         );
+        assert_eq!(
+            keccak256("module_manager.module_guard.address"),
+            MODULE_GUARD_STORAGE_SLOT
+        );
     }
 
     #[test]
@@ -318,6 +362,7 @@ mod tests {
             },
             guard: Address::ZERO,
             fallback_handler: Address::ZERO,
+            module_guard: None,
             block: BlockId::latest(),
         };
         assert!(state.is_sole_owner(owner));

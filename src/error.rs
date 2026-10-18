@@ -146,6 +146,10 @@ pub enum Error {
     #[error("Owner rotation error: {0}")]
     Rotation(String),
 
+    /// A configuration change could not be planned or verified
+    #[error("Safe configuration error: {0}")]
+    Config(String),
+
     /// A transaction was broadcast (or may have been) but is not confirmed
     #[error("Transaction {tx_hash} is not confirmed: {reason}")]
     Unconfirmed {

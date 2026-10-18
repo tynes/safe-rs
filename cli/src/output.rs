@@ -66,6 +66,9 @@ pub struct SafeInfoOutput {
     pub modules_complete: bool,
     pub guard: Address,
     pub fallback_handler: Address,
+    /// Module guard; absent for Safe versions without one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_guard: Option<Address>,
     pub block_number: u64,
     pub block_hash: B256,
 }
@@ -84,6 +87,7 @@ impl SafeInfoOutput {
             modules_complete: state.modules.complete,
             guard: state.guard,
             fallback_handler: state.fallback_handler,
+            module_guard: state.module_guard,
             block_number,
             block_hash,
         }
@@ -119,6 +123,9 @@ impl Report for SafeInfoOutput {
             let _ = writeln!(s, "  WARNING: module list is incomplete");
         }
         let _ = writeln!(s, "Guard: {}", optional_address(self.guard));
+        if let Some(module_guard) = self.module_guard {
+            let _ = writeln!(s, "Module Guard: {}", optional_address(module_guard));
+        }
         let _ = write!(
             s,
             "Fallback Handler: {}",
@@ -767,6 +774,7 @@ mod tests {
             modules_complete: true,
             guard: Address::ZERO,
             fallback_handler: Address::ZERO,
+            module_guard: None,
             block_number: 7,
             block_hash: B256::ZERO,
         }

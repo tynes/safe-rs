@@ -7,12 +7,13 @@ use alloy::network::primitives::ReceiptResponse;
 use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
+use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::{
     broadcast_raw, detect_addresses, is_gs013_revert, read_approved_owners, read_safe_state,
     require_batch_target, safe_outcome_for_receipt, sign_outer_tx, simulate_approve_hash,
     simulate_exec_with_threshold, wait_for_receipt, Account, BatchTarget, BroadcastOutcome, Call,
-    CallBuilder, ChainAddresses, ChainConfig, Error, ExecSimulation, OuterTxParams,
+    CallBuilder, ChainAddresses, ChainConfig, Error, ExecSimulation, ForkSession, OuterTxParams,
     ReadSafeStateOptions, ReceiptWait, Safe, SignedSafeTx,
 };
 
@@ -54,9 +55,35 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         );
     }
 
+    let cli_calls = build_cli_calls(&args)?;
+    execute(args, cli_calls, ExecHooks::default(), json).await
+}
+
+/// Checks the Safe in the session the simulated transaction was committed to.
+/// An error stops the run before anything is signed or broadcast.
+pub type PostCheck<'a> = &'a (dyn Fn(&mut ForkSession) -> safe_rs::Result<()> + Sync);
+
+/// What another command adds to the send pipeline.
+#[derive(Default)]
+pub struct ExecHooks<'a> {
+    /// The signer, when the caller already created it (so a keystore password
+    /// is not asked for twice)
+    pub signer: Option<PrivateKeySigner>,
+    /// Checked against the simulated post-state
+    pub post_check: Option<PostCheck<'a>>,
+}
+
+/// Runs `cli_calls` (with `--bundle` and the other flags in `args`) through the
+/// Safe: signature collection, simulation, then approveHash, saving to the
+/// bundle or execution. `args`' own call arguments are ignored.
+pub async fn execute(
+    args: SendArgs,
+    cli_calls: Vec<Call>,
+    hooks: ExecHooks<'_>,
+    json: bool,
+) -> Result<()> {
     // 1. Load/Build Calls & Existing Bundle State
     let bundle_existed = args.bundle.as_ref().is_some_and(|p| p.exists());
-    let cli_calls = build_cli_calls(&args)?;
     let mut bundle = if let Some(bundle_path) = &args.bundle {
         if bundle_path.exists() {
             let mut loaded = BundleFile::load(bundle_path)?;
@@ -108,10 +135,10 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
     let console = Console::new(json, raw_out.as_deref() == Some("-"));
 
     // 2. Inspect Safe State & Resolve Signer / Payer
-    let signer_opt = if args.wallet.is_set() {
-        Some(create_signer(&args.wallet, &args.password)?)
-    } else {
-        None
+    let signer_opt = match hooks.signer {
+        Some(signer) => Some(signer),
+        None if args.wallet.is_set() => Some(create_signer(&args.wallet, &args.password)?),
+        None => None,
     };
     let payer_opt = create_payer(&args.payer)?;
     let payer = match (&payer_opt, &signer_opt) {
@@ -325,7 +352,7 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
         console.line("Skipping simulation (--skip-simulation)\n");
         None
     } else {
-        let simulated = simulate(
+        let mut simulated = simulate(
             &provider,
             chain_id,
             &args,
@@ -336,6 +363,9 @@ pub async fn run(args: SendArgs, json: bool) -> Result<()> {
             fees,
         )
         .await?;
+        if let (Some(check), Some(post)) = (hooks.post_check, simulated.post.as_mut()) {
+            check(post)?;
+        }
         let result = &simulated.result;
         let report = SimulationOutput {
             success: result.success,

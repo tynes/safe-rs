@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
         Commands::Send(args) => commands::send::run(*args, cli.json).await,
         Commands::Call(args) => commands::call::run(args, cli.json).await,
         Commands::Info(args) => commands::info::run(args, cli.json).await,
+        Commands::Config(args) => commands::config::run(*args, cli.json).await,
         Commands::Create(args) => commands::create::run(args, cli.json).await,
         Commands::Rotate(args) => commands::rotate::run(*args, cli.json).await,
         Commands::Wallet(command) => commands::wallet::run(command, cli.json).await,
