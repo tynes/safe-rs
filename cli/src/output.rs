@@ -718,7 +718,7 @@ pub fn rotation_summary(
         (Some(sweep), _) => {
             let _ = write!(
                 s,
-                "\n\nSweep: about {} ETH from {} to {}, right after the rotation",
+                "\n\nSweep: about {} ETH from {} to {}, sent with the rotation",
                 format_ether(sweep.estimated),
                 sweep.from,
                 sweep.to

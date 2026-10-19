@@ -102,6 +102,10 @@ pub struct PendingTx {
     pub raw: Bytes,
     /// Unix time the transaction was armed
     pub created_at: u64,
+    /// The sweep of the retiring owner, signed to be broadcast right behind
+    /// this transaction so that both can land in the same block
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<SignedSweep>,
 }
 
 /// A signed ETH transfer from a retired owner to the current one.
@@ -441,12 +445,21 @@ impl RotationState {
             swept: None,
         });
         binding.current = replaced_by;
-        binding.pending = None;
+        // A sweep signed alongside the rotation moves `current`'s ETH to the
+        // reserved key, which is where it belongs only if this is that rotation.
+        let presigned = binding.pending.take().and_then(|pending| pending.sweep);
         if let Observation::Rotated { .. } = observation {
             binding.reserved = None;
             binding.exposed = None;
             if sweep {
                 binding.owe_sweep(current);
+                if let Some(due) = binding
+                    .sweep_due
+                    .iter_mut()
+                    .find(|due| due.from == current && due.signed.is_none())
+                {
+                    due.signed = presigned;
+                }
             }
         } else {
             // An owner we did not rotate to: it may be an earlier key whose
@@ -457,6 +470,25 @@ impl RotationState {
         }
         self.note_used(next.index);
         Ok(observation)
+    }
+
+    /// Stores the sweep signed to go out with the pending transaction
+    /// `outer_tx_hash`, or forgets it (`None`) when the node turned it down.
+    pub fn set_pending_sweep(
+        &mut self,
+        key: &str,
+        outer_tx_hash: B256,
+        sweep: Option<SignedSweep>,
+    ) -> Result<()> {
+        match &mut self.binding_mut(key)?.pending {
+            Some(pending) if pending.outer_tx_hash == outer_tx_hash => {
+                pending.sweep = sweep;
+                Ok(())
+            }
+            _ => Err(Error::Rotation(format!(
+                "{key} has no pending transaction {outer_tx_hash}"
+            ))),
+        }
     }
 
     /// Stores the signed sweep from `from` before it is first broadcast, or
@@ -600,6 +632,7 @@ mod tests {
             payer_nonce: 0,
             raw: Bytes::from_static(&[0x02, 0xff]),
             created_at: 1_700_000_000,
+            sweep: None,
         }
     }
 
