@@ -475,7 +475,8 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         RotationStatus::NotRotated => bail!(
             "the transaction reverted and the owner was NOT rotated. Its signature is \
              public and the signed calls stay executable until the Safe nonce is used: \
-             run `safe rotate` now to retire {}",
+             run `safe rotate` now to retire {}. If its ETH was swept with this transaction \
+             (see the warnings), fund it first or pass --payer-private-key",
             plan.old_owner
         ),
     }

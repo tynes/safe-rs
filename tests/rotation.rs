@@ -242,6 +242,18 @@ async fn a_reverted_rotation_exposes_the_key_and_recovers_at_the_same_nonce() {
     assert_eq!(binding.reserved, Some(reserved), "the reservation is kept");
     assert_eq!(binding.pending, None, "a mined transaction is not pending");
 
+    // The sweep sent alongside cannot depend on the rotation, so it landed
+    // anyway: the ETH is on the reserved key, and the old one needs gas again.
+    assert!(balance(&h, reserved.address).await > U256::ZERO);
+    assert!(
+        rotating
+            .take_warnings()
+            .iter()
+            .any(|w| w.contains("did not take effect")),
+        "the stranded sweep is reported"
+    );
+    h.fund(key(1), eth(1) / U256::from(100)).await;
+
     // Recovery: a rotation-only transaction at the same Safe nonce, to the
     // same next key. It retires the exposed key and voids the stale signature.
     let recovery = rotating.rotate().await.unwrap();
@@ -307,7 +319,11 @@ async fn a_front_run_copy_still_counts_as_the_rotation() {
     assert_eq!(h.owners(safe).await, vec![key(2)]);
     assert_eq!(rotating.binding().unwrap().current.index(), Some(2));
     assert_eq!(rotating.binding().unwrap().exposed, None);
-    assert_eq!(balance(&h, key(1)).await, U256::ZERO, "swept all the same");
+    // Swept all the same, by the transfer signed for the simulated gas: the
+    // reverted copy paid less, which stays behind.
+    let sweep = outcome.sweep.expect("swept all the same");
+    assert_eq!(balance(&h, key(2)).await, sweep.amount);
+    assert!(balance(&h, key(1)).await < eth(1) / U256::from(1_000));
     assert_eq!(balance(&h, Address::repeat_byte(0x42)).await, U256::from(1));
 }
 
@@ -906,6 +922,151 @@ async fn the_payer_may_not_be_the_next_owner() {
     assert!(message.contains("next owner"), "{message}");
     assert_eq!(rotating.binding().unwrap().exposed, None);
     assert_eq!(eoa_nonce(&h, key(2)).await, 0);
+}
+
+/// With automine off, mines one block once `sender` has `count` transactions
+/// in the pool, at `base_fee` if given, then turns automine back on.
+fn mine_when_pooled(
+    h: &LocalHarness,
+    sender: Address,
+    count: u64,
+    base_fee: Option<u128>,
+) -> tokio::task::JoinHandle<()> {
+    let provider = h.provider.clone();
+    tokio::spawn(async move {
+        let mined = provider.get_transaction_count(sender).await.unwrap();
+        loop {
+            let pending = provider
+                .get_transaction_count(sender)
+                .pending()
+                .await
+                .unwrap();
+            if pending == mined + count {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if let Some(base_fee) = base_fee {
+            provider
+                .anvil_set_next_block_base_fee_per_gas(base_fee)
+                .await
+                .unwrap();
+        }
+        provider.anvil_mine(Some(1), None).await.unwrap();
+        provider.anvil_set_auto_mine(true).await.unwrap();
+    })
+}
+
+async fn block_of(h: &LocalHarness, tx_hash: alloy::primitives::B256) -> u64 {
+    h.provider
+        .get_transaction_receipt(tx_hash)
+        .await
+        .unwrap()
+        .unwrap()
+        .block_number
+        .unwrap()
+}
+
+async fn next_base_fee(h: &LocalHarness) -> u128 {
+    let block = h
+        .provider
+        .get_block(alloy::eips::BlockId::latest())
+        .await
+        .unwrap()
+        .unwrap();
+    let head = &block.header;
+    alloy::eips::eip1559::BaseFeeParams::ethereum()
+        .next_block_base_fee(
+            head.gas_used,
+            head.gas_limit,
+            head.base_fee_per_gas.unwrap(),
+        )
+        .into()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_rotation_and_its_sweep_land_in_the_same_block() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 120, &state).await;
+    let mut rotating = open(&h, safe, &state).await;
+
+    h.provider.anvil_set_auto_mine(false).await.unwrap();
+    let miner = mine_when_pooled(&h, key(1), 2, None);
+    let outcome = rotating.rotate().await.unwrap();
+    miner.await.unwrap();
+
+    assert_eq!(outcome.status, RotationStatus::Rotated);
+    let sweep = outcome.sweep.expect("a sweep");
+    assert_eq!(
+        block_of(&h, outcome.tx_hash).await,
+        block_of(&h, sweep.tx_hash).await
+    );
+    assert_eq!(balance(&h, key(1)).await, U256::ZERO);
+    assert_eq!(balance(&h, key(2)).await, sweep.amount);
+    assert!(rotating.warnings().is_empty(), "{:?}", rotating.warnings());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_base_fee_change_after_prepare_still_lands_both_in_one_block() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 121, &state).await;
+    let mut rotating = open(&h, safe, &state).await;
+    let tx = rotating.prepare(&[], ExecOptions::default()).await.unwrap();
+
+    // While the user confirms, the base fee rises.
+    let raised = next_base_fee(&h).await * 3 / 2;
+    h.provider
+        .anvil_set_next_block_base_fee_per_gas(raised)
+        .await
+        .unwrap();
+    h.provider.anvil_mine(Some(1), None).await.unwrap();
+
+    h.provider.anvil_set_auto_mine(false).await.unwrap();
+    let miner = mine_when_pooled(&h, key(1), 2, None);
+    let outcome = rotating.submit(tx).await.unwrap();
+    miner.await.unwrap();
+
+    assert_eq!(outcome.status, RotationStatus::Rotated);
+    let sweep = outcome.sweep.expect("a sweep");
+    assert_eq!(
+        block_of(&h, outcome.tx_hash).await,
+        block_of(&h, sweep.tx_hash).await
+    );
+    assert_eq!(balance(&h, key(1)).await, U256::ZERO);
+    assert!(rotating.warnings().is_empty(), "{:?}", rotating.warnings());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sweep_left_short_by_its_rotation_is_replaced_after_it() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state.json");
+    let safe = setup(&h, 122, &state).await;
+    let mut rotating = open(&h, safe, &state).await;
+
+    // Both are pooled, then the base fee rises before the block: the rotation
+    // pays more than the sweep was signed for, so the sweep cannot be mined.
+    h.provider.anvil_set_auto_mine(false).await.unwrap();
+    let raised = next_base_fee(&h).await * 6 / 5;
+    let miner = mine_when_pooled(&h, key(1), 2, Some(raised));
+    let outcome = rotating.rotate().await.unwrap();
+    miner.await.unwrap();
+
+    assert_eq!(outcome.status, RotationStatus::Rotated);
+    let sweep = outcome.sweep.expect("a replacement sweep");
+    assert!(block_of(&h, sweep.tx_hash).await > block_of(&h, outcome.tx_hash).await);
+    assert_eq!(balance(&h, key(1)).await, U256::ZERO);
+    assert_eq!(balance(&h, key(2)).await, sweep.amount);
+    assert_eq!(
+        eoa_nonce(&h, key(1)).await,
+        2,
+        "exactly one transfer landed"
+    );
+    assert!(rotating.binding().unwrap().sweep_due.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

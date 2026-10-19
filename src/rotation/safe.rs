@@ -13,8 +13,10 @@
 //! 3. *Plan, sign, simulate* and check the simulated owner list. Nothing has
 //!    left the process yet.
 //! 4. *Arm*: record the signed transaction and mark the owner exposed; save.
-//! 5. *Broadcast*, wait, and reconcile again from the receipt's block.
-//! 6. *Sweep* the old owner's ETH to the new owner.
+//! 5. *Sign the sweep* of the old owner's ETH to the new owner, at the nonce
+//!    after the rotation's, and store it with the pending transaction; save.
+//! 6. *Broadcast* the rotation and the sweep right behind it, so both can land
+//!    in the same block; wait for both, and reconcile from the receipt's block.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -51,7 +53,10 @@ use crate::rotation::state::{
 use crate::rotation::store::StateFile;
 use crate::simulation::session::READ_CALL_GAS;
 use crate::simulation::{ForkSession, ParentHeader, SimBlockEnv, SimulationResult, SpecId};
-use crate::submit::{decode_safe_outcome, receipt_logs, RejectClass, SafeExecutionOutcome};
+use crate::submit::{
+    broadcast_raw, decode_safe_outcome, receipt_logs, wait_for_receipt, BroadcastOutcome,
+    ReceiptWait, RejectClass, SafeExecutionOutcome,
+};
 use crate::types::{Call, Operation};
 
 /// OP-stack `GasPriceOracle` predeploy.
@@ -156,6 +161,10 @@ pub struct PlannedSweep {
     /// Roughly what will be moved; the exact amount depends on the gas the
     /// rotation ends up paying
     pub estimated: U256,
+    /// The retired owner's balance after the simulated rotation
+    pub balance_after: U256,
+    /// The base fee the rotation was simulated at
+    pub base_fee: u64,
 }
 
 /// A rotation that is signed and simulated but has not left the process.
@@ -545,6 +554,7 @@ where
             .await
             .map_err(provider_error)?;
         if mined || nonce > pending.payer_nonce {
+            self.warn_stranded_sweep(&pending);
             self.ring.store.state.clear_pending(&self.key)?;
         }
         Ok(())
@@ -591,8 +601,12 @@ where
         Ok(candidate)
     }
 
+    fn block_env(&self, head: &ParentHeader) -> SimBlockEnv {
+        SimBlockEnv::next_after(head, self.config.block_time, BaseFeeParams::ethereum())
+    }
+
     fn session(&self, head: &ParentHeader) -> ForkSession {
-        let env = SimBlockEnv::next_after(head, self.config.block_time, BaseFeeParams::ethereum());
+        let env = self.block_env(head);
         let session = ForkSession::new(
             self.provider.clone(),
             self.chain_id,
@@ -756,6 +770,8 @@ where
                     from: current.address(),
                     to: reserved.address,
                     estimated,
+                    balance_after: left,
+                    base_fee: self.block_env(&head).basefee,
                 }
             })
         } else {
@@ -868,6 +884,7 @@ where
                 payer_nonce: tx.outer.params.nonce,
                 raw: tx.outer.raw.clone(),
                 created_at: now(),
+                sweep: None,
             },
         )?;
         self.ring.store.save()
@@ -893,40 +910,219 @@ where
     /// Arms, broadcasts and waits for `tx`, then updates the state from the
     /// receipt's block and sweeps the retired owner's ETH.
     ///
+    /// The sweep is signed before the rotation is broadcast and sent right
+    /// behind it, so that both can be mined in the same block; this waits for
+    /// both. If it cannot be signed up front, it is sent once the rotation is
+    /// mined, as a warning.
+    ///
     /// A transaction the node rejects, or whose receipt does not arrive in
     /// time, is [`Error::Unconfirmed`]: the state keeps it as pending and the
     /// owner as exposed, and the next [`RotatingSafe::open`] resolves it.
     /// Below the threshold nothing is broadcast (see [`RotatingSafe::arm`]).
     pub async fn submit(&mut self, tx: RotationTx) -> Result<RotationOutcome> {
         self.arm(&tx)?;
+        let sweep = self.sweep_alongside(&tx).await;
         let unconfirmed = |reason: String| Error::Unconfirmed {
             tx_hash: tx.outer.tx_hash,
             reason,
         };
-        let receipt = match submit_and_wait(
+        match broadcast_raw(&self.provider, &tx.outer.raw, tx.outer.tx_hash).await {
+            BroadcastOutcome::Accepted(_) | BroadcastOutcome::AlreadyKnown(_) => {}
+            BroadcastOutcome::Rejected { reason, .. } => {
+                return Err(unconfirmed(format!("the node rejected it: {reason}")))
+            }
+            BroadcastOutcome::Ambiguous { reason } => {
+                return Err(unconfirmed(format!(
+                    "the broadcast outcome is unknown: {reason}"
+                )))
+            }
+        }
+        if let Some(sweep) = sweep {
+            self.broadcast_alongside(&tx, &sweep).await?;
+        }
+        let receipt = match wait_for_receipt(
             &self.provider,
-            &tx.outer,
+            tx.outer.tx_hash,
             self.config.timeout,
             self.config.poll_interval,
         )
         .await?
         {
-            Submission::Mined(receipt) => receipt,
-            Submission::TimedOut { .. } => {
+            ReceiptWait::Mined(receipt) => receipt,
+            ReceiptWait::TimedOut { .. } => {
                 return Err(unconfirmed(
                     "no receipt arrived in time; it may still be pending".to_string(),
                 ))
             }
-            Submission::Rejected { reason, .. } => {
-                return Err(unconfirmed(format!("the node rejected it: {reason}")))
-            }
-            Submission::Ambiguous { reason } => {
-                return Err(unconfirmed(format!(
-                    "the broadcast outcome is unknown: {reason}"
-                )))
-            }
         };
         self.finalize(&tx, &receipt).await
+    }
+
+    /// The sweep to send right behind `tx`: the one stored with it if this is a
+    /// resubmission, or a new one, stored before it can leave the process.
+    /// `None` if there is nothing to sweep, or if signing failed (a warning).
+    async fn sweep_alongside(&mut self, tx: &RotationTx) -> Option<SignedSweep> {
+        let stored = self
+            .binding()
+            .ok()?
+            .pending
+            .as_ref()
+            .and_then(|pending| pending.sweep.clone());
+        if stored.is_some() {
+            return stored;
+        }
+        let signed = match self.presign_sweep(tx).await {
+            Ok(signed) => signed?,
+            Err(e) => {
+                self.warnings.push(format!(
+                    "the sweep could not be signed ahead of the rotation, \
+                     so it follows it instead: {e}"
+                ));
+                return None;
+            }
+        };
+        let stored = self
+            .ring
+            .store
+            .state
+            .set_pending_sweep(&self.key, tx.outer.tx_hash, Some(signed.clone()))
+            .and_then(|()| self.ring.store.save());
+        match stored {
+            Ok(()) => Some(signed),
+            Err(e) => {
+                self.warnings.push(format!(
+                    "the sweep signed ahead of the rotation was not saved: {e}"
+                ));
+                None
+            }
+        }
+    }
+
+    /// Signs the transfer of the ETH `tx` leaves on its signing owner to the
+    /// next owner, valid once `tx` is mined.
+    ///
+    /// The amount comes from the simulated balance after `tx`, so the owner
+    /// ends at the reserve if `tx` pays what the simulation did. If it pays
+    /// more, the transfer cannot be mined and [`RotatingSafe::sweep`] replaces
+    /// it.
+    async fn presign_sweep(&self, tx: &RotationTx) -> Result<Option<SignedSweep>> {
+        let Some(planned) = tx.planned_sweep else {
+            return Ok(None);
+        };
+        let Some(signer) = self.signer_for(&tx.from)? else {
+            return Ok(None);
+        };
+        let (from, to) = (planned.from, planned.to);
+        let pays_rotation = tx.payer == from;
+        let nonce = if pays_rotation {
+            tx.outer.params.nonce + 1
+        } else {
+            self.provider
+                .get_transaction_count(from)
+                .await
+                .map_err(provider_error)?
+        };
+        let gas = self.transfer_gas(from, to).await;
+        // The rotation's fee cap, so the transfer is not priced out of the
+        // block the rotation lands in. Tip equal to the cap: the transfer
+        // costs exactly gas * cap.
+        let fee = tx.outer.params.max_fee_per_gas;
+        let exact = Eip1559Estimation {
+            max_fee_per_gas: fee,
+            max_priority_fee_per_gas: fee,
+        };
+        let transfer =
+            |amount| OuterTxParams::transfer(self.chain_id, from, to, amount, nonce, gas, exact);
+        // The base fee may have moved since the rotation was simulated, for
+        // example while the user confirmed it: price its gas at the next block's.
+        let mut balance = planned.balance_after;
+        if pays_rotation {
+            let head = ParentHeader::fetch(&self.provider, BlockId::latest()).await?;
+            let price = |base_fee: u64| {
+                let params = &tx.outer.params;
+                U256::from(
+                    params
+                        .max_fee_per_gas
+                        .min(u128::from(base_fee) + params.max_priority_fee_per_gas),
+                )
+            };
+            let gas_used = U256::from(tx.simulation.gas_used);
+            balance = balance
+                .saturating_add(gas_used * price(planned.base_fee))
+                .saturating_sub(gas_used * price(self.block_env(&head).basefee));
+        }
+        // The simulation does not charge what an OP-stack chain adds to the
+        // rotation's own fee.
+        let rotation_reserve = if pays_rotation {
+            self.fee_reserve(&tx.outer.params).await
+        } else {
+            U256::ZERO
+        };
+        let reserve = match self.config.sweep_reserve {
+            Some(reserve) => reserve,
+            None => match sweep_value(balance, gas, fee, rotation_reserve) {
+                Some(amount) => self.fee_reserve(&transfer(amount)).await,
+                None => return Ok(None),
+            },
+        };
+        let Some(amount) = sweep_value(balance, gas, fee, reserve.saturating_add(rotation_reserve))
+        else {
+            return Ok(None);
+        };
+        let outer = self.sign_outer(&signer, transfer(amount)).await?;
+        Ok(Some(SignedSweep {
+            tx_hash: outer.tx_hash,
+            nonce,
+            amount,
+            raw: outer.raw,
+        }))
+    }
+
+    /// Broadcasts the sweep signed to follow `tx`. A sweep the node turns down
+    /// is a warning: once the rotation is mined it is retried or signed again.
+    async fn broadcast_alongside(&mut self, tx: &RotationTx, sweep: &SignedSweep) -> Result<()> {
+        let reason = match broadcast_raw(&self.provider, &sweep.raw, sweep.tx_hash).await {
+            BroadcastOutcome::Accepted(_) | BroadcastOutcome::AlreadyKnown(_) => return Ok(()),
+            BroadcastOutcome::Rejected { reason, class } => {
+                // The node does not hold these bytes; an underpriced
+                // replacement means an earlier transfer is still pending.
+                if class != RejectClass::Underpriced {
+                    self.ring
+                        .store
+                        .state
+                        .set_pending_sweep(&self.key, tx.outer.tx_hash, None)?;
+                    self.ring.store.save()?;
+                }
+                format!("the node rejected it: {reason}")
+            }
+            BroadcastOutcome::Ambiguous { reason } => {
+                format!("the broadcast outcome is unknown: {reason}")
+            }
+        };
+        self.warnings.push(format!(
+            "the sweep {} was not sent with the rotation ({reason}); \
+             it is retried once the rotation is mined",
+            sweep.tx_hash
+        ));
+        Ok(())
+    }
+
+    /// Warns about a sweep signed alongside `pending` when the rotation it
+    /// followed did not take effect: if it is mined, its ETH is on a key that
+    /// is not the owner.
+    fn warn_stranded_sweep(&mut self, pending: &PendingTx) {
+        let Some(sweep) = &pending.sweep else {
+            return;
+        };
+        let to = decode_signed_outer_tx(&sweep.raw).map_or_else(
+            |_| "the next owner key".to_string(),
+            |o| o.params.to.to_string(),
+        );
+        self.warnings.push(format!(
+            "the sweep {} of {} wei was sent with a rotation that did not take effect; \
+             if it is mined, that ETH is on {to}, which is not an owner yet",
+            sweep.tx_hash, sweep.amount
+        ));
     }
 
     async fn finalize(
@@ -946,6 +1142,10 @@ where
         let block = receipt.block_hash.map_or(BlockId::latest(), BlockId::hash);
         let owners = self.owners_at(block).await?;
         let observation = self.observe(&owners, receipt.block_number).await?;
+        // Still pending after the observation: the owner did not change.
+        if let Some(pending) = self.binding()?.pending.clone() {
+            self.warn_stranded_sweep(&pending);
+        }
         // Mined bytes cannot be mined again.
         self.ring.store.state.clear_pending(&self.key)?;
         let warnings = self.ring.store.state.cross_check();
@@ -1106,6 +1306,15 @@ where
             .await
             .map_err(provider_error)?;
 
+        let balance = self
+            .provider
+            .get_balance(from)
+            .await
+            .map_err(provider_error)?;
+
+        // A transfer at the same nonce that is still pending; one replacing it
+        // has to outbid it.
+        let mut replacing = None;
         if let Some(stored) = &due.signed {
             let receipt = self
                 .provider
@@ -1119,23 +1328,27 @@ where
             if nonce == stored.nonce {
                 let outer = decode_signed_outer_tx(&stored.raw)?;
                 let signed_fee = outer.params.max_fee_per_gas;
-                if fees.max_fee_per_gas < signed_fee + signed_fee / 8 {
+                // A transfer signed ahead of its rotation is short if the
+                // rotation paid more than simulated.
+                let cost = U256::from(outer.params.gas_limit)
+                    .saturating_mul(U256::from(signed_fee))
+                    .saturating_add(stored.amount);
+                if balance >= cost && fees.max_fee_per_gas < signed_fee + signed_fee / 8 {
                     return self.broadcast_sweep(outer, stored.amount, to).await;
                 }
+                replacing = Some(signed_fee);
             }
         }
 
-        let balance = self
-            .provider
-            .get_balance(from)
-            .await
-            .map_err(provider_error)?;
         let gas = self.transfer_gas(from, to).await;
+        let fee = replacing.map_or(fees.max_fee_per_gas, |signed| {
+            fees.max_fee_per_gas.max(signed + signed / 8 + 1)
+        });
         // Tip equal to the fee cap: the transfer costs exactly gas * cap, so
         // the sender ends at the reserve.
         let exact = Eip1559Estimation {
-            max_fee_per_gas: fees.max_fee_per_gas,
-            max_priority_fee_per_gas: fees.max_fee_per_gas,
+            max_fee_per_gas: fee,
+            max_priority_fee_per_gas: fee,
         };
         let transfer =
             |amount| OuterTxParams::transfer(self.chain_id, from, to, amount, nonce, gas, exact);
