@@ -49,8 +49,9 @@ zeroize = { version = "1", optional = true }
 default = ["simulation"]
 # Fork simulation with foundry-fork-db and revm: `simulate()` on the builders,
 # `ForkSession` and the `simulate_exec*` functions. Without it the builders
-# still execute, with gas estimated over RPC.
-simulation = ["dep:alloy-chains", "dep:alloy-hardforks", "dep:foundry-fork-db", "dep:revm", "dep:revm-inspectors", "dep:chrono", "alloy/rpc-types-trace", "tokio/rt"]
+# still execute, with gas estimated over RPC. Simulation results serialize
+# to JSON, traces included.
+simulation = ["dep:alloy-chains", "dep:alloy-hardforks", "dep:foundry-fork-db", "dep:revm", "dep:revm-inspectors", "revm-inspectors/serde", "dep:chrono", "alloy/rpc-types-trace", "tokio/rt"]
 # Encrypted mnemonic keystores, HD key derivation and the rotating Safe client
 # (implies simulation, which every rotation runs).
 hd-wallet = ["simulation", "dep:chrono", "alloy/signer-mnemonic", "dep:scrypt", "dep:aes", "dep:ctr", "dep:rand", "dep:zeroize"]

@@ -35,8 +35,8 @@ use safe_rs::{
     broadcast_raw, decode_safe_outcome, sign_outer_tx, simulate_exec, submit_and_wait,
     wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig,
     Eoa, Error, ForkSession, ForkSimulator, ISafe, Operation, OuterTxParams, ParentHeader,
-    PreparedSafeTx, ReceiptWait, Safe, SafeExecutionOutcome, SafeTxGasPolicy, SimTx, SpecId,
-    Submission, TxChecks, WalletBuilder, WalletConfig,
+    PreparedSafeTx, ReceiptWait, Safe, SafeExecutionOutcome, SafeTxGasPolicy, SimTx,
+    SimulationResult, SpecId, Submission, TxChecks, WalletBuilder, WalletConfig,
 };
 use tokio::net::{TcpListener, TcpStream};
 
@@ -281,6 +281,34 @@ async fn zero_safe_tx_gas_inner_failure_reverts_gs013() {
     let receipt = h.send(&outer).await;
     assert!(!receipt.inner.inner.status());
     assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_traced_simulation_round_trips_through_a_json_file() {
+    let h = LocalHarness::new().await;
+    let safe = h.deploy_safe(21).await;
+    let reverter = h.create2(reverter_initcode()).await;
+    let prepared = h
+        .prepare(
+            safe,
+            &[Call::call(reverter, Bytes::new())],
+            SafeTxGasPolicy::Zero,
+        )
+        .await;
+    let outer = h.sign_exec(&prepared, OUTER_GAS).await;
+    let mut session = session_at_latest(&h).await.with_tracing(true);
+    let simulated = session.transact(strict_tx(&outer)).unwrap();
+    let traces = simulated.format_traces().expect("traced");
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sim.json");
+    simulated.write_json(&path).unwrap();
+    let back = SimulationResult::read_json(&path).unwrap();
+    assert_eq!(back.format_traces().as_deref(), Some(traces.as_str()));
+    assert_eq!(back.revert_reason.as_deref(), Some("nope"));
+    assert_eq!(back.gas_used, simulated.gas_used);
+    assert_eq!(back.state_diff, simulated.state_diff);
+    assert!(back.to_string().starts_with("Traces:\n"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

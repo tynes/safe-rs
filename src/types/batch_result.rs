@@ -1,6 +1,7 @@
 //! Unified batch result types for Safe and EOA transactions
 
 use alloy::primitives::TxHash;
+use serde::{Deserialize, Serialize};
 
 use crate::eoa::EoaBatchResult;
 use crate::safe::ExecutionResult;
@@ -11,7 +12,7 @@ use crate::simulation::SimulationResult;
 ///
 /// This provides a common interface for both Safe (atomic multicall) and
 /// EOA (sequential transactions) execution results.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BatchResult {
     /// Transaction hashes (Safe has 1, EOA has N)
     pub tx_hashes: Vec<TxHash>,
@@ -59,7 +60,7 @@ impl BatchResult {
 /// This provides a common interface for simulation results from both
 /// Safe (single multicall simulation) and EOA (multiple individual simulations).
 #[cfg(feature = "simulation")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchSimulationResult {
     /// Individual simulation results for each call
     pub results: Vec<SimulationResult>,
@@ -89,6 +90,16 @@ impl BatchSimulationResult {
             total_gas_used,
             atomic: false,
         }
+    }
+
+    /// Writes the result to `path` as pretty-printed JSON, replacing the file.
+    pub fn write_json(&self, path: impl AsRef<std::path::Path>) -> crate::error::Result<()> {
+        crate::json::write_file(path.as_ref(), self)
+    }
+
+    /// Reads a result written by [`BatchSimulationResult::write_json`].
+    pub fn read_json(path: impl AsRef<std::path::Path>) -> crate::error::Result<Self> {
+        crate::json::read_file(path.as_ref())
     }
 }
 
@@ -209,5 +220,40 @@ mod tests {
         assert_eq!(result.results.len(), 2);
         assert_eq!(result.total_gas_used, 51000);
         assert!(!result.atomic);
+    }
+
+    #[test]
+    fn a_batch_simulation_round_trips_through_a_file() {
+        let sim = |gas_used| SimulationResult {
+            success: true,
+            gas_used,
+            gas_spent: gas_used,
+            return_data: Default::default(),
+            revert_reason: None,
+            logs: vec![],
+            state_diff: Default::default(),
+            traces: None,
+        };
+        let result = BatchSimulationResult::from_eoa(vec![sim(21_000), sim(30_000)]);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("batch.json");
+        result.write_json(&path).unwrap();
+        let back = BatchSimulationResult::read_json(&path).unwrap();
+        assert_eq!(back.results.len(), 2);
+        assert_eq!(back.total_gas_used, 51_000);
+        assert!(!back.atomic);
+    }
+
+    #[test]
+    fn a_batch_result_round_trips_through_json() {
+        let result = BatchResult {
+            tx_hashes: vec![TxHash::repeat_byte(1), TxHash::repeat_byte(2)],
+            success: false,
+            success_count: 1,
+            failure_count: 1,
+            atomic: false,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert_eq!(serde_json::from_str::<BatchResult>(&json).unwrap(), result);
     }
 }
