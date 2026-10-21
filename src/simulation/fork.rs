@@ -15,7 +15,7 @@ use revm::database::CacheDB;
 use revm::primitives::hardfork::SpecId;
 use revm::state::EvmState;
 use revm::Database;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use revm_inspectors::tracing::CallTraceArena;
 
@@ -25,7 +25,10 @@ use crate::simulation::session::{SimBlockEnv, TxChecks};
 use crate::types::{Call, Operation};
 
 /// Result of a simulated transaction
-#[derive(Debug, Clone)]
+///
+/// Serializes to JSON with serde, traces included, so a result can be saved
+/// with [`SimulationResult::write_json`] and inspected or compared later.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationResult {
     /// Whether the simulation succeeded
     pub success: bool,
@@ -40,10 +43,12 @@ pub struct SimulationResult {
     /// Logs emitted during simulation
     pub logs: Vec<Log>,
     /// Revert reason if the call reverted
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert_reason: Option<String>,
     /// State changes from simulation (pre/post state for touched accounts)
     pub state_diff: DiffMode,
     /// Call trace arena (if tracing was enabled)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traces: Option<CallTraceArena>,
 }
 
@@ -89,6 +94,16 @@ impl SimulationResult {
         }
     }
 
+    /// Writes the result to `path` as pretty-printed JSON, replacing the file.
+    pub fn write_json(&self, path: impl AsRef<Path>) -> Result<()> {
+        crate::json::write_file(path.as_ref(), self)
+    }
+
+    /// Reads a result written by [`SimulationResult::write_json`].
+    pub fn read_json(path: impl AsRef<Path>) -> Result<Self> {
+        crate::json::read_file(path.as_ref())
+    }
+
     /// Format traces as human-readable text (cast run style)
     ///
     /// Returns `None` if tracing was not enabled for this simulation.
@@ -99,6 +114,32 @@ impl SimulationResult {
         let mut writer = TraceWriter::new(Vec::<u8>::new());
         writer.write_arena(traces).ok()?;
         String::from_utf8(writer.into_writer()).ok()
+    }
+}
+
+/// The traces (if any), then the outcome and gas used.
+impl std::fmt::Display for SimulationResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(traces) = self.format_traces() {
+            writeln!(f, "Traces:")?;
+            for line in traces.lines() {
+                writeln!(f, "  {line}")?;
+            }
+            writeln!(f)?;
+        }
+        if self.success {
+            writeln!(f, "Simulation succeeded.")?;
+        } else {
+            match &self.revert_reason {
+                Some(reason) => writeln!(f, "Simulation reverted: {reason}")?,
+                None => writeln!(f, "Simulation reverted.")?,
+            }
+        }
+        write!(
+            f,
+            "Gas used: {} (spent before refunds: {})",
+            self.gas_used, self.gas_spent
+        )
     }
 }
 
@@ -899,5 +940,107 @@ mod tests {
 
         assert_eq!(pre_account.storage.get(&storage_key), Some(&pre_value));
         assert_eq!(post_account.storage.get(&storage_key), Some(&post_value));
+    }
+
+    fn reverted_with_diff() -> SimulationResult {
+        let addr = Address::repeat_byte(0x11);
+        let mut pre = BTreeMap::new();
+        let mut post = BTreeMap::new();
+        pre.insert(
+            addr,
+            AccountState {
+                balance: Some(U256::from(1000)),
+                nonce: Some(1),
+                code: None,
+                storage: BTreeMap::from([(B256::ZERO, B256::repeat_byte(1))]),
+            },
+        );
+        post.insert(
+            addr,
+            AccountState {
+                balance: Some(U256::from(400)),
+                nonce: Some(2),
+                code: None,
+                storage: BTreeMap::from([(B256::ZERO, B256::repeat_byte(2))]),
+            },
+        );
+        SimulationResult {
+            success: false,
+            gas_used: 30_000,
+            gas_spent: 34_000,
+            return_data: Bytes::from_static(&[0xde, 0xad]),
+            logs: vec![Log::new_unchecked(
+                addr,
+                vec![B256::repeat_byte(3)],
+                Bytes::from_static(&[1, 2]),
+            )],
+            revert_reason: Some("insufficient balance".to_string()),
+            state_diff: DiffMode { pre, post },
+            traces: None,
+        }
+    }
+
+    #[test]
+    fn a_result_survives_a_json_round_trip() {
+        let result = reverted_with_diff();
+        let json = serde_json::to_string(&result).unwrap();
+        let back: SimulationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        assert_eq!(back.gas_spent, 34_000);
+        assert_eq!(back.revert_reason.as_deref(), Some("insufficient balance"));
+        assert_eq!(back.logs, result.logs);
+        assert_eq!(back.state_diff, result.state_diff);
+    }
+
+    #[test]
+    fn absent_options_are_left_out_of_the_json() {
+        let mut result = reverted_with_diff();
+        result.revert_reason = None;
+        let json: serde_json::Value = serde_json::to_value(&result).unwrap();
+        assert!(json.get("revert_reason").is_none());
+        assert!(json.get("traces").is_none());
+        let back: SimulationResult = serde_json::from_value(json).unwrap();
+        assert!(back.revert_reason.is_none() && back.traces.is_none());
+    }
+
+    #[test]
+    fn a_result_written_to_a_file_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sim.json");
+        let result = reverted_with_diff();
+        result.write_json(&path).unwrap();
+        let back = SimulationResult::read_json(&path).unwrap();
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            serde_json::to_string(&result).unwrap()
+        );
+    }
+
+    #[test]
+    fn reading_a_file_that_is_not_a_result_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.json");
+        std::fs::write(&path, r#"{"success": true}"#).unwrap();
+        match SimulationResult::read_json(&path) {
+            Err(Error::Io { path: named, .. }) => assert_eq!(named, path.display().to_string()),
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+        assert!(matches!(
+            SimulationResult::read_json(dir.path().join("missing.json")),
+            Err(Error::Io { .. })
+        ));
+    }
+
+    #[test]
+    fn display_shows_the_outcome_and_gas() {
+        let reverted = reverted_with_diff().to_string();
+        assert!(reverted.contains("Simulation reverted: insufficient balance"));
+        assert!(reverted.contains("Gas used: 30000 (spent before refunds: 34000)"));
+        assert!(!reverted.contains("Traces:"));
+
+        let mut ok = reverted_with_diff();
+        ok.success = true;
+        ok.revert_reason = None;
+        assert!(ok.to_string().starts_with("Simulation succeeded."));
     }
 }
