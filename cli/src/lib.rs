@@ -1,27 +1,42 @@
 //! The `safe` CLI as a library, for other CLIs that send Safe transactions.
 //!
-//! An app builds its own calls and takes the `safe send` flags by flattening
-//! [`args::SendOpts`] into its command, then hands both to [`send`]:
+//! An app builds its own calls and takes the `safe send` options by
+//! flattening [`args::SendOpts`] into its command. It resolves the RPC URL,
+//! the signer and the Safe itself into a [`SendContext`], so its own
+//! `--rpc-url` and `--private-key` keep their meaning. [`send`] returns how
+//! the send ended:
 //!
 //! ```no_run
 //! use clap::Parser;
 //! use safe_rs_cli::args::SendOpts;
 //! use safe_rs_cli::safe_rs::{Address, Bytes, Call, U256};
+//! use safe_rs_cli::{Output, PrivateKeySigner, SendContext, SendOutcome, Url};
 //!
 //! #[derive(Parser)]
 //! struct Deposit {
-//!     /// Recipient of the app-specific call
 //!     #[arg(long)]
-//!     to: Address,
+//!     rpc_url: Url,
+//!     #[arg(long)]
+//!     private_key: PrivateKeySigner,
+//!     #[arg(long)]
+//!     safe: Address,
 //!
 //!     #[command(flatten)]
-//!     safe: SendOpts,
+//!     send: SendOpts,
 //! }
 //!
 //! # async fn example() -> color_eyre::Result<()> {
 //! let deposit = Deposit::parse();
-//! let calls = vec![Call::new(deposit.to, U256::ZERO, Bytes::new())];
-//! safe_rs_cli::send(calls, deposit.safe, false).await
+//! let calls = vec![Call::new(deposit.safe, U256::ZERO, Bytes::new())];
+//! let ctx = SendContext::new(deposit.rpc_url, deposit.safe)
+//!     .with_signer(deposit.private_key)
+//!     .with_output(Output::Quiet);
+//! match safe_rs_cli::send(ctx, calls, deposit.send).await? {
+//!     SendOutcome::Executed { tx_hash, .. } => println!("deposited in {tx_hash}"),
+//!     SendOutcome::Aborted { .. } => println!("cancelled"),
+//!     other => println!("{other:?}"),
+//! }
+//! # Ok(())
 //! # }
 //! ```
 //!
@@ -44,17 +59,25 @@ mod wallet;
 
 use color_eyre::eyre::Result;
 
+pub use alloy::signers::local::PrivateKeySigner;
 pub use cli::{Cli, Commands};
-pub use commands::send::send;
+pub use commands::send::{send, Output, SendContext, SendOutcome};
 /// The library the calls are built with, at the version this crate uses.
 pub use safe_rs;
+pub use url::Url;
 
 /// The flag groups of the `safe` commands, for flattening into another CLI's
 /// commands with `#[command(flatten)]`.
+///
+/// [`SendOpts`](args::SendOpts) is the one a send needs. `RpcArgs`,
+/// `SafeArgs` and `WalletArgs` are the `safe` CLI's own `--rpc-url`, `--safe`
+/// and wallet flags, with their `ETH_RPC_URL`, `SAFE_ADDRESS` and
+/// `PRIVATE_KEY` environment variables, for a CLI that wants those too.
 pub mod args {
     pub use crate::cli::{
         parse_block_id, parse_ether_value, parse_fee_value, EvmSpec, HdArgs, PasswordArgs,
-        PayerArgs, RpcArgs, SafeArgs, SendOpts, SimArgs, SweepArgs, WalletArgs,
+        PayerArgs, RpcArgs, SafeArgs, SendOpts, SimArgs, SweepArgs, WalletArgs, DEFAULT_BLOCK_TIME,
+        DEFAULT_TIMEOUT,
     };
 }
 

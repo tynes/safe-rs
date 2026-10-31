@@ -32,11 +32,102 @@ pub struct Console {
     stderr: bool,
 }
 
+/// Prints a command result: as JSON on stdout, as text through the console,
+/// or not at all in [`Output::Quiet`].
+pub fn emit(report: &impl Report, output: Output, console: Console) {
+    match output {
+        Output::Json => report.print(true),
+        Output::Human => console.line(report.human()),
+        Output::Quiet => {}
+    }
+}
+
+/// How a send ended. Failures (a reverted transaction, a failed simulation, a
+/// receipt that never came) are errors instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SendOutcome {
+    /// The confirmation prompt was declined; nothing was broadcast
+    Aborted { safe_tx_hash: B256 },
+    /// `--simulate-only`: the simulation passed; nothing was signed or broadcast
+    Simulated { safe_tx_hash: B256, gas_used: u64 },
+    /// The signatures were saved to the bundle for other owners to add to:
+    /// `--sign-only`, or fewer signatures than the threshold
+    Signed {
+        safe_tx_hash: B256,
+        safe_nonce: U256,
+        signatures: usize,
+        threshold: usize,
+        bundle: std::path::PathBuf,
+    },
+    /// `--approve-hash`: the approveHash transaction was mined
+    HashApproved {
+        tx_hash: B256,
+        safe_tx_hash: B256,
+        gas_used: u64,
+        block: Option<u64>,
+    },
+    /// `--no-submit`: the transaction was signed but not broadcast
+    NotSubmitted {
+        tx_hash: B256,
+        safe_tx_hash: B256,
+        /// EIP-2718 bytes for `eth_sendRawTransaction`
+        raw: Bytes,
+    },
+    /// The Safe transaction was executed and succeeded
+    Executed {
+        tx_hash: B256,
+        safe_tx_hash: B256,
+        gas_used: u64,
+        /// Block it was mined in, when the receipt names it
+        block: Option<u64>,
+    },
+}
+
+/// What a send prints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Output {
+    /// Progress, the confirmation prompt and the result as text, as `safe send`
+    #[default]
+    Human,
+    /// The result as one JSON document on stdout, and nothing else; never
+    /// prompts (`safe send --json`)
+    Json,
+    /// Progress and the confirmation prompt as text on stderr, and no result:
+    /// for a CLI that prints its own from the returned
+    /// [`SendOutcome`](crate::SendOutcome). Stdout stays untouched unless
+    /// `--raw-out -` asks for it.
+    Quiet,
+}
+
+impl Output {
+    pub fn from_json(json: bool) -> Self {
+        if json {
+            Self::Json
+        } else {
+            Self::Human
+        }
+    }
+
+    /// Whether the confirmation prompt may be shown.
+    pub fn prompts(self) -> bool {
+        self != Self::Json
+    }
+}
+
 impl Console {
     pub fn new(json: bool, stdout_is_data: bool) -> Self {
         Self {
             quiet: json,
             stderr: stdout_is_data,
+        }
+    }
+
+    pub fn for_output(output: Output, stdout_is_data: bool) -> Self {
+        Self {
+            quiet: output == Output::Json,
+            stderr: stdout_is_data || output == Output::Quiet,
         }
     }
 

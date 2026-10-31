@@ -25,8 +25,8 @@ use crate::cli::{SimArgs, SweepArgs};
 use crate::commands::{http_provider, latest_sim_spec, outer_fees};
 use crate::keys::CliKeys;
 use crate::output::{
-    confirm_prompt, rotation_summary, ApproveHashOutput, BundleSavedOutput, Console, Report,
-    RotationOutput, RotationPlanOutput, SignedTxOutput, SimulationOutput,
+    confirm_prompt, emit, rotation_summary, ApproveHashOutput, BundleSavedOutput, Console, Output,
+    Report, RotationOutput, RotationPlanOutput, SendOutcome, SignedTxOutput, SimulationOutput,
 };
 
 /// How often to poll for a receipt after broadcasting.
@@ -61,7 +61,7 @@ pub struct RotationRun<'a> {
     pub merge_bundle: Vec<PathBuf>,
     pub approve_hash: bool,
     pub sign_only: bool,
-    pub json: bool,
+    pub output: Output,
 }
 
 /// The configuration shared by every command that opens a rotating Safe.
@@ -107,16 +107,10 @@ impl Report for RotationSimulation {
     }
 }
 
-fn emit(report: &impl Report, json: bool, console: Console) {
-    if json {
-        report.print(true);
-    } else {
-        console.line(report.human());
-    }
-}
-
-pub async fn run(run: RotationRun<'_>) -> Result<()> {
-    let prompts = !run.no_confirm && !run.json && !run.no_submit;
+pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
+    let output = run.output;
+    let json = output == Output::Json;
+    let prompts = !run.no_confirm && output.prompts() && !run.no_submit;
     if run.legacy_owner.is_some() && !run.sweep.no_sweep && !run.sweep_legacy && !prompts {
         bail!(
             "moving a Safe onto the HD wallet also moves the whole ETH balance of the \
@@ -130,11 +124,13 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         );
     }
 
+    // `--no-submit` without a destination writes the signed transaction to
+    // stdout, unless the caller prints its own output.
     let raw_out = run
         .raw_out
         .clone()
-        .or_else(|| run.no_submit.then(|| "-".to_string()));
-    let console = Console::new(run.json, raw_out.as_deref() == Some("-"));
+        .or_else(|| (run.no_submit && output != Output::Quiet).then(|| "-".to_string()));
+    let console = Console::for_output(output, raw_out.as_deref() == Some("-"));
 
     let provider = http_provider(run.rpc_url);
     // Unless overridden, batches go through the MultiSendCallOnly of the
@@ -241,7 +237,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
                 traces: None,
                 ..Default::default()
             };
-            emit(&report, run.json, console);
+            emit(&report, output, console);
             bail!("simulation failed: {reason}");
         }
         Err(e @ Error::MultiSendNotDeployed(_)) => {
@@ -272,8 +268,11 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
             simulation,
             rotation: RotationPlanOutput::new(&tx),
         };
-        emit(&report, run.json, console);
-        return Ok(());
+        emit(&report, output, console);
+        return Ok(SendOutcome::Simulated {
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            gas_used: tx.simulation.gas_used,
+        });
     }
     console.line(simulation.human());
     console.line("");
@@ -307,7 +306,9 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
             format!("Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?");
         if prompts && !confirm_prompt(&prompt) {
             console.line("Aborted");
-            return Ok(());
+            return Ok(SendOutcome::Aborted {
+                safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            });
         }
         rotating.arm_signed_only(&tx)?;
         match broadcast_raw(&provider, &tx.outer.raw, tx.outer.tx_hash).await {
@@ -346,13 +347,18 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
                 threshold: need,
                 bundle_path: bundle_path_str,
             },
-            run.json,
+            output,
             console,
         );
         if !success {
             bail!("approveHash transaction reverted");
         }
-        return Ok(());
+        return Ok(SendOutcome::HashApproved {
+            tx_hash: tx.outer.tx_hash,
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            gas_used: receipt.gas_used,
+            block: receipt.block_number(),
+        });
     }
 
     // Branch B: Offchain signature collection (`have < need` or `--sign-only`)
@@ -386,10 +392,16 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
                 remaining_owners,
                 bundle_path: bundle_path.display().to_string(),
             },
-            run.json,
+            output,
             console,
         );
-        return Ok(());
+        return Ok(SendOutcome::Signed {
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            safe_nonce: tx.plan.prepared.params.nonce,
+            signatures: have,
+            threshold: need,
+            bundle: bundle_path.clone(),
+        });
     }
 
     // Branch C: Threshold met (`have >= need`) -> Execute `execTransaction`
@@ -413,7 +425,9 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
     }
     if prompts && !confirm_prompt("Execute transaction and rotate the owner key?") {
         console.line("Aborted");
-        return Ok(());
+        return Ok(SendOutcome::Aborted {
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+        });
     }
 
     // From here on the owner's signature may leave this process: record that
@@ -430,9 +444,9 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
         }
     }
     if run.no_submit {
-        if run.json && raw_out.as_deref() != Some("-") {
+        if json && raw_out.as_deref() != Some("-") {
             document.print(true);
-        } else {
+        } else if output == Output::Human {
             console.line(document.human());
         }
         console.line(format!(
@@ -440,7 +454,11 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
              the next safe command finishes the rotation and the sweep.",
             plan.old_owner
         ));
-        return Ok(());
+        return Ok(SendOutcome::NotSubmitted {
+            tx_hash: tx.outer.tx_hash,
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            raw: tx.outer.raw.clone(),
+        });
     }
 
     console.line(format!(
@@ -461,13 +479,19 @@ pub async fn run(run: RotationRun<'_>) -> Result<()> {
     let owner = rotating.binding()?.current.into();
     let warnings = rotating.take_warnings();
     let status = outcome.status;
+    let executed = SendOutcome::Executed {
+        tx_hash: outcome.tx_hash,
+        safe_tx_hash: outcome.safe_tx_hash,
+        gas_used: outcome.gas_used,
+        block: None,
+    };
     emit(
         &RotationOutput::new(plan, &outcome, owner, warnings),
-        run.json,
+        output,
         console,
     );
     match status {
-        RotationStatus::Rotated => Ok(()),
+        RotationStatus::Rotated => Ok(executed),
         RotationStatus::RotatedElsewhere => bail!(
             "the owner was rotated, but by another transaction carrying the same signed \
              Safe transaction; this one reverted"

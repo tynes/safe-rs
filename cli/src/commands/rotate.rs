@@ -7,6 +7,7 @@ use crate::cli::RotateArgs;
 use crate::commands::default_safe::{read_default_safe, recorded_safe};
 use crate::commands::http_provider;
 use crate::commands::rotation::{self, RotationRun};
+use crate::output::Output;
 use crate::wallet::{create_payer, legacy_signer, open_wallet};
 
 /// `safe rotate`: swap the Safe's owner for the HD wallet's next unused key,
@@ -63,7 +64,8 @@ pub async fn run(args: RotateArgs, json: bool) -> Result<()> {
         merge_bundle: args.merge_bundle.clone(),
         approve_hash: args.approve_hash,
         sign_only: args.sign_only,
-        json,
+        output: Output::from_json(json),
     })
-    .await
+    .await?;
+    Ok(())
 }

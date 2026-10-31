@@ -796,7 +796,11 @@ if let Some(idx) = result.first_failure {
 
 ## Reusing the send flags in your own CLI
 
-An app-specific CLI can build its own calls with safe-rs and send them with the same flags and behavior as `safe send`: `--rpc-url`, `--safe`, the signer, simulation, gas and fee flags, `--bundle` signature collection, `--sign-only`, `--rotate` and the rest. The `safe-rs-cli` crate is also a library. Flatten its `SendOpts` into your clap command and hand it to `send` with your calls:
+An app-specific CLI can build its own calls with safe-rs and send them the way `safe send` does. It gets the same options and behavior: simulation, gas and fees, `--nonce`, `--bundle` signature collection, `--sign-only`, `--raw-out`, `--timeout`, confirmation, `--payer-private-key` and `--rotate`. The `safe-rs-cli` crate is also a library:
+
+- Flatten its `SendOpts` into your clap command.
+- Resolve the RPC URL, the signer and the Safe yourself, into a `SendContext`. `SendOpts` leaves out `--rpc-url`, `--safe` and the wallet flags, so your CLI's own flags and environment variables for those keep their meaning.
+- Call `send`. It returns how the send ended.
 
 ```toml
 [dependencies]
@@ -809,33 +813,74 @@ clap = { version = "4", features = ["derive", "env"] }
 use clap::Parser;
 use safe_rs_cli::args::SendOpts;
 use safe_rs_cli::safe_rs::{Address, Call, U256};
+use safe_rs_cli::{Output, PrivateKeySigner, SendContext, SendOutcome, Url};
 
 #[derive(Parser)]
 struct Deposit {
-    #[arg(long)]
-    vault: Address,
+    #[arg(long, env = "MYAPP_RPC_URL")]
+    rpc_url: Url,
+
+    #[arg(long, env = "MYAPP_PRIVATE_KEY")]
+    private_key: PrivateKeySigner,
 
     #[arg(long)]
     amount: U256,
 
     #[command(flatten)]
-    safe: SendOpts,
+    send: SendOpts,
 }
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     let deposit = Deposit::parse();
-    let calls: Vec<Call> = build_deposit_calls(deposit.vault, deposit.amount);
-    safe_rs_cli::send(calls, deposit.safe, false).await
+    let calls: Vec<Call> = build_deposit_calls(deposit.amount);
+    let ctx = SendContext::new(deposit.rpc_url, MY_APP_SAFE)
+        .with_signer(deposit.private_key)
+        .with_output(Output::Quiet);
+    match safe_rs_cli::send(ctx, calls, deposit.send).await? {
+        SendOutcome::Executed { tx_hash, .. } => println!("Deposited in {tx_hash}"),
+        SendOutcome::Aborted { .. } => println!("Cancelled"),
+        other => println!("{other:?}"),
+    }
+    Ok(())
 }
 ```
 
-- Use `safe_rs_cli::safe_rs` to build the calls, so they come from the same safe-rs version the CLI uses.
-- The other flag groups are in `safe_rs_cli::args`, for commands that only need some of them: `RpcArgs`, `SafeArgs`, `WalletArgs`, `PasswordArgs`, `SimArgs`, `HdArgs`, `PayerArgs` and `SweepArgs`.
-- To embed the whole `safe` command tree as a subcommand, use `safe_rs_cli::Commands` with `safe_rs_cli::run(command, json)`.
-- `SendOpts` takes over the flag names it defines: `--nonce`, `--timeout`, `--trace`, `--block`, `--gas-limit`, `--bundle`, `-i` and the others. If your command reuses one, clap panics when it builds the command. Run `YourCli::command().debug_assert()` in a test to catch this.
-- The environment variables in [Environment Variables](#environment-variables) come along with the flags.
-- `--json` is a global flag of the `safe` CLI itself, so pass the `json` argument yourself.
+**What `send` returns.** A `SendOutcome`:
+
+| Outcome | When |
+|---|---|
+| `Executed` | The Safe transaction was mined and succeeded. Carries `tx_hash`, `safe_tx_hash`, `gas_used` and `block` |
+| `Simulated` | `--simulate-only` |
+| `Signed` | The signatures were saved to `--bundle`: `--sign-only`, or below the threshold |
+| `HashApproved` | `--approve-hash` |
+| `NotSubmitted` | `--no-submit`. Carries the raw signed transaction |
+| `Aborted` | The user declined the confirmation prompt |
+
+Failures are errors: a failed simulation, a reverted transaction, a receipt that never came. The enum derives `Serialize` (tagged by `outcome`), so it can go into your own JSON output.
+
+**What `send` prints.** Set this with `SendContext::with_output`:
+- `Output::Human` prints like `safe send`.
+- `Output::Json` prints `safe send --json`'s document on stdout and never prompts.
+- `Output::Quiet` sends progress and the confirmation prompt to stderr, prints no result, and leaves stdout to your CLI.
+
+**Building `SendOpts` in code.** `SendOpts::default()` matches the flag defaults. `send` checks options built in code for the same conflicts clap enforces on the flags, such as `--rotate` with `--nonce`.
+
+**Other notes:**
+- Use `safe_rs_cli::safe_rs` to build the calls, and `safe_rs_cli::PrivateKeySigner` and `safe_rs_cli::Url` for the context. They come from the same versions the CLI uses.
+- Always name the Safe. Without `--safe`, `safe send` falls back to the signer's default Safe, which is wrong for a Safe from another factory, so `SendContext` requires one.
+- With `--rotate`, the owner key comes from `--hd-wallet` or `--ledger`, so the context carries no signer.
+- The `safe` CLI's own `--rpc-url`, `--safe` and wallet flags are in `safe_rs_cli::args` as `RpcArgs`, `SafeArgs` and `WalletArgs`, for a CLI that wants those too. `safe_rs_cli::Commands` with `safe_rs_cli::run(command, json)` embeds the whole `safe` command tree as a subcommand.
+- `SendOpts` takes these flag names, so your command can't define them too:
+  - `--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`, `--call-only`
+  - `--simulate-only`, `--skip-simulation`, `--trace`, `--block`, `--spec`, `--block-time`
+  - `--safe-tx-gas`, `--nonce`, `--gas-limit`, `--max-fee-per-gas`, `--max-priority-fee-per-gas`
+  - `--raw-out`, `--no-submit`, `--timeout`, `--no-confirm`
+  - `--multi-send`, `--multi-send-call-only`
+  - `--rotate`, `--hd-wallet`, `--ledger`, `--no-sweep`, `--sweep-reserve`
+  - `--password`, `--password-file`, `--payer-private-key`
+- `SendOpts` also reads three environment variables: `SAFE_HD_WALLET`, `SAFE_PASSWORD_FILE` and `SAFE_PAYER_PRIVATE_KEY`.
+- To catch a flag-name clash, parse a sample command line in a test. `Command::debug_assert()` alone misses a clash between a global flag and one of these, and clap panics at parse time instead.
 
 ## Bundle Format
 
