@@ -8,6 +8,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use safe_rs::{ChainAddresses, SpecId};
 use url::Url;
 
+use crate::error::OptionsError;
+
 #[derive(Parser)]
 #[command(name = "safe")]
 #[command(about = "Cast-like CLI for Safe transactions", long_about = None)]
@@ -358,7 +360,7 @@ impl Default for SendOpts {
 impl SendOpts {
     /// The flag conflicts clap enforces, checked again for options built in
     /// code, which never go through clap.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), OptionsError> {
         let conflicts = [
             (
                 self.approve_hash && self.sign_only,
@@ -413,7 +415,7 @@ impl SendOpts {
             ),
         ];
         match conflicts.iter().find(|(conflict, ..)| *conflict) {
-            Some((_, a, b)) => Err(format!("{a} cannot be used with {b}")),
+            Some(&(_, flag, with)) => Err(OptionsError::Conflict { flag, with }),
             None => Ok(()),
         }
     }

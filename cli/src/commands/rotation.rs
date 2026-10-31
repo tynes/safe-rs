@@ -9,20 +9,18 @@ use alloy::primitives::utils::format_ether;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
-use color_eyre::eyre::{bail, eyre, Result};
 use safe_rs::encoding::compute_domain_separator;
 use safe_rs::rotation::{
     ExecOptions, Keyring, OwnerRef, RotatingSafe, RotationConfig, RotationStatus,
 };
-use safe_rs::{
-    broadcast_raw, detect_addresses, wait_for_receipt, BroadcastOutcome, Call, ChainAddresses,
-    Error, ReceiptWait, SpecId,
-};
+use safe_rs::{detect_addresses, Call, ChainAddresses, Error, SpecId};
 use url::Url;
 
 use crate::bundle::{BundleFile, BundleRotationSwap};
 use crate::cli::{SimArgs, SweepArgs};
+use crate::commands::send::{broadcast, receipt};
 use crate::commands::{http_provider, latest_sim_spec, outer_fees};
+use crate::error::SendError;
 use crate::keys::CliKeys;
 use crate::output::{
     confirm_prompt, emit, rotation_summary, ApproveHashOutput, BundleSavedOutput, Console, Output,
@@ -107,21 +105,21 @@ impl Report for RotationSimulation {
     }
 }
 
-pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
+pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
     let output = run.output;
     let json = output == Output::Json;
     let prompts = !run.no_confirm && output.prompts() && !run.no_submit;
     if run.legacy_owner.is_some() && !run.sweep.no_sweep && !run.sweep_legacy && !prompts {
-        bail!(
+        return Err(SendError::other(
             "moving a Safe onto the HD wallet also moves the whole ETH balance of the \
              --from-* key to the new owner. Without a prompt to show the amount, pass \
-             --sweep-legacy to allow it or --no-sweep to leave the ETH where it is"
-        );
+             --sweep-legacy to allow it or --no-sweep to leave the ETH where it is",
+        ));
     }
     if run.sim.block.is_some() {
-        bail!(
-            "--block cannot be combined with owner rotation, which always runs at the latest block"
-        );
+        return Err(SendError::other(
+            "--block cannot be combined with owner rotation, which always runs at the latest block",
+        ));
     }
 
     // `--no-submit` without a destination writes the signed transaction to
@@ -162,10 +160,10 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
         RotatingSafe::with_keyring(provider.clone(), run.safe, run.ring, config).await?;
     print_warnings(&rotating.take_warnings());
     if let (true, OwnerRef::Derived { index, .. }) = (onboarding, rotating.binding()?.current) {
-        bail!(
+        return Err(SendError::other(format!(
             "Safe {} is already owned by wallet key {index}; drop the --from-* option",
             run.safe
-        );
+        )));
     }
 
     // ETH still owed to the current owner from an earlier rotation: move it
@@ -238,13 +236,15 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
                 ..Default::default()
             };
             emit(&report, output, console);
-            bail!("simulation failed: {reason}");
+            return Err(SendError::SimulationFailed { reason });
         }
         Err(e @ Error::MultiSendNotDeployed(_)) => {
             print_warnings(&rotating.take_warnings());
-            bail!("{e}; pass the address it has on this chain with --multi-send-call-only");
+            return Err(SendError::other(format!(
+                "{e}; pass the address it has on this chain with --multi-send-call-only"
+            )));
         }
-        Err(e) => return Err(eyre!(e)),
+        Err(e) => return Err(e.into()),
     };
     print_warnings(&rotating.take_warnings());
 
@@ -311,29 +311,9 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
             });
         }
         rotating.arm_signed_only(&tx)?;
-        match broadcast_raw(&provider, &tx.outer.raw, tx.outer.tx_hash).await {
-            BroadcastOutcome::Accepted(_) => {}
-            BroadcastOutcome::AlreadyKnown(_) => console.line("Node already knew the transaction"),
-            BroadcastOutcome::Rejected { reason, class } => {
-                bail!("node rejected {}: {reason} ({class:?})", tx.outer.tx_hash)
-            }
-            BroadcastOutcome::Ambiguous { reason } => bail!(
-                "broadcast of {} is ambiguous and it may still be pending: {reason}",
-                tx.outer.tx_hash
-            ),
-        }
+        broadcast(&provider, tx.outer.tx_hash, &tx.outer.raw, console).await?;
         console.line(format!("Sent {}, waiting for receipt...", tx.outer.tx_hash));
-        let timeout = Duration::from_secs(run.timeout);
-        let receipt =
-            match wait_for_receipt(&provider, tx.outer.tx_hash, timeout, RECEIPT_POLL_INTERVAL)
-                .await?
-            {
-                ReceiptWait::Mined(receipt) => receipt,
-                ReceiptWait::TimedOut { tx_hash } => bail!(
-                    "no receipt for {tx_hash} after {}s; it may still be pending",
-                    run.timeout
-                ),
-            };
+        let receipt = receipt(&provider, tx.outer.tx_hash, run.timeout).await?;
         let success = receipt.status();
         emit(
             &ApproveHashOutput {
@@ -351,7 +331,9 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
             console,
         );
         if !success {
-            bail!("approveHash transaction reverted");
+            return Err(SendError::ApproveHashReverted {
+                tx_hash: tx.outer.tx_hash,
+            });
         }
         return Ok(SendOutcome::HashApproved {
             tx_hash: tx.outer.tx_hash,
@@ -364,9 +346,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
     // Branch B: Offchain signature collection (`have < need` or `--sign-only`)
     if have < need || run.sign_only {
         let Some(bundle_path) = &run.bundle else {
-            bail!(
-                "Safe threshold is {need} (have {have}/{need} signatures). Pass --bundle <FILE> to save and collect signatures offchain, or --approve-hash to approve on-chain"
-            );
+            return Err(SendError::BelowThreshold { have, need });
         };
         rotating.arm_signed_only(&tx)?;
         bundle.merge(
@@ -438,7 +418,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
     if let Some(dest) = &raw_out {
         document
             .write_to(dest)
-            .map_err(|e| eyre!("cannot write {dest}: {e}"))?;
+            .map_err(|e| SendError::other(format!("cannot write {dest}: {e}")))?;
         if dest != "-" {
             console.line(format!("Signed transaction written to {dest}"));
         }
@@ -467,18 +447,22 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
     ));
     let outcome = match rotating.submit(tx).await {
         Ok(outcome) => outcome,
-        Err(Error::Unconfirmed { tx_hash, reason }) => bail!(
-            "transaction {tx_hash} is not confirmed: {reason}\n\
-             Its signature is public, so key {} counts as used. Run `safe rotate` \
-             (or any rotating command) to pick up where this left off.",
-            plan.old_owner
-        ),
-        Err(e) => return Err(eyre!(e)),
+        Err(Error::Unconfirmed { tx_hash, reason }) => {
+            return Err(SendError::RotationUnconfirmed {
+                tx_hash,
+                reason,
+                old_owner: plan.old_owner.address,
+                old_owner_index: plan.old_owner.index,
+            })
+        }
+        Err(e) => return Err(e.into()),
     };
 
     let owner = rotating.binding()?.current.into();
     let warnings = rotating.take_warnings();
     let status = outcome.status;
+    let executed_tx = outcome.tx_hash;
+    let old_owner = plan.old_owner;
     let executed = SendOutcome::Executed {
         tx_hash: outcome.tx_hash,
         safe_tx_hash: outcome.safe_tx_hash,
@@ -492,16 +476,13 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome> {
     );
     match status {
         RotationStatus::Rotated => Ok(executed),
-        RotationStatus::RotatedElsewhere => bail!(
-            "the owner was rotated, but by another transaction carrying the same signed \
-             Safe transaction; this one reverted"
-        ),
-        RotationStatus::NotRotated => bail!(
-            "the transaction reverted and the owner was NOT rotated. Its signature is \
-             public and the signed calls stay executable until the Safe nonce is used: \
-             run `safe rotate` now to retire {}. If its ETH was swept with this transaction \
-             (see the warnings), fund it first or pass --payer-private-key",
-            plan.old_owner
-        ),
+        RotationStatus::RotatedElsewhere => Err(SendError::RotatedElsewhere {
+            tx_hash: executed_tx,
+        }),
+        RotationStatus::NotRotated => Err(SendError::NotRotated {
+            tx_hash: executed_tx,
+            old_owner: old_owner.address,
+            old_owner_index: old_owner.index,
+        }),
     }
 }

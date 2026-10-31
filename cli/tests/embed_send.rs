@@ -21,7 +21,7 @@ use alloy::providers::Provider;
 use common::LocalHarness;
 use safe_rs_cli::args::SendOpts;
 use safe_rs_cli::safe_rs::Call;
-use safe_rs_cli::{Output, SendContext, SendOutcome};
+use safe_rs_cli::{Output, SendContext, SendError, SendOutcome};
 
 const RECIPIENT: Address = Address::repeat_byte(0x42);
 
@@ -136,4 +136,21 @@ async fn each_way_a_send_ends_is_returned() {
     // An outcome serializes for a host's own JSON output.
     let json = serde_json::to_value(&simulated).unwrap();
     assert_eq!(json["outcome"], "simulated");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_simulation_is_returned_as_its_own_error() {
+    let h = LocalHarness::new().await;
+    let safe = h.deploy_safe(0).await;
+
+    // The Safe holds no ETH, so the transfer reverts in simulation.
+    let error = safe_rs_cli::send(context(&h, safe), transfer(), opts())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, SendError::SimulationFailed { .. }),
+        "{error:?}"
+    );
+    assert!(!error.may_be_pending());
+    assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
 }

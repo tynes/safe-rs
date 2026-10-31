@@ -813,7 +813,7 @@ clap = { version = "4", features = ["derive", "env"] }
 use clap::Parser;
 use safe_rs_cli::args::SendOpts;
 use safe_rs_cli::safe_rs::{Address, Call, U256};
-use safe_rs_cli::{Output, PrivateKeySigner, SendContext, SendOutcome, Url};
+use safe_rs_cli::{Output, PrivateKeySigner, SendContext, SendError, SendOutcome, Url};
 
 #[derive(Parser)]
 struct Deposit {
@@ -837,10 +837,13 @@ async fn main() -> color_eyre::Result<()> {
     let ctx = SendContext::new(deposit.rpc_url, MY_APP_SAFE)
         .with_signer(deposit.private_key)
         .with_output(Output::Quiet);
-    match safe_rs_cli::send(ctx, calls, deposit.send).await? {
-        SendOutcome::Executed { tx_hash, .. } => println!("Deposited in {tx_hash}"),
-        SendOutcome::Aborted { .. } => println!("Cancelled"),
-        other => println!("{other:?}"),
+    match safe_rs_cli::send(ctx, calls, deposit.send).await {
+        Ok(SendOutcome::Executed { tx_hash, .. }) => println!("Deposited in {tx_hash}"),
+        Ok(SendOutcome::Aborted { .. }) => println!("Cancelled"),
+        Ok(other) => println!("{other:?}"),
+        Err(e) if e.may_be_pending() => eprintln!("Not confirmed, check before retrying: {e}"),
+        Err(SendError::SimulationFailed { reason }) => eprintln!("Deposit would revert: {reason}"),
+        Err(e) => return Err(e.into()),
     }
     Ok(())
 }
@@ -857,7 +860,23 @@ async fn main() -> color_eyre::Result<()> {
 | `NotSubmitted` | `--no-submit`. Carries the raw signed transaction |
 | `Aborted` | The user declined the confirmation prompt |
 
-Failures are errors: a failed simulation, a reverted transaction, a receipt that never came. The enum derives `Serialize` (tagged by `outcome`), so it can go into your own JSON output.
+The enum derives `Serialize` (tagged by `outcome`), so it can go into your own JSON output.
+
+**How `send` fails.** With a `SendError`, a `thiserror` enum you can match on. It converts into an `eyre::Report` (or `anyhow::Error`) with `?`, as in the example above. The variants a host is most likely to handle:
+
+| Error | When |
+|---|---|
+| `Options` | The options conflict, such as `--rotate` with `--nonce`. Carries an `OptionsError`. Nothing was signed or sent |
+| `NoSigner`, `NoCalls` | Nothing to sign with, or nothing to send |
+| `SimulationFailed` | The calls revert in simulation. Nothing was signed or sent |
+| `BelowThreshold` | Fewer signatures than the threshold, and no `--bundle` to save them to |
+| `Rejected` | The node refused the signed transaction. Carries the node's reason and its `RejectClass` |
+| `BroadcastAmbiguous`, `ReceiptTimeout`, `RotationUnconfirmed` | The transaction may still be mined. `SendError::may_be_pending()` is true for these |
+| `ApproveHashReverted`, `SafeTxFailed`, `NotRotated` | The transaction was mined and did not succeed |
+| `Safe` | An error from safe-rs, such as `NotOwner` or `NonceMismatch` |
+| `Rpc` | An RPC request failed |
+
+Everything else, such as a bundle file that does not parse, is `Other`. The enum is `#[non_exhaustive]`.
 
 **What `send` prints.** Set this with `SendContext::with_output`:
 - `Output::Human` prints like `safe send`.
