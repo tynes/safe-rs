@@ -4,13 +4,13 @@
 //! flattening [`args::SendOpts`] into its command. It resolves the RPC URL,
 //! the signer and the Safe itself into a [`SendContext`], so its own
 //! `--rpc-url` and `--private-key` keep their meaning. [`send`] returns how
-//! the send ended:
+//! the send ended, or a [`SendError`] to match on:
 //!
 //! ```no_run
 //! use clap::Parser;
 //! use safe_rs_cli::args::SendOpts;
 //! use safe_rs_cli::safe_rs::{Address, Bytes, Call, U256};
-//! use safe_rs_cli::{Output, PrivateKeySigner, SendContext, SendOutcome, Url};
+//! use safe_rs_cli::{Output, PrivateKeySigner, SendContext, SendError, SendOutcome, Url};
 //!
 //! #[derive(Parser)]
 //! struct Deposit {
@@ -31,16 +31,20 @@
 //! let ctx = SendContext::new(deposit.rpc_url, deposit.safe)
 //!     .with_signer(deposit.private_key)
 //!     .with_output(Output::Quiet);
-//! match safe_rs_cli::send(ctx, calls, deposit.send).await? {
-//!     SendOutcome::Executed { tx_hash, .. } => println!("deposited in {tx_hash}"),
-//!     SendOutcome::Aborted { .. } => println!("cancelled"),
-//!     other => println!("{other:?}"),
+//! match safe_rs_cli::send(ctx, calls, deposit.send).await {
+//!     Ok(SendOutcome::Executed { tx_hash, .. }) => println!("deposited in {tx_hash}"),
+//!     Ok(SendOutcome::Aborted { .. }) => println!("cancelled"),
+//!     Ok(other) => println!("{other:?}"),
+//!     Err(e) if e.may_be_pending() => eprintln!("not confirmed, check before retrying: {e}"),
+//!     Err(SendError::SimulationFailed { reason }) => eprintln!("would revert: {reason}"),
+//!     Err(e) => return Err(e.into()),
 //! }
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! [`Commands`] and [`run`] embed the whole `safe` command tree instead.
+//! [`Commands`] and [`run`] embed the whole `safe` command tree instead. They
+//! report errors with `eyre`, like the `safe` binary.
 
 // CLI-specific lint overrides
 #![allow(clippy::print_stdout, reason = "CLI tools print to stdout")]
@@ -51,6 +55,7 @@
 mod bundle;
 mod cli;
 mod commands;
+mod error;
 mod keys;
 mod output;
 mod paths;
@@ -62,6 +67,7 @@ use color_eyre::eyre::Result;
 pub use alloy::signers::local::PrivateKeySigner;
 pub use cli::{Cli, Commands};
 pub use commands::send::{send, Output, SendContext, SendOutcome};
+pub use error::{OptionsError, SendError};
 /// The library the calls are built with, at the version this crate uses.
 pub use safe_rs;
 pub use url::Url;

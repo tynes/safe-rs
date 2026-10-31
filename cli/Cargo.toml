@@ -22,6 +22,7 @@ alloy-dyn-abi = "1.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 eyre = "0.6"
+thiserror = "2"
 color-eyre = "0.6"
 dialoguer = "0.11"
 hex = "0.4"

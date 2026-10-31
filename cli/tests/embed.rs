@@ -14,7 +14,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use clap::{CommandFactory, Parser, Subcommand};
 use safe_rs_cli::args::{SendOpts, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT};
 use safe_rs_cli::safe_rs::{Address, Bytes, Call, U256};
-use safe_rs_cli::{Output, SendContext};
+use safe_rs_cli::{OptionsError, Output, SendContext, SendError};
 
 #[derive(Parser)]
 struct Host {
@@ -148,13 +148,20 @@ fn call() -> Vec<Call> {
     vec![Call::new(Address::ZERO, U256::ZERO, Bytes::new())]
 }
 
+/// Options to set, the error they give and part of its message.
+type OptionsCase = (fn(&mut SendOpts), OptionsError, &'static str);
+
 #[tokio::test]
 async fn options_built_in_code_are_checked_like_flags() {
-    let cases: [(fn(&mut SendOpts), &str); 4] = [
+    let cases: [OptionsCase; 4] = [
         (
             |o| {
                 o.rotate = true;
                 o.nonce = Some(U256::from(3));
+            },
+            OptionsError::Conflict {
+                flag: "--rotate",
+                with: "--nonce",
             },
             "--rotate cannot be used with --nonce",
         ),
@@ -163,20 +170,64 @@ async fn options_built_in_code_are_checked_like_flags() {
                 o.simulate_only = true;
                 o.skip_simulation = true;
             },
+            OptionsError::Conflict {
+                flag: "--skip-simulation",
+                with: "--simulate-only",
+            },
             "--skip-simulation cannot be used with --simulate-only",
         ),
-        (|o| o.sweep.no_sweep = true, "only apply with --rotate"),
-        (|o| o.hd.ledger = true, "needs --rotate"),
+        (
+            |o| o.sweep.no_sweep = true,
+            OptionsError::SweepWithoutRotate,
+            "only apply with --rotate",
+        ),
+        (
+            |o| o.hd.ledger = true,
+            OptionsError::HdWithoutRotate,
+            "needs --rotate",
+        ),
     ];
-    for (set, expected) in cases {
+    for (set, expected, message) in cases {
         let mut opts = SendOpts::default();
         set(&mut opts);
+        if let OptionsError::Conflict { .. } = expected {
+            assert_eq!(opts.validate(), Err(expected.clone()));
+        }
         let error = safe_rs_cli::send(context(), call(), opts)
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(expected), "{error}");
+            .unwrap_err();
+        assert!(error.to_string().contains(message), "{error}");
+        match error {
+            SendError::Options(found) => assert_eq!(found, expected),
+            other => panic!("expected {expected:?}, got {other:?}"),
+        }
     }
+}
+
+#[tokio::test]
+async fn a_send_needs_a_signer_and_calls() {
+    // Both fail before the chain is reached.
+    let error = safe_rs_cli::send(context(), call(), SendOpts::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SendError::NoSigner), "{error:?}");
+    assert!(!error.may_be_pending());
+
+    let ctx = context().with_signer(safe_rs_cli::PrivateKeySigner::random());
+    let error = safe_rs_cli::send(ctx, Vec::new(), SendOpts::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SendError::NoCalls), "{error:?}");
+}
+
+#[test]
+fn send_errors_convert_to_eyre_reports() {
+    fn host() -> eyre::Result<()> {
+        Err(SendError::NoSigner)?;
+        Ok(())
+    }
+    let report = host().unwrap_err();
+    assert!(report.downcast_ref::<SendError>().is_some());
 }
 
 #[tokio::test]
@@ -187,6 +238,10 @@ async fn rotation_takes_no_signer_from_the_host() {
     };
     let ctx = context().with_signer(safe_rs_cli::PrivateKeySigner::random());
     let error = safe_rs_cli::send(ctx, call(), opts).await.unwrap_err();
+    assert!(
+        matches!(error, SendError::Options(OptionsError::RotateWithSigner)),
+        "{error:?}"
+    );
     assert!(
         error.to_string().contains("send without a signer"),
         "{error}"
