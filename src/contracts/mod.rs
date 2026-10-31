@@ -133,6 +133,15 @@ sol! {
         event ChangedFallbackHandler(address indexed handler);
     }
 
+    /// Execution events of Safe v1.3.0, which does not index `txHash`.
+    ///
+    /// The event signatures, and so topic0, are the same as in [`ISafe`]; only
+    /// the layout differs: one topic, with `txHash` and `payment` in the data.
+    interface ISafeV130 {
+        event ExecutionSuccess(bytes32 txHash, uint256 payment);
+        event ExecutionFailure(bytes32 txHash, uint256 payment);
+    }
+
     /// MultiSend interface for batching multiple calls
     #[sol(rpc)]
     interface IMultiSend {

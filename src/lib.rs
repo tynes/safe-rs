@@ -1,6 +1,7 @@
 //! # safe-rs
 //!
-//! A Rust library for interacting with Safe v1.4.1 smart accounts.
+//! A Rust library for interacting with Safe smart accounts (v1.5.0 and v1.4.1,
+//! plus existing v1.3.0 Safes).
 //!
 //! ## Features
 //!
@@ -100,7 +101,9 @@ pub use chain::{ChainAddresses, ChainConfig};
 #[cfg(feature = "simulation")]
 pub use config::{check_config_post_state, check_new_guards_allow_followup};
 pub use config::{plan_config, ConfigChanges, ConfigOp, ConfigPlan, ExpectedConfig};
-pub use contracts::{IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup, IERC20};
+pub use contracts::{
+    IMultiSend, IMultiSendCallOnly, ISafe, ISafeProxyFactory, ISafeSetup, ISafeV130, IERC20,
+};
 pub use create2::{
     compute_create2_address, encode_create_proxy_with_nonce, encode_setup_call,
     fetch_proxy_creation_code, predict_safe_address,

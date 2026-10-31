@@ -834,6 +834,8 @@ Reading the file recomputes `safe_tx_hash` from the `tx` fields and checks that 
 
 safe-rs supports Safe v1.5.0 (default) and v1.4.1. Specify the version with `safe create --safe-version 1.5.0` or `--safe-version 1.4.1`. The CLI defaults to v1.5.0. v1.5.0 adds a module guard, which `safe config --module-guard` sets and `safe info` shows.
 
+Existing v1.3.0 Safes also work with `Safe::connect`, `simulate()` and `execute()`, including ones with their own implementation contract, such as Polymarket's on Polygon. They batch through the v1.4.1 MultiSend contracts. v1.3.0 does not index `txHash` in `ExecutionSuccess` and `ExecutionFailure`, and safe-rs reads both layouts. safe-rs does not create v1.3.0 Safes, and one-time owner keys (`--rotate`) need v1.4.1 or v1.5.0.
+
 | Chain | Chain ID |
 |-------|----------|
 | Ethereum | 1 |
