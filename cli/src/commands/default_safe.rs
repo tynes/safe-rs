@@ -125,7 +125,8 @@ pub(super) fn recorded_safe(state: &RotationState, chain_id: u64, choose: &str) 
     }
 }
 
-#[cfg(all(test, feature = "hd-wallet"))]
+#[cfg(test)]
+#[cfg(feature = "hd-wallet")]
 mod tests {
     use super::*;
     use safe_rs::rotation::{binding_key, OwnerRef};

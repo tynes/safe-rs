@@ -4,13 +4,13 @@
 use std::fmt::{Display, Write as _};
 
 use alloy::primitives::utils::format_ether;
-use alloy::primitives::{Address, TxHash, U256};
+use alloy::primitives::{Address, TxHash, B256, U256};
 use safe_rs::rotation::{
     OwnerRef, Reserved, RotationOutcome, RotationStatus, RotationTx, SweepOutcome,
 };
 use serde::Serialize;
 
-use super::*;
+use super::{calls_summary, Report};
 
 /// An owner key: a wallet key index, or an address the wallet cannot derive.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]

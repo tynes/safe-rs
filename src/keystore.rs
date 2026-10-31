@@ -391,7 +391,8 @@ pub fn encrypt_mnemonic_keystore(
     serde_json::to_string_pretty(&keystore).map_err(|e| Error::Encoding(e.to_string()))
 }
 
-#[cfg(all(test, feature = "hd-wallet"))]
+#[cfg(test)]
+#[cfg(feature = "hd-wallet")]
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
@@ -694,7 +695,8 @@ mod tests {
 }
 
 /// Without `hd-wallet`: keystores still decrypt, phrase or not, to their key.
-#[cfg(all(test, not(feature = "hd-wallet")))]
+#[cfg(test)]
+#[cfg(not(feature = "hd-wallet"))]
 mod plain_tests {
     use super::*;
 
