@@ -38,6 +38,10 @@ check-features:
     cargo clippy -p safe-rs-cli --bins -- -D warnings
     cargo clippy -p safe-rs-cli --bins --no-default-features -- -D warnings
 
+# Check advisories, bans, licenses and sources (deny.toml)
+deny:
+    cargo deny --all-features --locked check
+
 # Format code
 fmt:
     cargo fmt

@@ -1,0 +1,53 @@
+# cargo-deny configuration: `cargo deny check` (or `just deny`).
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Check the same feature set that CI lints and tests.
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # paste is unmaintained and has no successor; alloy-primitives pulls it in.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro used by alloy-primitives, no replacement" },
+    # crypto-bigint 0.5 comes from k256/elliptic-curve 0.13 through alloy. The
+    # fix is only in 0.7; drop this once alloy moves to k256 0.14.
+    { id = "RUSTSEC-2026-0387", reason = "no fix on the crypto-bigint 0.5 line used by k256 0.13" },
+]
+
+[bans]
+# The alloy and revm trees carry many duplicate versions; not worth chasing.
+multiple-versions = "allow"
+# "warn" rather than "deny" only for the foundry-fork-db git dependency, which
+# has no version and so blocks `cargo publish`. Switch to "deny" once it is a
+# crates.io dependency again.
+wildcards = "warn"
+# Path dependencies within the workspace (the CLI on safe-rs) are fine.
+allow-wildcard-paths = true
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Only licenses the dependency tree needs; all are permissive.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# foundry-fork-db is pinned to a foundry-core commit until a release with
+# revm 43 ships (see Cargo.toml). Remove this along with that git dependency.
+allow-git = ["https://github.com/foundry-rs/foundry-core"]
