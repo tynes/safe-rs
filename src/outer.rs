@@ -14,6 +14,7 @@ use alloy::primitives::{Address, Bytes, Signature, TxKind, B256, U256};
 
 use crate::envelope::SignedSafeTx;
 use crate::error::{Error, Result};
+use crate::types::Call;
 
 /// Fields of an EIP-1559 outer transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +105,31 @@ impl OuterTxParams {
             to,
             value,
             input: Bytes::new(),
+        }
+    }
+
+    /// `call` sent straight from the EOA `from`, with no Safe in between.
+    ///
+    /// The call's operation is not checked here: an EOA cannot delegatecall,
+    /// so callers refuse [`Operation::DelegateCall`](crate::Operation) first.
+    pub fn call(
+        chain_id: u64,
+        from: Address,
+        call: &Call,
+        nonce: u64,
+        gas_limit: u64,
+        fees: Eip1559Estimation,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: fees.max_fee_per_gas,
+            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+            to: call.to,
+            value: call.value,
+            input: call.data.clone(),
         }
     }
 

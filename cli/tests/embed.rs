@@ -247,3 +247,92 @@ async fn rotation_takes_no_signer_from_the_host() {
         "{error}"
     );
 }
+
+fn eoa_context() -> SendContext {
+    // Port 9 (discard), as in `context`: every error below comes from a check
+    // that runs before the chain is reached.
+    SendContext::eoa("http://127.0.0.1:9".parse().unwrap())
+        .with_signer(safe_rs_cli::PrivateKeySigner::random())
+        .with_output(Output::Quiet)
+}
+
+#[tokio::test]
+async fn an_eoa_send_refuses_the_options_only_a_safe_has() {
+    type Case = (fn(&mut SendOpts), &'static str);
+    let cases: [Case; 8] = [
+        (|o| o.bundle = Some("tx.json".into()), "--bundle"),
+        (|o| o.sign_only = true, "--sign-only"),
+        (|o| o.approve_hash = true, "--approve-hash"),
+        (|o| o.nonce = Some(U256::from(1)), "--nonce"),
+        (|o| o.no_submit = true, "--no-submit"),
+        (|o| o.rotate = true, "--rotate"),
+        (|o| o.hd.ledger = true, "--ledger"),
+        (
+            |o| o.payer.payer_private_key = Some("0x01".into()),
+            "--payer-private-key",
+        ),
+    ];
+    for (set, flag) in cases {
+        let mut opts = SendOpts::default();
+        set(&mut opts);
+        let error = safe_rs_cli::send(eoa_context(), call(), opts)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                SendError::Options(OptionsError::SafeOnly { flag: found }) if *found == flag
+            ),
+            "{flag}: {error:?}"
+        );
+        assert!(error.to_string().contains("not from an EOA"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn an_eoa_send_takes_a_gas_limit_for_one_call_only() {
+    let opts = SendOpts {
+        gas_limit: Some(100_000),
+        ..SendOpts::default()
+    };
+    let two = vec![call().remove(0), call().remove(0)];
+    let error = safe_rs_cli::send(eoa_context(), two, opts)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SendError::Options(OptionsError::GasLimitForBatch { calls: 2 })
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_eoa_send_needs_a_signer_calls_and_plain_calls() {
+    let no_signer = SendContext::eoa("http://127.0.0.1:9".parse().unwrap());
+    let error = safe_rs_cli::send(no_signer, call(), SendOpts::default())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, SendError::NoSigner), "{error:?}");
+
+    let error = safe_rs_cli::send(eoa_context(), Vec::new(), SendOpts::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, SendError::Safe(safe_rs_cli::safe_rs::Error::NoCalls)),
+        "{error:?}"
+    );
+
+    let delegate = vec![Call::delegate_call(Address::ZERO, Bytes::new())];
+    let error = safe_rs_cli::send(eoa_context(), delegate, SendOpts::default())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SendError::Safe(safe_rs_cli::safe_rs::Error::UnsupportedEoaOperation { .. })
+        ),
+        "{error:?}"
+    );
+}

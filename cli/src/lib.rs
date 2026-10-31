@@ -43,6 +43,10 @@
 //! # }
 //! ```
 //!
+//! [`SendContext::eoa`] sends the same calls from the signer's own account,
+//! one transaction per call, for an app that also supports accounts without a
+//! Safe.
+//!
 //! [`Commands`] and [`run`] embed the whole `safe` command tree instead. They
 //! report errors with `eyre`, like the `safe` binary.
 
@@ -66,7 +70,7 @@ use color_eyre::eyre::Result;
 
 pub use alloy::signers::local::PrivateKeySigner;
 pub use cli::{Cli, Commands};
-pub use commands::send::{send, Output, SendContext, SendOutcome};
+pub use commands::send::{send, EoaTx, Output, SendContext, SendOutcome, Sender};
 pub use error::{OptionsError, SendError};
 /// The library the calls are built with, at the version this crate uses.
 pub use safe_rs;

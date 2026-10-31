@@ -83,6 +83,50 @@ pub enum SendOutcome {
         /// Block it was mined in, when the receipt names it
         block: Option<u64>,
     },
+    /// A send from an EOA declined at the confirmation prompt; nothing was
+    /// broadcast
+    EoaAborted,
+    /// A send from an EOA with `--simulate-only`: every transaction passed in
+    /// simulation; nothing was signed or broadcast
+    EoaSimulated {
+        /// Gas used by all the transactions together
+        gas_used: u64,
+    },
+    /// A send from an EOA: every call was mined, one transaction each, and
+    /// succeeded
+    EoaExecuted { txs: Vec<EoaTx> },
+}
+
+/// One mined transaction of a send from an EOA.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct EoaTx {
+    pub tx_hash: B256,
+    pub gas_used: u64,
+    /// Block it was mined in, when the receipt names it
+    pub block: Option<u64>,
+}
+
+/// The transactions of a send from an EOA, once all were mined.
+#[derive(Serialize)]
+pub struct EoaExecutionOutput {
+    pub from: Address,
+    pub txs: Vec<EoaTx>,
+}
+
+impl Report for EoaExecutionOutput {
+    fn human(&self) -> String {
+        let mut s = format!("Transactions Executed from {}:", self.from);
+        for (i, tx) in self.txs.iter().enumerate() {
+            let _ = write!(
+                s,
+                "\n  {}. {} (gas used {})",
+                i + 1,
+                tx.tx_hash,
+                tx.gas_used
+            );
+        }
+        s
+    }
 }
 
 /// What a send prints.

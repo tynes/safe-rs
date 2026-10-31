@@ -16,6 +16,7 @@
 #[path = "../../tests/local/common.rs"]
 mod common;
 
+use alloy::network::ReceiptResponse as _;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
 use common::LocalHarness;
@@ -153,4 +154,96 @@ async fn a_failed_simulation_is_returned_as_its_own_error() {
     );
     assert!(!error.may_be_pending());
     assert_eq!(h.safe_nonce(safe).await, U256::ZERO);
+}
+
+fn eoa_context(h: &LocalHarness) -> SendContext {
+    SendContext::eoa(h.url())
+        .with_signer(h.owner.clone())
+        .with_output(Output::Quiet)
+}
+
+async fn owner_nonce(h: &LocalHarness) -> u64 {
+    h.provider
+        .get_transaction_count(h.owner.address())
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_eoa_sends_each_call_as_its_own_transaction() {
+    let h = LocalHarness::new().await;
+    let other = Address::repeat_byte(0x43);
+    let calls = vec![
+        Call::new(RECIPIENT, U256::from(7), Bytes::new()),
+        Call::new(other, U256::from(9), Bytes::new()),
+    ];
+    let start = owner_nonce(&h).await;
+
+    // Simulated: nothing signed or sent.
+    let simulated = safe_rs_cli::send(
+        eoa_context(&h),
+        calls.clone(),
+        SendOpts {
+            simulate_only: true,
+            ..opts()
+        },
+    )
+    .await
+    .unwrap();
+    let SendOutcome::EoaSimulated { gas_used } = simulated else {
+        panic!("expected EoaSimulated, got {simulated:?}");
+    };
+    assert!(gas_used >= 2 * 21_000, "{gas_used}");
+    assert_eq!(owner_nonce(&h).await, start);
+
+    // Executed: two transactions, in order.
+    let executed = safe_rs_cli::send(eoa_context(&h), calls, opts())
+        .await
+        .unwrap();
+    let SendOutcome::EoaExecuted { txs } = &executed else {
+        panic!("expected EoaExecuted, got {executed:?}");
+    };
+    assert_eq!(txs.len(), 2);
+    for tx in txs {
+        let receipt = h
+            .provider
+            .get_transaction_receipt(tx.tx_hash)
+            .await
+            .unwrap()
+            .expect("mined");
+        assert!(receipt.status());
+        assert_eq!(receipt.block_number, tx.block);
+    }
+    assert_eq!(owner_nonce(&h).await, start + 2);
+    assert_eq!(
+        h.provider.get_balance(RECIPIENT).await.unwrap(),
+        U256::from(7)
+    );
+    assert_eq!(h.provider.get_balance(other).await.unwrap(), U256::from(9));
+
+    let json = serde_json::to_value(&executed).unwrap();
+    assert_eq!(json["outcome"], "eoa_executed");
+    assert_eq!(json["txs"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_eoa_send_with_a_reverting_call_sends_nothing() {
+    let h = LocalHarness::new().await;
+    let reverter = h.create2(common::reverter_initcode()).await;
+    let start = owner_nonce(&h).await;
+    let calls = vec![
+        Call::new(RECIPIENT, U256::from(7), Bytes::new()),
+        Call::new(reverter, U256::ZERO, Bytes::new()),
+    ];
+
+    let error = safe_rs_cli::send(eoa_context(&h), calls, opts())
+        .await
+        .unwrap_err();
+    let SendError::SimulationFailed { reason } = &error else {
+        panic!("expected SimulationFailed, got {error:?}");
+    };
+    assert!(reason.starts_with("call 1:"), "{reason}");
+    assert!(!error.may_be_pending());
+    assert_eq!(owner_nonce(&h).await, start);
+    assert_eq!(h.provider.get_balance(RECIPIENT).await.unwrap(), U256::ZERO);
 }

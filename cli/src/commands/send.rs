@@ -11,11 +11,12 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{self, bail};
 use safe_rs::{
-    broadcast_raw, detect_addresses, is_gs013_revert, read_approved_owners, read_safe_state,
-    require_batch_target, safe_outcome_for_receipt, sign_outer_tx, simulate_approve_hash,
-    simulate_exec_with_threshold, wait_for_receipt, Account, BatchTarget, BroadcastOutcome, Call,
-    CallBuilder, ChainAddresses, ChainConfig, Error, ExecSimulation, ForkSession, OuterTxParams,
-    ReadSafeStateOptions, ReceiptWait, Safe, SignedSafeTx,
+    broadcast_raw, check_eoa_calls, detect_addresses, is_gs013_revert, read_approved_owners,
+    read_safe_state, require_batch_target, safe_outcome_for_receipt, sign_outer_tx,
+    simulate_approve_hash, simulate_eoa_calls, simulate_exec_with_threshold, wait_for_receipt,
+    Account, BatchTarget, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig, Error,
+    ExecSimulation, ForkSession, OuterTxParams, ReadSafeStateOptions, ReceiptWait, Safe,
+    SignedSafeTx,
 };
 
 use crate::bundle::{BundleCall, BundleFile};
@@ -26,9 +27,9 @@ use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
 use crate::error::{OptionsError, SendError};
 use crate::output::{
     calls_summary, confirm_prompt, emit, ApproveHashOutput, BundleSavedOutput, Console,
-    ExecutionOutput, Report, SignedTxOutput, SimulationOutput,
+    EoaExecutionOutput, ExecutionOutput, Report, SignedTxOutput, SimulationOutput,
 };
-pub use crate::output::{Output, SendOutcome};
+pub use crate::output::{EoaTx, Output, SendOutcome};
 use crate::sig_parser::{encode_function_call, parse_call_spec};
 use crate::wallet::{create_payer, create_signer, open_wallet};
 use url::Url;
@@ -38,20 +39,33 @@ const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 type Result<T, E = SendError> = std::result::Result<T, E>;
 
+/// What sends the calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Sender {
+    /// The Safe at this address, in one Safe transaction (batched through
+    /// MultiSend when there is more than one call)
+    Safe(Address),
+    /// The signer's own account, one transaction per call
+    Eoa,
+}
+
 /// Where a send goes and who signs it: what a CLI embedding [`SendOpts`]
 /// resolves itself instead of taking `--rpc-url`, `--safe` and the wallet
 /// flags.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct SendContext {
-    /// RPC endpoint of the chain the Safe is on
+    /// RPC endpoint of the chain to send on
     pub rpc_url: Url,
-    /// The Safe to send through
-    pub safe: Address,
+    /// The Safe to send through, or the signer's own account
+    pub sender: Sender,
     /// The owner key that signs the Safe transaction, and pays for gas unless
     /// `--payer-private-key` is given. Leave it out with `--rotate`, where the
     /// owner key comes from the HD wallet or Ledger, or to only add on-chain
     /// approvals collected in `--bundle` while a payer submits.
+    ///
+    /// For [`Sender::Eoa`], the account that sends and pays; required.
     pub signer: Option<PrivateKeySigner>,
     /// What the send prints
     pub output: Output,
@@ -63,7 +77,23 @@ impl SendContext {
     pub fn new(rpc_url: Url, safe: Address) -> Self {
         Self {
             rpc_url,
-            safe,
+            sender: Sender::Safe(safe),
+            signer: None,
+            output: Output::Human,
+        }
+    }
+
+    /// A send from the signer's own account over `rpc_url`, one transaction
+    /// per call, with [`Output::Human`]. Give it a signer with
+    /// [`with_signer`](Self::with_signer).
+    ///
+    /// The options that only apply to a Safe (`--bundle`, `--nonce`,
+    /// `--rotate` and the others) are refused with
+    /// [`OptionsError::SafeOnly`].
+    pub fn eoa(rpc_url: Url) -> Self {
+        Self {
+            rpc_url,
+            sender: Sender::Eoa,
             signer: None,
             output: Output::Human,
         }
@@ -84,7 +114,7 @@ impl fmt::Debug for SendContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SendContext")
             .field("rpc_url", &self.rpc_url.as_str())
-            .field("safe", &self.safe)
+            .field("sender", &self.sender)
             .field("signer", &self.signer.as_ref().map(|s| s.address()))
             .field("output", &self.output)
             .finish()
@@ -134,17 +164,290 @@ pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
 /// With `--bundle`, `calls` may be empty when the bundle already holds them.
 /// Options built in code are checked for the same conflicts clap enforces on
 /// the flags.
+///
+/// With [`Sender::Eoa`] the signer sends each call as its own transaction:
+/// simulated together, confirmed once, then broadcast one after another,
+/// each waiting for the one before it to be mined.
 pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<SendOutcome> {
-    if opts.rotate && ctx.signer.is_some() {
-        return Err(OptionsError::RotateWithSigner.into());
+    match ctx.sender {
+        Sender::Safe(safe) => {
+            if opts.rotate && ctx.signer.is_some() {
+                return Err(OptionsError::RotateWithSigner.into());
+            }
+            check(&opts, ctx.signer.is_some())?;
+            let target = Target {
+                rpc_url: ctx.rpc_url,
+                safe: Some(safe),
+                signer: ctx.signer,
+            };
+            dispatch(target, calls, opts, ctx.output).await
+        }
+        Sender::Eoa => {
+            check_eoa(&opts, calls.len())?;
+            let signer = ctx.signer.ok_or(SendError::NoSigner)?;
+            execute_eoa(&ctx.rpc_url, &signer, calls, &opts, ctx.output).await
+        }
     }
-    check(&opts, ctx.signer.is_some())?;
-    let target = Target {
-        rpc_url: ctx.rpc_url,
-        safe: Some(ctx.safe),
-        signer: ctx.signer,
+}
+
+/// The checks a send from an EOA runs before it touches a key or the chain:
+/// the options that only make sense for a Safe are refused.
+fn check_eoa(opts: &SendOpts, calls: usize) -> Result<(), OptionsError> {
+    opts.validate()?;
+    let safe_only = [
+        (opts.bundle.is_some(), "--bundle"),
+        (!opts.merge_bundle.is_empty(), "--merge-bundle"),
+        (opts.approve_hash, "--approve-hash"),
+        (opts.sign_only, "--sign-only"),
+        (opts.call_only, "--call-only"),
+        (opts.safe_tx_gas.is_some(), "--safe-tx-gas"),
+        (opts.nonce.is_some(), "--nonce"),
+        (opts.raw_out.is_some(), "--raw-out"),
+        (opts.no_submit, "--no-submit"),
+        (opts.multi_send.is_some(), "--multi-send"),
+        (
+            opts.multi_send_call_only.is_some(),
+            "--multi-send-call-only",
+        ),
+        (opts.rotate, "--rotate"),
+        (opts.hd.hd_wallet.is_some(), "--hd-wallet"),
+        (opts.hd.ledger, "--ledger"),
+        (opts.sweep.no_sweep, "--no-sweep"),
+        (opts.sweep.sweep_reserve.is_some(), "--sweep-reserve"),
+        (
+            opts.payer.payer_private_key.is_some(),
+            "--payer-private-key",
+        ),
+    ];
+    if let Some((_, flag)) = safe_only.into_iter().find(|(set, _)| *set) {
+        return Err(OptionsError::SafeOnly { flag });
+    }
+    if opts.gas_limit.is_some() && calls > 1 {
+        return Err(OptionsError::GasLimitForBatch { calls });
+    }
+    Ok(())
+}
+
+/// Sends `calls` from `signer`'s own account, one transaction per call.
+///
+/// Every transaction is simulated first, in order on one fork, so a later
+/// call sees the effects of the earlier ones. Nothing is sent unless all of
+/// them pass. They are then broadcast one at a time, each after the one
+/// before it is mined; a failure part way returns
+/// [`SendError::EoaBatchFailed`] naming the transactions already mined.
+async fn execute_eoa(
+    rpc_url: &Url,
+    signer: &PrivateKeySigner,
+    mut calls: Vec<Call>,
+    args: &SendOpts,
+    output: Output,
+) -> Result<SendOutcome> {
+    check_eoa_calls(&calls)?;
+    if let (Some(gas), [call]) = (args.gas_limit, calls.as_mut_slice()) {
+        call.gas_limit = Some(gas);
+    }
+    let console = Console::for_output(output, false);
+    let from = signer.address();
+    let provider = http_provider(rpc_url);
+    let chain_id = provider.get_chain_id().await?;
+
+    console.line(format!("From: {from} (EOA)"));
+    console.line("");
+    console.line(calls_summary(&calls));
+    console.line("");
+
+    let fees = outer_fees(
+        &provider,
+        args.max_fee_per_gas,
+        args.max_priority_fee_per_gas,
+    )
+    .await?;
+
+    // The nonce and simulated gas limit of each transaction.
+    let planned: Vec<(u64, Option<u64>)> = if args.skip_simulation {
+        console.line("Skipping simulation (--skip-simulation)\n");
+        let nonce = provider.get_transaction_count(from).await?;
+        (nonce..).zip(calls.iter().map(|c| c.gas_limit)).collect()
+    } else {
+        let session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
+        let simulated = simulate_eoa_calls(&session, from, &calls, fees)?;
+        let failed = simulated
+            .iter()
+            .position(|s| !s.result.success)
+            .map(|i| (i, &simulated[i].result));
+        let traces = args
+            .trace
+            .then(|| {
+                let all: Vec<String> = simulated
+                    .iter()
+                    .filter_map(|s| s.result.format_traces())
+                    .collect();
+                (!all.is_empty()).then(|| all.join("\n"))
+            })
+            .flatten();
+        let gas_used = simulated.iter().map(|s| s.result.gas_used).sum();
+        let revert_reason = failed.map(|(i, result)| {
+            let reason = result
+                .revert_reason
+                .clone()
+                .unwrap_or_else(|| "unknown reason".to_string());
+            if calls.len() > 1 {
+                format!("call {i}: {reason}")
+            } else {
+                reason
+            }
+        });
+        let report = SimulationOutput {
+            success: failed.is_none(),
+            gas_used,
+            revert_reason: revert_reason.clone(),
+            traces,
+            ..SimulationOutput::default()
+        };
+        if output == Output::Quiet && failed.is_some() {
+            console.line(report.human());
+        } else if args.simulate_only || failed.is_some() {
+            emit(&report, output, console);
+        } else {
+            console.line(report.human());
+            console.line("");
+        }
+        if let Some(reason) = revert_reason {
+            return Err(SendError::SimulationFailed { reason });
+        }
+        if args.simulate_only {
+            return Ok(SendOutcome::EoaSimulated { gas_used });
+        }
+        simulated
+            .iter()
+            .map(|s| (s.nonce, Some(s.gas_limit)))
+            .collect()
     };
-    dispatch(target, calls, opts, ctx.output).await
+
+    let count = calls.len();
+    let what = if count == 1 {
+        "Send transaction".to_string()
+    } else {
+        format!("Send {count} transactions, one after another,")
+    };
+    let prompt = if args.skip_simulation {
+        format!("{what} without simulation?")
+    } else {
+        format!("{what}?")
+    };
+    if !args.no_confirm && output.prompts() && !confirm_prompt(&prompt) {
+        console.line("Aborted");
+        return Ok(SendOutcome::EoaAborted);
+    }
+
+    let mut txs = Vec::with_capacity(count);
+    for (index, (call, (nonce, simulated_gas))) in calls.iter().zip(planned).enumerate() {
+        let sent = send_eoa_tx(
+            &provider,
+            signer,
+            chain_id,
+            EoaTxPlan {
+                index,
+                call,
+                nonce,
+                simulated_gas,
+                fees,
+            },
+            args.timeout,
+            console,
+        )
+        .await;
+        match sent {
+            Ok(tx) => txs.push(tx),
+            Err(source) if txs.is_empty() => return Err(source),
+            Err(source) => {
+                return Err(SendError::EoaBatchFailed {
+                    mined: txs.iter().map(|tx: &EoaTx| tx.tx_hash).collect(),
+                    failed_index: index,
+                    source: Box::new(source),
+                })
+            }
+        }
+    }
+
+    emit(
+        &EoaExecutionOutput {
+            from,
+            txs: txs.clone(),
+        },
+        output,
+        console,
+    );
+    Ok(SendOutcome::EoaExecuted { txs })
+}
+
+/// One transaction of a send from an EOA, ready to sign.
+struct EoaTxPlan<'a> {
+    index: usize,
+    call: &'a Call,
+    nonce: u64,
+    /// The gas limit the simulation used, unless it was skipped
+    simulated_gas: Option<u64>,
+    fees: Eip1559Estimation,
+}
+
+/// Signs, broadcasts and waits for one transaction of a send from an EOA.
+///
+/// The node estimates gas just before signing, when the transactions before
+/// this one are mined, and the higher of its estimate and the simulation's is
+/// used, as for `execTransaction`.
+async fn send_eoa_tx(
+    provider: &HttpProvider,
+    signer: &PrivateKeySigner,
+    chain_id: u64,
+    plan: EoaTxPlan<'_>,
+    timeout: u64,
+    console: Console,
+) -> Result<EoaTx> {
+    let from = signer.address();
+    let call = plan.call;
+    let gas_limit = if let Some(gas) = call.gas_limit {
+        gas
+    } else {
+        let request = <AnyNetwork as Network>::TransactionRequest::default()
+            .with_from(from)
+            .with_to(call.to)
+            .with_value(call.value)
+            .with_input(call.data.clone());
+        if let Some(simulated) = plan.simulated_gas {
+            let estimate = provider
+                .estimate_gas(request)
+                .await
+                .map_err(|e| node_estimate_failed(e, "the transaction"))?;
+            cross_check_gas_limit(simulated, estimate + estimate / 5)
+        } else {
+            let estimate = provider
+                .estimate_gas(request)
+                .await
+                .map_err(|e| SendError::other(format!("gas estimation failed: {e}")))?;
+            estimate + estimate / 5
+        }
+    };
+
+    let outer = sign_outer_tx(
+        signer,
+        OuterTxParams::call(chain_id, from, call, plan.nonce, gas_limit, plan.fees),
+    )
+    .await?;
+    broadcast(provider, outer.tx_hash, &outer.raw, console).await?;
+    console.line(format!("Sent {}, waiting for receipt...", outer.tx_hash));
+    let receipt = receipt(provider, outer.tx_hash, timeout).await?;
+    if !receipt.status() {
+        return Err(SendError::EoaTxReverted {
+            tx_hash: outer.tx_hash,
+            index: plan.index,
+        });
+    }
+    Ok(EoaTx {
+        tx_hash: outer.tx_hash,
+        gas_used: receipt.gas_used,
+        block: receipt.block_number(),
+    })
 }
 
 /// The checks every send runs before it touches a key or the chain.

@@ -16,10 +16,14 @@ use url::Url;
 use crate::account::Account;
 use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
+#[cfg(feature = "simulation")]
+use crate::outer::OuterTxParams;
 use crate::safe::ExecutionResult;
 #[cfg(feature = "simulation")]
-use crate::simulation::{ForkSimulator, SimulationResult};
+use crate::simulation::{ForkSession, ForkSimulator, SimTx, SimulationResult, TxChecks};
 use crate::types::{Call, CallBuilder, Operation};
+#[cfg(feature = "simulation")]
+use alloy::eips::eip1559::Eip1559Estimation;
 
 /// Result of executing a single EOA transaction
 #[derive(Debug, Clone)]
@@ -567,6 +571,89 @@ where
             success: tx_result.success,
         })
     }
+}
+
+/// One transaction of an EOA batch, as [`simulate_eoa_calls`] ran it.
+#[cfg(feature = "simulation")]
+#[derive(Debug, Clone)]
+pub struct EoaTxSimulation {
+    /// Result of the strict run (or of the gas measurement, if that failed)
+    pub result: SimulationResult,
+    /// The sender's account nonce for this transaction
+    pub nonce: u64,
+    /// The gas limit the strict run used
+    pub gas_limit: u64,
+}
+
+/// Rejects calls an EOA cannot make: an EOA has no code to delegatecall from.
+pub fn check_eoa_calls(calls: &[Call]) -> Result<()> {
+    if calls.is_empty() {
+        return Err(Error::NoCalls);
+    }
+    if let Some(i) = calls
+        .iter()
+        .position(|c| c.operation == Operation::DelegateCall)
+    {
+        return Err(Error::UnsupportedEoaOperation {
+            operation: format!("DelegateCall (call index {i})"),
+        });
+    }
+    Ok(())
+}
+
+/// Simulates `calls` as consecutive transactions from `from` in `session`'s
+/// block, each with all validity checks (nonce, fees, balance) and seeing the
+/// effects of the ones before it. `session` itself is left unchanged.
+///
+/// A call with a `gas_limit` uses it; otherwise gas is first measured at the
+/// largest limit the session accepts and the limit is the gas spent before
+/// refunds plus 20%, as for an `execTransaction` in [`crate::simulate_exec`].
+///
+/// Stops at the first transaction that fails, so the last entry is the failure
+/// when not every call succeeds.
+#[cfg(feature = "simulation")]
+pub fn simulate_eoa_calls(
+    session: &ForkSession,
+    from: Address,
+    calls: &[Call],
+    fees: Eip1559Estimation,
+) -> Result<Vec<EoaTxSimulation>> {
+    check_eoa_calls(calls)?;
+    let chain_id = session.chain_id();
+    let mut state = session.checkpoint();
+    let first_nonce = state.nonce(from)?;
+    let mut simulated = Vec::with_capacity(calls.len());
+    for (nonce, call) in (first_nonce..).zip(calls) {
+        let outer = |gas_limit| OuterTxParams::call(chain_id, from, call, nonce, gas_limit, fees);
+        let gas_limit = if let Some(gas) = call.gas_limit {
+            gas
+        } else {
+            let max = session.max_tx_gas();
+            let mut scratch = state.checkpoint();
+            let measured = scratch.transact(SimTx::from_outer(&outer(max), TxChecks::MEASURE))?;
+            if !measured.success {
+                simulated.push(EoaTxSimulation {
+                    result: measured,
+                    nonce,
+                    gas_limit: max,
+                });
+                return Ok(simulated);
+            }
+            (measured.gas_spent + measured.gas_spent / 5).min(max)
+        };
+        let result =
+            state.transact_commit(SimTx::from_outer(&outer(gas_limit), TxChecks::STRICT))?;
+        let success = result.success;
+        simulated.push(EoaTxSimulation {
+            result,
+            nonce,
+            gas_limit,
+        });
+        if !success {
+            break;
+        }
+    }
+    Ok(simulated)
 }
 
 #[cfg(test)]
