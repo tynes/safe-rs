@@ -52,14 +52,14 @@ pub enum Commands {
     Wallet(WalletCommand),
 }
 
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Debug)]
 pub struct RpcArgs {
     /// RPC endpoint URL
     #[arg(long, env = "ETH_RPC_URL")]
     pub rpc_url: Url,
 }
 
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct SafeArgs {
     /// Safe contract address (default: the signer's default Safe, the one
     /// `safe create` deploys for it without options; with an HD wallet, its
@@ -69,7 +69,7 @@ pub struct SafeArgs {
 }
 
 /// Local fork simulation settings.
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Debug)]
 pub struct SimArgs {
     /// Block to fork from: a number, hash or tag (default: latest). Execution is
     /// simulated in the block after it.
@@ -82,8 +82,18 @@ pub struct SimArgs {
     pub spec: Option<EvmSpec>,
 
     /// Seconds between blocks, used for the simulated block's timestamp
-    #[arg(long, default_value_t = 12)]
+    #[arg(long, default_value_t = DEFAULT_BLOCK_TIME)]
     pub block_time: u64,
+}
+
+impl Default for SimArgs {
+    fn default() -> Self {
+        Self {
+            block: None,
+            spec: None,
+            block_time: DEFAULT_BLOCK_TIME,
+        }
+    }
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -189,6 +199,29 @@ pub struct SendArgs {
     #[arg(long = "call", value_name = "CALL")]
     pub calls: Vec<String>,
 
+    #[command(flatten)]
+    pub opts: SendOpts,
+
+    #[command(flatten)]
+    pub wallet: WalletArgs,
+}
+
+/// Seconds to wait for a receipt after broadcasting (`--timeout`).
+pub const DEFAULT_TIMEOUT: u64 = 120;
+
+/// Seconds between blocks in simulation (`--block-time`).
+pub const DEFAULT_BLOCK_TIME: u64 = 12;
+
+/// How `safe send` sends: simulation, gas and fees, nonce, bundle, raw-out,
+/// timeout, confirmation, payer and owner rotation.
+///
+/// Leaves out what the transaction is sent with and to (`--rpc-url`, the
+/// signer and `--safe`), which [`SendContext`](crate::SendContext) carries:
+/// a CLI that embeds these flags resolves those itself. Flatten it into a
+/// command with `#[command(flatten)]`, or build it in code from
+/// [`Default`], which matches the flag defaults.
+#[derive(Args, Clone, Debug)]
+pub struct SendOpts {
     /// Path to bundle JSON file (reads calls and existing signatures; writes updated bundle when collecting offchain signatures)
     #[arg(long)]
     pub bundle: Option<PathBuf>,
@@ -213,7 +246,7 @@ pub struct SendArgs {
     pub simulate_only: bool,
 
     /// Skip simulation and execute directly (use with caution)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "simulate_only")]
     pub skip_simulation: bool,
 
     /// Explicit safeTxGas. The default, 0, makes a failing inner call revert the
@@ -250,7 +283,7 @@ pub struct SendArgs {
     pub no_submit: bool,
 
     /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = 120)]
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
     pub timeout: u64,
 
     /// Print call traces of the simulated transaction
@@ -284,13 +317,106 @@ pub struct SendArgs {
     pub sweep: SweepArgs,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
-
-    #[command(flatten)]
     pub password: PasswordArgs,
 
     #[command(flatten)]
     pub payer: PayerArgs,
+}
+
+impl Default for SendOpts {
+    fn default() -> Self {
+        Self {
+            bundle: None,
+            merge_bundle: Vec::new(),
+            approve_hash: false,
+            sign_only: false,
+            call_only: false,
+            simulate_only: false,
+            skip_simulation: false,
+            safe_tx_gas: None,
+            nonce: None,
+            gas_limit: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            raw_out: None,
+            no_submit: false,
+            timeout: DEFAULT_TIMEOUT,
+            trace: false,
+            sim: SimArgs::default(),
+            multi_send: None,
+            multi_send_call_only: None,
+            no_confirm: false,
+            rotate: false,
+            hd: HdArgs::default(),
+            sweep: SweepArgs::default(),
+            password: PasswordArgs::default(),
+            payer: PayerArgs::default(),
+        }
+    }
+}
+
+impl SendOpts {
+    /// The flag conflicts clap enforces, checked again for options built in
+    /// code, which never go through clap.
+    pub fn validate(&self) -> Result<(), String> {
+        let conflicts = [
+            (
+                self.approve_hash && self.sign_only,
+                "--approve-hash",
+                "--sign-only",
+            ),
+            (
+                self.approve_hash && self.simulate_only,
+                "--approve-hash",
+                "--simulate-only",
+            ),
+            (
+                self.sign_only && self.simulate_only,
+                "--sign-only",
+                "--simulate-only",
+            ),
+            (
+                self.skip_simulation && self.simulate_only,
+                "--skip-simulation",
+                "--simulate-only",
+            ),
+            (
+                self.raw_out.is_some() && self.simulate_only,
+                "--raw-out",
+                "--simulate-only",
+            ),
+            (
+                self.no_submit && self.simulate_only,
+                "--no-submit",
+                "--simulate-only",
+            ),
+            (
+                self.rotate && self.skip_simulation,
+                "--rotate",
+                "--skip-simulation",
+            ),
+            (
+                self.rotate && self.safe_tx_gas.is_some(),
+                "--rotate",
+                "--safe-tx-gas",
+            ),
+            (
+                self.rotate && self.multi_send.is_some(),
+                "--rotate",
+                "--multi-send",
+            ),
+            (self.rotate && self.nonce.is_some(), "--rotate", "--nonce"),
+            (
+                self.sweep.no_sweep && self.sweep.sweep_reserve.is_some(),
+                "--no-sweep",
+                "--sweep-reserve",
+            ),
+        ];
+        match conflicts.iter().find(|(conflict, ..)| *conflict) {
+            Some((_, a, b)) => Err(format!("{a} cannot be used with {b}")),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Parses an owner swap, `OLD:NEW`.
@@ -381,7 +507,7 @@ pub struct ConfigArgs {
 
     /// Skip simulation, and with it the check of the resulting configuration
     /// (use with caution)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "simulate_only")]
     pub skip_simulation: bool,
 
     /// Safe nonce to sign for; fails if the on-chain nonce differs
@@ -413,7 +539,7 @@ pub struct ConfigArgs {
     pub no_submit: bool,
 
     /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = 120)]
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
     pub timeout: u64,
 
     /// Print call traces of the simulated transaction
@@ -658,7 +784,7 @@ pub struct RotateArgs {
     pub max_priority_fee_per_gas: Option<u128>,
 
     /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = 120)]
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
     pub timeout: u64,
 
     /// Print call traces of the simulated transaction
@@ -818,14 +944,14 @@ pub struct WalletSweepArgs {
     pub sweep_reserve: Option<U256>,
 
     /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = 120)]
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
     pub timeout: u64,
 
     #[command(flatten)]
     pub password: PasswordArgs,
 }
 
-#[derive(Parser, Clone)]
+#[derive(Args, Clone, Default)]
 pub struct WalletArgs {
     /// Raw private key
     #[arg(long, env = "PRIVATE_KEY")]
@@ -861,7 +987,7 @@ pub struct PasswordArgs {
 }
 
 /// The HD wallet one-time owner keys are derived from.
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct HdArgs {
     /// HD wallet: a name under ~/.safe-rs/wallets, or the path of a mnemonic keystore
     #[arg(long, env = "SAFE_HD_WALLET", value_name = "NAME|PATH")]
@@ -881,7 +1007,7 @@ impl HdArgs {
 }
 
 /// What happens to a retired owner key's ETH.
-#[derive(Args, Clone, Default)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct SweepArgs {
     /// Leave the retired owner key's ETH where it is, instead of moving it to
     /// the next owner
@@ -896,12 +1022,57 @@ pub struct SweepArgs {
 }
 
 /// The account that sends the outer transaction and pays for gas.
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Default)]
 pub struct PayerArgs {
     /// Private key that sends the outer transaction and pays for gas, instead
     /// of the owner key (with --hd-wallet on create: instead of the funding key)
     #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY")]
     pub payer_private_key: Option<String>,
+}
+
+/// Shows whether a secret was given, never its value.
+fn redacted<T>(secret: Option<&T>) -> &'static str {
+    if secret.is_some() {
+        "Some(<redacted>)"
+    } else {
+        "None"
+    }
+}
+
+impl fmt::Debug for WalletArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WalletArgs")
+            .field(
+                "private_key",
+                &format_args!("{}", redacted(self.private_key.as_ref())),
+            )
+            .field("keystore", &self.keystore)
+            .field("interactive", &self.interactive)
+            .finish()
+    }
+}
+
+impl fmt::Debug for PasswordArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PasswordArgs")
+            .field("password_file", &self.password_file)
+            .field(
+                "password",
+                &format_args!("{}", redacted(self.password.as_ref())),
+            )
+            .finish()
+    }
+}
+
+impl fmt::Debug for PayerArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PayerArgs")
+            .field(
+                "payer_private_key",
+                &format_args!("{}", redacted(self.payer_private_key.as_ref())),
+            )
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -947,7 +1118,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(args.value, U256::from(1_500_000_000_000_000_000_u128));
-        assert_eq!(args.max_fee_per_gas, Some(2_000_000_000));
+        assert_eq!(args.opts.max_fee_per_gas, Some(2_000_000_000));
         assert!(send(&["--rotate", "--sweep-reserve", "0.01ether"]).is_ok());
     }
 

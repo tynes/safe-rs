@@ -794,6 +794,94 @@ if let Some(idx) = result.first_failure {
 }
 ```
 
+## Reusing the send flags in your own CLI
+
+An app-specific CLI can build its own calls with safe-rs and send them the way `safe send` does. It gets the same options and behavior: simulation, gas and fees, `--nonce`, `--bundle` signature collection, `--sign-only`, `--raw-out`, `--timeout`, confirmation, `--payer-private-key` and `--rotate`. The `safe-rs-cli` crate is also a library:
+
+- Flatten its `SendOpts` into your clap command.
+- Resolve the RPC URL, the signer and the Safe yourself, into a `SendContext`. `SendOpts` leaves out `--rpc-url`, `--safe` and the wallet flags, so your CLI's own flags and environment variables for those keep their meaning.
+- Call `send`. It returns how the send ended.
+
+```toml
+[dependencies]
+# Without default features to skip the libusb build; add `features = ["ledger"]` for --ledger.
+safe-rs-cli = { version = "0.13", default-features = false }
+clap = { version = "4", features = ["derive", "env"] }
+```
+
+```rust
+use clap::Parser;
+use safe_rs_cli::args::SendOpts;
+use safe_rs_cli::safe_rs::{Address, Call, U256};
+use safe_rs_cli::{Output, PrivateKeySigner, SendContext, SendOutcome, Url};
+
+#[derive(Parser)]
+struct Deposit {
+    #[arg(long, env = "MYAPP_RPC_URL")]
+    rpc_url: Url,
+
+    #[arg(long, env = "MYAPP_PRIVATE_KEY")]
+    private_key: PrivateKeySigner,
+
+    #[arg(long)]
+    amount: U256,
+
+    #[command(flatten)]
+    send: SendOpts,
+}
+
+#[tokio::main]
+async fn main() -> color_eyre::Result<()> {
+    let deposit = Deposit::parse();
+    let calls: Vec<Call> = build_deposit_calls(deposit.amount);
+    let ctx = SendContext::new(deposit.rpc_url, MY_APP_SAFE)
+        .with_signer(deposit.private_key)
+        .with_output(Output::Quiet);
+    match safe_rs_cli::send(ctx, calls, deposit.send).await? {
+        SendOutcome::Executed { tx_hash, .. } => println!("Deposited in {tx_hash}"),
+        SendOutcome::Aborted { .. } => println!("Cancelled"),
+        other => println!("{other:?}"),
+    }
+    Ok(())
+}
+```
+
+**What `send` returns.** A `SendOutcome`:
+
+| Outcome | When |
+|---|---|
+| `Executed` | The Safe transaction was mined and succeeded. Carries `tx_hash`, `safe_tx_hash`, `gas_used` and `block` |
+| `Simulated` | `--simulate-only` |
+| `Signed` | The signatures were saved to `--bundle`: `--sign-only`, or below the threshold |
+| `HashApproved` | `--approve-hash` |
+| `NotSubmitted` | `--no-submit`. Carries the raw signed transaction |
+| `Aborted` | The user declined the confirmation prompt |
+
+Failures are errors: a failed simulation, a reverted transaction, a receipt that never came. The enum derives `Serialize` (tagged by `outcome`), so it can go into your own JSON output.
+
+**What `send` prints.** Set this with `SendContext::with_output`:
+- `Output::Human` prints like `safe send`.
+- `Output::Json` prints `safe send --json`'s document on stdout and never prompts.
+- `Output::Quiet` sends progress and the confirmation prompt to stderr, prints no result, and leaves stdout to your CLI.
+
+**Building `SendOpts` in code.** `SendOpts::default()` matches the flag defaults. `send` checks options built in code for the same conflicts clap enforces on the flags, such as `--rotate` with `--nonce`.
+
+**Other notes:**
+- Use `safe_rs_cli::safe_rs` to build the calls, and `safe_rs_cli::PrivateKeySigner` and `safe_rs_cli::Url` for the context. They come from the same versions the CLI uses.
+- Always name the Safe. Without `--safe`, `safe send` falls back to the signer's default Safe, which is wrong for a Safe from another factory, so `SendContext` requires one.
+- With `--rotate`, the owner key comes from `--hd-wallet` or `--ledger`, so the context carries no signer.
+- The `safe` CLI's own `--rpc-url`, `--safe` and wallet flags are in `safe_rs_cli::args` as `RpcArgs`, `SafeArgs` and `WalletArgs`, for a CLI that wants those too. `safe_rs_cli::Commands` with `safe_rs_cli::run(command, json)` embeds the whole `safe` command tree as a subcommand.
+- `SendOpts` takes these flag names, so your command can't define them too:
+  - `--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`, `--call-only`
+  - `--simulate-only`, `--skip-simulation`, `--trace`, `--block`, `--spec`, `--block-time`
+  - `--safe-tx-gas`, `--nonce`, `--gas-limit`, `--max-fee-per-gas`, `--max-priority-fee-per-gas`
+  - `--raw-out`, `--no-submit`, `--timeout`, `--no-confirm`
+  - `--multi-send`, `--multi-send-call-only`
+  - `--rotate`, `--hd-wallet`, `--ledger`, `--no-sweep`, `--sweep-reserve`
+  - `--password`, `--password-file`, `--payer-private-key`
+- `SendOpts` also reads three environment variables: `SAFE_HD_WALLET`, `SAFE_PASSWORD_FILE` and `SAFE_PAYER_PRIVATE_KEY`.
+- To catch a flag-name clash, parse a sample command line in a test. `Command::debug_assert()` alone misses a clash between a global flag and one of these, and clap panics at parse time instead.
+
 ## Bundle Format
 
 The `--bundle` option reads a JSON object. To send a list of calls, `calls` is all it needs:

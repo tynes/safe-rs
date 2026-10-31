@@ -1,18 +1,18 @@
 use std::fmt::Write as _;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, U256};
+use alloy::primitives::Address;
 use color_eyre::eyre::{bail, Result};
 use safe_rs::{
     check_config_post_state, check_new_guards_allow_followup, plan_config, read_safe_state,
     ConfigChanges, ConfigOp, ConfigPlan, ForkSession, ReadSafeStateOptions,
 };
 
-use crate::cli::{ConfigArgs, SafeArgs, SendArgs, SweepArgs};
+use crate::cli::{ConfigArgs, SendOpts, SweepArgs};
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::http_provider;
-use crate::commands::send::{self, ExecHooks};
-use crate::output::Console;
+use crate::commands::send::{self, ExecHooks, Target};
+use crate::output::{Console, Output};
 use crate::wallet::create_signer;
 
 pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
@@ -52,11 +52,20 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
                  --module-guard, or --bundle to sign a change planned earlier"
             );
         }
-        let hooks = ExecHooks {
+        let target = Target {
+            rpc_url: args.rpc.rpc_url.clone(),
+            safe: args.safe.safe,
             signer,
-            post_check: None,
         };
-        return send::execute(send_args(args), Vec::new(), hooks, json).await;
+        send::execute(
+            target,
+            send_opts(args),
+            Vec::new(),
+            ExecHooks::default(),
+            Output::from_json(json),
+        )
+        .await?;
+        return Ok(());
     }
 
     let raw_to_stdout =
@@ -123,12 +132,22 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
         Ok(())
     };
     let hooks = ExecHooks {
-        signer,
         post_check: Some(&check),
     };
-    let mut send_args = send_args(args);
-    send_args.safe.safe = Some(safe);
-    send::execute(send_args, plan.calls(), hooks, json).await
+    let target = Target {
+        rpc_url: args.rpc.rpc_url.clone(),
+        safe: Some(safe),
+        signer,
+    };
+    send::execute(
+        target,
+        send_opts(args),
+        plan.calls(),
+        hooks,
+        Output::from_json(json),
+    )
+    .await?;
+    Ok(())
 }
 
 /// The planned changes and the configuration they lead to, for the console.
@@ -164,19 +183,10 @@ fn describe(plan: &ConfigPlan) -> String {
     s
 }
 
-/// The `send` arguments that run the planned calls: always through
+/// The `send` options that run the planned calls: always through
 /// MultiSendCallOnly, fail-closed (`safeTxGas = 0`) and without rotation.
-fn send_args(args: ConfigArgs) -> SendArgs {
-    SendArgs {
-        to: None,
-        sig: None,
-        args: Vec::new(),
-        safe: SafeArgs {
-            safe: args.safe.safe,
-        },
-        rpc: args.rpc,
-        value: U256::ZERO,
-        calls: Vec::new(),
+fn send_opts(args: ConfigArgs) -> SendOpts {
+    SendOpts {
         bundle: args.bundle,
         merge_bundle: args.merge_bundle,
         approve_hash: args.approve_hash,
@@ -200,7 +210,6 @@ fn send_args(args: ConfigArgs) -> SendArgs {
         rotate: false,
         hd: args.hd,
         sweep: SweepArgs::default(),
-        wallet: args.wallet,
         password: args.password,
         payer: args.payer,
     }

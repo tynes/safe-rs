@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::time::Duration;
 
 use alloy::eips::eip1559::Eip1559Estimation;
@@ -18,45 +19,162 @@ use safe_rs::{
 };
 
 use crate::bundle::{BundleCall, BundleFile};
-use crate::cli::SendArgs;
+use crate::cli::{SendArgs, SendOpts};
 use crate::commands::default_safe::{recorded_safe, safe_or_default};
 use crate::commands::rotation::{self, RotationRun};
 use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
 use crate::output::{
-    calls_summary, confirm_prompt, ApproveHashOutput, BundleSavedOutput, Console, ExecutionOutput,
-    Report, SignedTxOutput, SimulationOutput,
+    calls_summary, confirm_prompt, emit, ApproveHashOutput, BundleSavedOutput, Console,
+    ExecutionOutput, Report, SignedTxOutput, SimulationOutput,
 };
+pub use crate::output::{Output, SendOutcome};
 use crate::sig_parser::{encode_function_call, parse_call_spec};
 use crate::wallet::{create_payer, create_signer, open_wallet};
+use url::Url;
 
 /// How often to poll for the receipt after broadcasting.
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Prints a result as JSON on stdout, or as text through the console.
-fn emit(report: &impl Report, json: bool, console: Console) {
-    if json {
-        report.print(true);
-    } else {
-        console.line(report.human());
+/// The error for a send with neither a signer nor a payer.
+const NO_SIGNER: &str = "No wallet specified. Use --private-key, --keystore or --interactive";
+
+/// Where a send goes and who signs it: what a CLI embedding [`SendOpts`]
+/// resolves itself instead of taking `--rpc-url`, `--safe` and the wallet
+/// flags.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct SendContext {
+    /// RPC endpoint of the chain the Safe is on
+    pub rpc_url: Url,
+    /// The Safe to send through
+    pub safe: Address,
+    /// The owner key that signs the Safe transaction, and pays for gas unless
+    /// `--payer-private-key` is given. Leave it out with `--rotate`, where the
+    /// owner key comes from the HD wallet or Ledger, or to only add on-chain
+    /// approvals collected in `--bundle` while a payer submits.
+    pub signer: Option<PrivateKeySigner>,
+    /// What the send prints
+    pub output: Output,
+}
+
+impl SendContext {
+    /// A send through `safe` over `rpc_url`, with no signer and
+    /// [`Output::Human`].
+    pub fn new(rpc_url: Url, safe: Address) -> Self {
+        Self {
+            rpc_url,
+            safe,
+            signer: None,
+            output: Output::Human,
+        }
+    }
+
+    pub fn with_signer(mut self, signer: PrivateKeySigner) -> Self {
+        self.signer = Some(signer);
+        self
+    }
+
+    pub fn with_output(mut self, output: Output) -> Self {
+        self.output = output;
+        self
     }
 }
 
-pub async fn run(args: SendArgs, json: bool) -> Result<()> {
-    if args.rotate {
-        return Box::pin(run_rotating(args, json)).await;
+impl fmt::Debug for SendContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendContext")
+            .field("rpc_url", &self.rpc_url.as_str())
+            .field("safe", &self.safe)
+            .field("signer", &self.signer.as_ref().map(|s| s.address()))
+            .field("output", &self.output)
+            .finish()
     }
-    if args.sweep.no_sweep || args.sweep.sweep_reserve.is_some() {
+}
+
+/// The resolved RPC, Safe and signer of one send. The Safe is optional for
+/// `safe send`, which falls back to the bundle's, the HD wallet's or the
+/// signer's default Safe.
+pub struct Target {
+    pub rpc_url: Url,
+    pub safe: Option<Address>,
+    pub signer: Option<PrivateKeySigner>,
+}
+
+pub async fn run(args: SendArgs, json: bool) -> Result<()> {
+    let calls = build_cli_calls(&args)?;
+    if args.opts.rotate && args.wallet.is_set() {
+        bail!(
+            "with --rotate the owner key comes from --hd-wallet or --ledger: remove --private-key, \
+             --keystore and --interactive, and unset PRIVATE_KEY"
+        );
+    }
+    // Checked before any key or password prompt.
+    check(&args.opts, args.wallet.is_set())?;
+    let signer = if args.wallet.is_set() {
+        Some(create_signer(&args.wallet, &args.opts.password)?)
+    } else {
+        None
+    };
+    let target = Target {
+        rpc_url: args.rpc.rpc_url,
+        safe: args.safe.safe,
+        signer,
+    };
+    dispatch(target, calls, args.opts, Output::from_json(json)).await?;
+    Ok(())
+}
+
+/// Sends `calls` through the Safe as `safe send` does, with every option in
+/// `opts`: `--rotate`, `--bundle` signature collection, simulation, then
+/// approveHash, saving to the bundle or execution.
+///
+/// With `--bundle`, `calls` may be empty when the bundle already holds them.
+/// Options built in code are checked for the same conflicts clap enforces on
+/// the flags.
+pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<SendOutcome> {
+    if opts.rotate && ctx.signer.is_some() {
+        bail!(
+            "with --rotate the owner key comes from the HD wallet or Ledger (--hd-wallet or \
+             --ledger): send without a signer"
+        );
+    }
+    check(&opts, ctx.signer.is_some())?;
+    let target = Target {
+        rpc_url: ctx.rpc_url,
+        safe: Some(ctx.safe),
+        signer: ctx.signer,
+    };
+    dispatch(target, calls, opts, ctx.output).await
+}
+
+/// The checks every send runs before it touches a key or the chain.
+fn check(opts: &SendOpts, has_signer: bool) -> Result<()> {
+    opts.validate().map_err(|e| eyre!(e))?;
+    if opts.rotate {
+        return Ok(());
+    }
+    if opts.sweep.no_sweep || opts.sweep.sweep_reserve.is_some() {
         bail!("--no-sweep and --sweep-reserve only apply with --rotate");
     }
-    if args.hd.is_set() && !args.wallet.is_set() {
+    if opts.hd.is_set() && !has_signer {
         bail!(
             "--hd-wallet or --ledger needs --rotate: sending without rotating would publish \
              an owner key and leave it in charge of the Safe"
         );
     }
+    Ok(())
+}
 
-    let cli_calls = build_cli_calls(&args)?;
-    execute(args, cli_calls, ExecHooks::default(), json).await
+async fn dispatch(
+    target: Target,
+    calls: Vec<Call>,
+    opts: SendOpts,
+    output: Output,
+) -> Result<SendOutcome> {
+    if opts.rotate {
+        return Box::pin(run_rotating(target, calls, opts, output)).await;
+    }
+    execute(target, opts, calls, ExecHooks::default(), output).await
 }
 
 /// Checks the Safe in the session the simulated transaction was committed to.
@@ -66,22 +184,20 @@ pub type PostCheck<'a> = &'a (dyn Fn(&mut ForkSession) -> safe_rs::Result<()> + 
 /// What another command adds to the send pipeline.
 #[derive(Default)]
 pub struct ExecHooks<'a> {
-    /// The signer, when the caller already created it (so a keystore password
-    /// is not asked for twice)
-    pub signer: Option<PrivateKeySigner>,
     /// Checked against the simulated post-state
     pub post_check: Option<PostCheck<'a>>,
 }
 
 /// Runs `cli_calls` (with `--bundle` and the other flags in `args`) through the
 /// Safe: signature collection, simulation, then approveHash, saving to the
-/// bundle or execution. `args`' own call arguments are ignored.
+/// bundle or execution. Ignores `--rotate`: [`send`] handles it.
 pub async fn execute(
-    args: SendArgs,
+    target: Target,
+    args: SendOpts,
     cli_calls: Vec<Call>,
     hooks: ExecHooks<'_>,
-    json: bool,
-) -> Result<()> {
+    output: Output,
+) -> Result<SendOutcome> {
     // 1. Load/Build Calls & Existing Bundle State
     let bundle_existed = args.bundle.as_ref().is_some_and(|p| p.exists());
     let mut bundle = if let Some(bundle_path) = &args.bundle {
@@ -127,36 +243,31 @@ pub async fn execute(
         return Err(eyre!("No calls specified"));
     }
 
-    // `--no-submit` without a destination writes the signed transaction to stdout.
+    // `--no-submit` without a destination writes the signed transaction to
+    // stdout, unless the caller prints its own output.
     let raw_out = args
         .raw_out
         .clone()
-        .or_else(|| args.no_submit.then(|| "-".to_string()));
-    let console = Console::new(json, raw_out.as_deref() == Some("-"));
+        .or_else(|| (args.no_submit && output != Output::Quiet).then(|| "-".to_string()));
+    let console = Console::for_output(output, raw_out.as_deref() == Some("-"));
+    let json = output == Output::Json;
 
     // 2. Inspect Safe State & Resolve Signer / Payer
-    let signer_opt = match hooks.signer {
-        Some(signer) => Some(signer),
-        None if args.wallet.is_set() => Some(create_signer(&args.wallet, &args.password)?),
-        None => None,
-    };
+    let signer_opt = target.signer;
     let payer_opt = create_payer(&args.payer)?;
     let payer = match (&payer_opt, &signer_opt) {
         (Some(p), _) => p.clone(),
         (None, Some(s)) => s.clone(),
-        (None, None) => {
-            // Force the standard wallet error message
-            create_signer(&args.wallet, &args.password)?
-        }
+        (None, None) => bail!(NO_SIGNER),
     };
     let from = payer.address();
 
-    let provider = http_provider(&args.rpc.rpc_url);
+    let provider = http_provider(&target.rpc_url);
     let chain_id = provider.get_chain_id().await?;
     // A prepared bundle names its Safe, so co-signers need not pass --safe.
     let safe_address = safe_or_default(
         &provider,
-        args.safe.safe.or(bundle.tx.as_ref().map(|tx| tx.safe)),
+        target.safe.or(bundle.tx.as_ref().map(|tx| tx.safe)),
         signer_opt.as_ref(),
         BlockId::latest(),
     )
@@ -374,8 +485,11 @@ pub async fn execute(
             threshold: Some(need),
             ready_to_execute: Some(have >= need),
         };
-        if args.simulate_only || !result.success {
-            emit(&report, json, console);
+        if output == Output::Quiet && !result.success {
+            // The caller only sees the error: show the traces too.
+            console.line(report.human());
+        } else if args.simulate_only || !result.success {
+            emit(&report, output, console);
         } else {
             console.line(report.human());
             console.line("");
@@ -387,7 +501,10 @@ pub async fn execute(
             );
         }
         if args.simulate_only {
-            return Ok(());
+            return Ok(SendOutcome::Simulated {
+                safe_tx_hash: prepared.safe_tx_hash,
+                gas_used: result.gas_used,
+            });
         }
         Some((simulated.payer_nonce, simulated.gas_limit))
     };
@@ -472,9 +589,11 @@ pub async fn execute(
 
         let prompt =
             format!("Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?");
-        if !args.no_confirm && !json && !confirm_prompt(&prompt) {
+        if !args.no_confirm && output.prompts() && !confirm_prompt(&prompt) {
             console.line("Aborted");
-            return Ok(());
+            return Ok(SendOutcome::Aborted {
+                safe_tx_hash: prepared.safe_tx_hash,
+            });
         }
 
         match broadcast_raw(&provider, &outer.raw, outer.tx_hash).await {
@@ -514,13 +633,18 @@ pub async fn execute(
                 threshold: need,
                 bundle_path: bundle_path_str,
             },
-            json,
+            output,
             console,
         );
         if !success {
             bail!("approveHash transaction reverted");
         }
-        return Ok(());
+        return Ok(SendOutcome::HashApproved {
+            tx_hash: outer.tx_hash,
+            safe_tx_hash: prepared.safe_tx_hash,
+            gas_used: receipt.gas_used,
+            block: receipt.block_number(),
+        });
     }
 
     // Branch B: Offchain signature collection (`have < need` or `--sign-only`)
@@ -549,10 +673,16 @@ pub async fn execute(
                 remaining_owners,
                 bundle_path: bundle_path.display().to_string(),
             },
-            json,
+            output,
             console,
         );
-        return Ok(());
+        return Ok(SendOutcome::Signed {
+            safe_tx_hash: prepared.safe_tx_hash,
+            safe_nonce: prepared.params.nonce,
+            signatures: have,
+            threshold: need,
+            bundle: bundle_path.clone(),
+        });
     }
 
     // Branch C: Threshold met (`have >= need`) -> Execute `execTransaction`
@@ -616,10 +746,14 @@ pub async fn execute(
     if args.no_submit {
         if json && raw_out.as_deref() != Some("-") {
             document.print(true);
-        } else {
+        } else if output == Output::Human {
             console.line(document.human());
         }
-        return Ok(());
+        return Ok(SendOutcome::NotSubmitted {
+            tx_hash: outer.tx_hash,
+            safe_tx_hash: prepared.safe_tx_hash,
+            raw: outer.raw.clone(),
+        });
     }
 
     let prompt = if args.skip_simulation {
@@ -629,9 +763,11 @@ pub async fn execute(
     } else {
         "Execute transaction?".to_string()
     };
-    if !args.no_confirm && !json && !confirm_prompt(&prompt) {
+    if !args.no_confirm && output.prompts() && !confirm_prompt(&prompt) {
         console.line("Aborted");
-        return Ok(());
+        return Ok(SendOutcome::Aborted {
+            safe_tx_hash: prepared.safe_tx_hash,
+        });
     }
 
     match broadcast_raw(&provider, &outer.raw, outer.tx_hash).await {
@@ -666,26 +802,29 @@ pub async fn execute(
             safe_tx_hash: Some(prepared.safe_tx_hash),
             outcome: Some(outcome.label()),
         },
-        json,
+        output,
         console,
     );
     if !outcome.is_success() {
         bail!("Safe transaction did not succeed ({})", outcome.label());
     }
 
-    Ok(())
+    Ok(SendOutcome::Executed {
+        tx_hash: outer.tx_hash,
+        safe_tx_hash: prepared.safe_tx_hash,
+        gas_used: receipt.gas_used,
+        block: receipt.block_number(),
+    })
 }
 
 /// `send --rotate`: the user's calls followed by a swap of the owner for the HD
 /// wallet's next unused key, then a sweep of the old key's ETH.
-async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
-    if args.wallet.is_set() {
-        bail!(
-            "with --rotate the owner key comes from --hd-wallet or --ledger: remove --private-key, \
-             --keystore and --interactive, and unset PRIVATE_KEY"
-        );
-    }
-    let cli_calls = build_cli_calls(&args)?;
+async fn run_rotating(
+    target: Target,
+    cli_calls: Vec<Call>,
+    args: SendOpts,
+    output: Output,
+) -> Result<SendOutcome> {
     let mut bundle_safe = None;
     let calls = if let Some(bundle_path) = &args.bundle {
         if bundle_path.exists() {
@@ -718,14 +857,14 @@ async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
     }
     let payer = create_payer(&args.payer)?;
     let ring = open_wallet(&args.hd, &args.password).await?;
-    let safe = if let Some(safe) = args.safe.safe.or(bundle_safe) {
+    let safe = if let Some(safe) = target.safe.or(bundle_safe) {
         safe
     } else {
-        let chain_id = http_provider(&args.rpc.rpc_url).get_chain_id().await?;
+        let chain_id = http_provider(&target.rpc_url).get_chain_id().await?;
         recorded_safe(ring.state(), chain_id, "--safe")?
     };
     rotation::run(RotationRun {
-        rpc_url: &args.rpc.rpc_url,
+        rpc_url: &target.rpc_url,
         safe,
         ring,
         legacy_owner: None,
@@ -748,7 +887,7 @@ async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
         merge_bundle: args.merge_bundle.clone(),
         approve_hash: args.approve_hash,
         sign_only: args.sign_only,
-        json,
+        output,
     })
     .await
 }
@@ -761,7 +900,7 @@ async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
 async fn simulate(
     provider: &HttpProvider,
     chain_id: u64,
-    args: &SendArgs,
+    args: &SendOpts,
     signed: &SignedSafeTx,
     owners: &[Address],
     threshold: usize,
@@ -860,7 +999,7 @@ fn node_estimate_failed(error: color_eyre::eyre::Report, what: &str) -> color_ey
 /// overrides applied.
 async fn chain_addresses(
     provider: &HttpProvider,
-    args: &SendArgs,
+    args: &SendOpts,
     safe: Address,
 ) -> ChainAddresses {
     let mut addresses = detect_addresses(provider, safe).await;
