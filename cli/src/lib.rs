@@ -60,8 +60,10 @@ mod bundle;
 mod cli;
 mod commands;
 mod error;
+#[cfg(feature = "hd-wallet")]
 mod keys;
 mod output;
+#[cfg(feature = "hd-wallet")]
 mod paths;
 mod sig_parser;
 mod wallet;
@@ -85,10 +87,12 @@ pub use url::Url;
 /// `PRIVATE_KEY` environment variables, for a CLI that wants those too.
 pub mod args {
     pub use crate::cli::{
-        parse_block_id, parse_ether_value, parse_fee_value, EvmSpec, HdArgs, PasswordArgs,
-        PayerArgs, RpcArgs, SafeArgs, SendOpts, SimArgs, SweepArgs, WalletArgs, DEFAULT_BLOCK_TIME,
-        DEFAULT_TIMEOUT,
+        parse_block_id, parse_ether_value, parse_fee_value, EvmSpec, PasswordArgs, PayerArgs,
+        RpcArgs, SafeArgs, SendOpts, SimArgs, WalletArgs, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT,
     };
+    /// The HD wallet and sweep flags of `--rotate` (`hd-wallet` feature).
+    #[cfg(feature = "hd-wallet")]
+    pub use crate::cli::{HdArgs, SweepArgs};
 }
 
 /// Runs one `safe` command. `json` is the global `--json` flag.
@@ -100,7 +104,9 @@ pub async fn run(command: Commands, json: bool) -> Result<()> {
         Commands::Approvals(args) => commands::approvals::run(args, json).await,
         Commands::Config(args) => commands::config::run(*args, json).await,
         Commands::Create(args) => commands::create::run(args, json).await,
+        #[cfg(feature = "hd-wallet")]
         Commands::Rotate(args) => commands::rotate::run(*args, json).await,
+        #[cfg(feature = "hd-wallet")]
         Commands::Wallet(command) => commands::wallet::run(command, json).await,
     }
 }

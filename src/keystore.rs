@@ -18,18 +18,27 @@
 //! Other tools see an ordinary keystore for the key at `x-ethers.path`; ethers
 //! and this crate also recover the phrase. No MAC covers the phrase, so on
 //! decryption the key is re-derived from it and must match.
+//!
+//! The `keystore` feature reads keystores. Recovering the phrase and writing
+//! mnemonic keystores need `hd-wallet`; without it `x-ethers` is ignored, as
+//! geth and Foundry ignore it.
 
 use aes::cipher::{KeyIvInit, StreamCipher};
 use alloy::primitives::{hex, keccak256, Address};
 use alloy::signers::local::PrivateKeySigner;
+#[cfg(feature = "hd-wallet")]
 use rand::{CryptoRng, RngCore};
-use serde_json::{json, Value};
+#[cfg(feature = "hd-wallet")]
+use serde_json::json;
+use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+#[cfg(feature = "hd-wallet")]
 use crate::hd::{entropy_to_phrase, phrase_to_entropy, HdWallet, FUNDING_PATH};
 
 type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
+#[cfg(feature = "hd-wallet")]
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
 /// The largest `N * r` accepted when reading: 1 GiB of scrypt memory.
@@ -72,7 +81,8 @@ pub struct DecryptedMnemonic {
 pub struct Decrypted {
     /// The keystore's private key
     pub signer: PrivateKeySigner,
-    /// The phrase, for a mnemonic keystore
+    /// The phrase, for a mnemonic keystore. Always `None` without the
+    /// `hd-wallet` feature, which recovering a phrase needs.
     pub mnemonic: Option<DecryptedMnemonic>,
 }
 
@@ -188,6 +198,7 @@ fn aes128_ctr(key: &[u8], iv: &[u8], data: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "hd-wallet")]
 fn aes256_ctr(key: &[u8], counter: &[u8], data: &mut [u8]) -> Result<()> {
     Aes256Ctr::new_from_slices(key, counter)
         .map_err(|_| malformed("invalid AES-256-CTR key or counter length"))?
@@ -196,6 +207,8 @@ fn aes256_ctr(key: &[u8], counter: &[u8], data: &mut [u8]) -> Result<()> {
 }
 
 /// Decrypts a V3 keystore, with or without the `x-ethers` mnemonic field.
+/// Without the `hd-wallet` feature the field is ignored: the key is still
+/// returned, and `mnemonic` is `None`.
 ///
 /// Fails with [`Error::WrongPassword`] if the MAC does not match, and with
 /// [`Error::Keystore`] if the file is malformed, uses a cipher or KDF other
@@ -240,13 +253,17 @@ pub fn decrypt_keystore(json: &str, password: &[u8]) -> Result<Decrypted> {
         }
     }
 
+    #[cfg(feature = "hd-wallet")]
     let mnemonic = match field(&root, "x-ethers") {
         Some(extension) => Some(decrypt_mnemonic(extension, &key, &signer)?),
         None => None,
     };
+    #[cfg(not(feature = "hd-wallet"))]
+    let mnemonic = None;
     Ok(Decrypted { signer, mnemonic })
 }
 
+#[cfg(feature = "hd-wallet")]
 fn decrypt_mnemonic(
     extension: &Value,
     key: &[u8; 64],
@@ -292,6 +309,7 @@ fn decrypt_mnemonic(
     Ok(DecryptedMnemonic { phrase, path })
 }
 
+#[cfg(feature = "hd-wallet")]
 fn uuid_v4(rng: &mut impl RngCore) -> String {
     let mut b = [0u8; 16];
     rng.fill_bytes(&mut b);
@@ -316,6 +334,7 @@ fn uuid_v4(rng: &mut impl RngCore) -> String {
 /// The password is used as the bytes given. Tools disagree on Unicode
 /// normalization (ethers applies NFKC, Foundry none), so a non-ASCII password
 /// may not open the file elsewhere.
+#[cfg(feature = "hd-wallet")]
 pub fn encrypt_mnemonic_keystore(
     phrase: &str,
     password: &[u8],
@@ -372,7 +391,7 @@ pub fn encrypt_mnemonic_keystore(
     serde_json::to_string_pretty(&keystore).map_err(|e| Error::Encoding(e.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hd-wallet"))]
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
@@ -666,6 +685,39 @@ mod tests {
                 None => assert!(decrypted.mnemonic.is_none(), "{name}"),
             }
             assert_eq!(keystore_address(&json).unwrap(), Some(address), "{name}");
+            assert!(matches!(
+                decrypt_keystore(&json, b"not the password"),
+                Err(Error::WrongPassword)
+            ));
+        }
+    }
+}
+
+/// Without `hd-wallet`: keystores still decrypt, phrase or not, to their key.
+#[cfg(all(test, not(feature = "hd-wallet")))]
+mod plain_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        let path = format!(
+            "{}/tests/fixtures/keystores/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn ethers_keystores_decrypt_to_their_keys_without_the_phrase() {
+        let vectors: Value = serde_json::from_str(&fixture("vectors.json")).unwrap();
+        for vector in vectors.as_array().unwrap() {
+            let name = vector["name"].as_str().unwrap();
+            let json = fixture(&format!("{name}.json"));
+            let password = vector["password"].as_str().unwrap().as_bytes();
+            let address: Address = vector["address"].as_str().unwrap().parse().unwrap();
+
+            let decrypted = decrypt_keystore(&json, password).unwrap();
+            assert_eq!(decrypted.signer.address(), address, "{name}");
+            assert!(decrypted.mnemonic.is_none(), "{name}");
             assert!(matches!(
                 decrypt_keystore(&json, b"not the password"),
                 Err(Error::WrongPassword)

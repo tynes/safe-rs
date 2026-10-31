@@ -8,7 +8,7 @@ use safe_rs::{
     ConfigChanges, ConfigOp, ConfigPlan, ForkSession, ReadSafeStateOptions,
 };
 
-use crate::cli::{ConfigArgs, SendOpts, SweepArgs};
+use crate::cli::{ConfigArgs, SendOpts};
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::http_provider;
 use crate::commands::send::{self, ExecHooks, Target};
@@ -16,6 +16,7 @@ use crate::output::{Console, Output};
 use crate::wallet::create_signer;
 
 pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
+    #[cfg(feature = "hd-wallet")]
     if args.hd.is_set() && !args.wallet.is_set() {
         bail!(
             "safe config does not rotate owner keys: signing with --hd-wallet or --ledger would \
@@ -207,9 +208,12 @@ fn send_opts(args: ConfigArgs) -> SendOpts {
         multi_send: None,
         multi_send_call_only: args.multi_send_call_only,
         no_confirm: args.no_confirm,
+        #[cfg(feature = "hd-wallet")]
         rotate: false,
+        #[cfg(feature = "hd-wallet")]
         hd: args.hd,
-        sweep: SweepArgs::default(),
+        #[cfg(feature = "hd-wallet")]
+        sweep: crate::cli::SweepArgs::default(),
         password: args.password,
         payer: args.payer,
     }

@@ -52,9 +52,11 @@ default = ["simulation"]
 # still execute, with gas estimated over RPC. Simulation results serialize
 # to JSON, traces included.
 simulation = ["dep:alloy-chains", "dep:alloy-hardforks", "dep:foundry-fork-db", "dep:revm", "dep:revm-inspectors", "revm-inspectors/serde", "dep:chrono", "alloy/rpc-types-trace", "tokio/rt"]
+# Decrypting password-encrypted (V3) keystores: `keystore::decrypt_keystore`.
+keystore = ["dep:scrypt", "dep:aes", "dep:ctr", "dep:zeroize"]
 # Encrypted mnemonic keystores, HD key derivation and the rotating Safe client
-# (implies simulation, which every rotation runs).
-hd-wallet = ["simulation", "dep:chrono", "alloy/signer-mnemonic", "dep:scrypt", "dep:aes", "dep:ctr", "dep:rand", "dep:zeroize"]
+# (implies simulation, which every rotation runs, and keystore).
+hd-wallet = ["simulation", "keystore", "dep:chrono", "alloy/signer-mnemonic", "dep:rand"]
 # Owner keys on a Ledger device (implies hd-wallet).
 ledger = ["hd-wallet", "dep:alloy-signer-ledger", "dep:futures-util"]
 

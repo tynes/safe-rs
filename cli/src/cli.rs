@@ -47,9 +47,11 @@ pub enum Commands {
     /// Swap the Safe's owner for the HD wallet's next unused key, with no other
     /// calls. Also moves an existing Safe onto the wallet (--from-*) and retires
     /// a key after a failed transaction
+    #[cfg(feature = "hd-wallet")]
     Rotate(Box<RotateArgs>),
 
     /// Manage HD wallets: the encrypted phrase that one-time owner keys come from
+    #[cfg(feature = "hd-wallet")]
     #[command(subcommand)]
     Wallet(WalletCommand),
 }
@@ -309,12 +311,15 @@ pub struct SendOpts {
 
     /// Use the Safe's owner key once: append a swap of the owner for the next
     /// unused key of --hd-wallet, then move the old key's ETH to the new one
+    #[cfg(feature = "hd-wallet")]
     #[arg(long, conflicts_with_all = ["skip_simulation", "safe_tx_gas", "multi_send", "nonce"])]
     pub rotate: bool,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub sweep: SweepArgs,
 
@@ -348,8 +353,11 @@ impl Default for SendOpts {
             multi_send: None,
             multi_send_call_only: None,
             no_confirm: false,
+            #[cfg(feature = "hd-wallet")]
             rotate: false,
+            #[cfg(feature = "hd-wallet")]
             hd: HdArgs::default(),
+            #[cfg(feature = "hd-wallet")]
             sweep: SweepArgs::default(),
             password: PasswordArgs::default(),
             payer: PayerArgs::default(),
@@ -392,6 +400,9 @@ impl SendOpts {
                 "--no-submit",
                 "--simulate-only",
             ),
+        ];
+        #[cfg(feature = "hd-wallet")]
+        let rotate_conflicts = [
             (
                 self.rotate && self.skip_simulation,
                 "--rotate",
@@ -414,7 +425,13 @@ impl SendOpts {
                 "--sweep-reserve",
             ),
         ];
-        match conflicts.iter().find(|(conflict, ..)| *conflict) {
+        #[cfg(not(feature = "hd-wallet"))]
+        let rotate_conflicts = [];
+        match conflicts
+            .iter()
+            .chain(&rotate_conflicts)
+            .find(|(conflict, ..)| *conflict)
+        {
             Some(&(_, flag, with)) => Err(OptionsError::Conflict { flag, with }),
             None => Ok(()),
         }
@@ -560,6 +577,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub no_confirm: bool,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
 
@@ -709,12 +727,15 @@ pub struct CreateArgs {
     /// Deploy the same Safe an HD wallet created on another chain, given as
     /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
     /// must be rotated right away
+    #[cfg(feature = "hd-wallet")]
     #[arg(long, value_name = "CHAIN_ID:SAFE", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
     pub same_as: Option<String>,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub sweep: SweepArgs,
 
@@ -728,6 +749,7 @@ pub struct CreateArgs {
     pub payer: PayerArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Parser, Clone)]
 pub struct RotateArgs {
     /// Safe contract address (default: the wallet's sole recorded Safe on this
@@ -821,6 +843,7 @@ pub struct RotateArgs {
     pub no_confirm: bool,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Subcommand, Clone)]
 pub enum WalletCommand {
     /// Create an HD wallet from a new 24-word phrase and encrypt it to disk
@@ -845,6 +868,7 @@ pub enum WalletCommand {
     Sweep(WalletSweepArgs),
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletNewArgs {
     /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
@@ -854,6 +878,7 @@ pub struct WalletNewArgs {
     pub password: PasswordArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletImportArgs {
     /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
@@ -872,6 +897,7 @@ pub struct WalletImportArgs {
     pub password: PasswordArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletAddressArgs {
     #[command(flatten)]
@@ -885,6 +911,7 @@ pub struct WalletAddressArgs {
     pub password: PasswordArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletStatusArgs {
     #[command(flatten)]
@@ -895,6 +922,7 @@ pub struct WalletStatusArgs {
     pub safe: Option<Address>,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletSyncArgs {
     #[command(flatten)]
@@ -929,6 +957,7 @@ pub struct WalletSyncArgs {
     pub password: PasswordArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletSweepArgs {
     #[command(flatten)]
@@ -989,6 +1018,7 @@ pub struct PasswordArgs {
 }
 
 /// The HD wallet one-time owner keys are derived from.
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone, Debug, Default)]
 pub struct HdArgs {
     /// HD wallet: a name under ~/.safe-rs/wallets, or the path of a mnemonic keystore
@@ -1001,6 +1031,7 @@ pub struct HdArgs {
     pub ledger: bool,
 }
 
+#[cfg(feature = "hd-wallet")]
 impl HdArgs {
     /// Whether an HD wallet or a Ledger was chosen.
     pub fn is_set(&self) -> bool {
@@ -1009,6 +1040,7 @@ impl HdArgs {
 }
 
 /// What happens to a retired owner key's ETH.
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone, Debug, Default)]
 pub struct SweepArgs {
     /// Leave the retired owner key's ETH where it is, instead of moving it to
@@ -1121,6 +1153,7 @@ mod tests {
         };
         assert_eq!(args.value, U256::from(1_500_000_000_000_000_000_u128));
         assert_eq!(args.opts.max_fee_per_gas, Some(2_000_000_000));
+        #[cfg(feature = "hd-wallet")]
         assert!(send(&["--rotate", "--sweep-reserve", "0.01ether"]).is_ok());
     }
 
@@ -1267,6 +1300,7 @@ mod tests {
         parse(&args)
     }
 
+    #[cfg(feature = "hd-wallet")]
     #[test]
     fn rotate_excludes_the_options_that_would_weaken_it() {
         assert!(send(&["--rotate", "--hd-wallet", "w"]).is_ok());
@@ -1290,6 +1324,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hd-wallet")]
     fn rotate(extra: &[&str]) -> Result<Cli, clap::Error> {
         let mut args = vec![
             "rotate",
@@ -1303,6 +1338,7 @@ mod tests {
         parse(&args)
     }
 
+    #[cfg(feature = "hd-wallet")]
     #[test]
     fn rotate_takes_the_safe_as_an_optional_positional() {
         let base = [
@@ -1325,6 +1361,7 @@ mod tests {
         assert!(parse(&flagged).is_err());
     }
 
+    #[cfg(feature = "hd-wallet")]
     #[test]
     fn rotate_takes_one_legacy_key_source_and_one_sweep_choice() {
         assert!(rotate(&[]).is_ok());
@@ -1336,6 +1373,7 @@ mod tests {
         assert!(rotate(&["--sweep-legacy", "--no-sweep"]).is_err());
     }
 
+    #[cfg(feature = "hd-wallet")]
     #[test]
     fn wallet_and_create_options_parse() {
         assert!(parse(&["wallet", "new", "treasury"]).is_ok());
@@ -1395,5 +1433,20 @@ mod tests {
             "so do the version and contracts"
         );
         assert!(with(&["--hd-wallet", "w", "--safe-version", "1.4.1"]).is_ok());
+    }
+
+    #[cfg(not(feature = "hd-wallet"))]
+    #[test]
+    fn rotation_flags_and_commands_are_absent_without_hd_wallet() {
+        for flag in [
+            &["--rotate"][..],
+            &["--hd-wallet", "w"],
+            &["--ledger"],
+            &["--no-sweep"],
+        ] {
+            assert!(send(flag).is_err(), "{flag:?} must not parse");
+        }
+        assert!(parse(&["wallet", "list"]).is_err());
+        assert!(parse(&["rotate", SAFE, "--rpc-url", "http://localhost:8545"]).is_err());
     }
 }

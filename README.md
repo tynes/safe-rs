@@ -35,11 +35,22 @@ The `safe-rs-cli` crate installs the `safe` binary:
 cargo install safe-rs-cli --locked
 ```
 
-Ledger support is on by default. Leave it out, and with it the libusb build, with:
+Ledger support and one-time owner keys are on by default. Leave out the Ledger, and with it the libusb build, but keep `--rotate`, `safe rotate` and `safe wallet`, with:
+
+```bash
+cargo install safe-rs-cli --locked --no-default-features --features hd-wallet
+```
+
+Or build only the plain commands (`send`, `call`, `info`, `approvals`, `config` and `create` with `--private-key`, `--keystore` or `--interactive`), without the HD wallet code and its BIP-32/39 dependencies:
 
 ```bash
 cargo install safe-rs-cli --locked --no-default-features
 ```
+
+| CLI feature | Default | Adds |
+|-------------|---------|------|
+| `hd-wallet` | yes | `--rotate`, `--hd-wallet`, `safe rotate`, `safe wallet` and `safe create --hd-wallet` |
+| `ledger` | yes | `--ledger` (implies `hd-wallet`) |
 
 Or from a local clone:
 
@@ -57,7 +68,8 @@ safe-rs = "0.13"
 | Feature | Default | Adds |
 |---------|---------|------|
 | `simulation` | yes | Fork simulation with revm: `simulate()` on the builders, `ForkSession`, `simulate_exec*` |
-| `hd-wallet` | no | Encrypted mnemonic keystores, HD keys and `RotatingSafe` (implies `simulation`) |
+| `keystore` | no | Decrypting password-encrypted (V3) keystores: `keystore::decrypt_keystore` |
+| `hd-wallet` | no | Encrypted mnemonic keystores, HD keys and `RotatingSafe` (implies `simulation` and `keystore`) |
 | `ledger` | no | Owner keys on a Ledger (implies `hd-wallet`) |
 
 To build, sign and execute Safe transactions without compiling revm, turn off the default features. The builders still execute, with gas estimated over RPC, so a reverting call fails before anything is broadcast:
@@ -515,7 +527,7 @@ safe send 0xRecipient --value 1000000000000000000 \
 - **What the device must allow:** the Ethereum app 1.6.0 or later (Safe transactions are signed as EIP-712 typed data and shown as a domain hash and a message hash), and blind signing turned on in its settings, because `execTransaction` calldata cannot be decoded on the device.
 - No password is asked for, and `--ledger` takes precedence over `SAFE_HD_WALLET`.
 
-Ledger support is a default feature of the CLI (`cargo install safe-rs-cli --locked --no-default-features` leaves it out). On Linux it uses the system libusb if pkg-config finds it, and builds libusb from source otherwise.
+Ledger support is a default feature of the CLI (`cargo install safe-rs-cli --locked --no-default-features --features hd-wallet` leaves it out). On Linux it uses the system libusb if pkg-config finds it, and builds libusb from source otherwise.
 
 ### When something goes wrong
 
@@ -804,7 +816,8 @@ An app-specific CLI can build its own calls with safe-rs and send them the way `
 
 ```toml
 [dependencies]
-# Without default features to skip the libusb build; add `features = ["ledger"]` for --ledger.
+# Without default features to skip the HD wallet code and the libusb build;
+# add `features = ["hd-wallet"]` for --rotate, or `["ledger"]` for --ledger too.
 safe-rs-cli = { version = "0.13", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
 ```
