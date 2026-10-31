@@ -794,6 +794,49 @@ if let Some(idx) = result.first_failure {
 }
 ```
 
+## Reusing the send flags in your own CLI
+
+An app-specific CLI can build its own calls with safe-rs and send them with the same flags and behavior as `safe send`: `--rpc-url`, `--safe`, the signer, simulation, gas and fee flags, `--bundle` signature collection, `--sign-only`, `--rotate` and the rest. The `safe-rs-cli` crate is also a library. Flatten its `SendOpts` into your clap command and hand it to `send` with your calls:
+
+```toml
+[dependencies]
+# Without default features to skip the libusb build; add `features = ["ledger"]` for --ledger.
+safe-rs-cli = { version = "0.13", default-features = false }
+clap = { version = "4", features = ["derive", "env"] }
+```
+
+```rust
+use clap::Parser;
+use safe_rs_cli::args::SendOpts;
+use safe_rs_cli::safe_rs::{Address, Call, U256};
+
+#[derive(Parser)]
+struct Deposit {
+    #[arg(long)]
+    vault: Address,
+
+    #[arg(long)]
+    amount: U256,
+
+    #[command(flatten)]
+    safe: SendOpts,
+}
+
+#[tokio::main]
+async fn main() -> color_eyre::Result<()> {
+    let deposit = Deposit::parse();
+    let calls: Vec<Call> = build_deposit_calls(deposit.vault, deposit.amount);
+    safe_rs_cli::send(calls, deposit.safe, false).await
+}
+```
+
+- Use `safe_rs_cli::safe_rs` to build the calls, so they come from the same safe-rs version the CLI uses.
+- The other flag groups are in `safe_rs_cli::args`, for commands that only need some of them: `RpcArgs`, `SafeArgs`, `WalletArgs`, `PasswordArgs`, `SimArgs`, `HdArgs`, `PayerArgs` and `SweepArgs`.
+- To embed the whole `safe` command tree as a subcommand, use `safe_rs_cli::Commands` with `safe_rs_cli::run(command, json)`.
+- `SendOpts` takes over the flag names it defines: `--nonce`, `--timeout`, `--trace`, `--block`, `--gas-limit`, `--bundle`, `-i` and the others. If your command reuses one, clap panics when it builds the command. Run `YourCli::command().debug_assert()` in a test to catch this.
+- The environment variables in [Environment Variables](#environment-variables) come along with the flags.
+- `--json` is a global flag of the `safe` CLI itself, so pass the `json` argument yourself.
+
 ## Bundle Format
 
 The `--bundle` option reads a JSON object. To send a list of calls, `calls` is all it needs:

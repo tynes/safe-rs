@@ -175,12 +175,6 @@ pub struct SendArgs {
     #[arg(value_name = "ARGS")]
     pub args: Vec<String>,
 
-    #[command(flatten)]
-    pub safe: SafeArgs,
-
-    #[command(flatten)]
-    pub rpc: RpcArgs,
-
     /// ETH value to send: wei, or a number with a unit ("1ether", "10gwei")
     #[arg(long, default_value = "0", value_parser = parse_ether_value)]
     pub value: U256,
@@ -188,6 +182,23 @@ pub struct SendArgs {
     /// Call specification for multicall mode (format: "0xAddr:sig(types):arg1,arg2")
     #[arg(long = "call", value_name = "CALL")]
     pub calls: Vec<String>,
+
+    #[command(flatten)]
+    pub opts: SendOpts,
+}
+
+/// Every `safe send` flag except the calls: the Safe, RPC, signer, simulation,
+/// gas, bundle and rotation options.
+///
+/// Flatten it into another CLI's command and pass it with the calls that
+/// command builds to [`send`](crate::send).
+#[derive(Args, Clone)]
+pub struct SendOpts {
+    #[command(flatten)]
+    pub safe: SafeArgs,
+
+    #[command(flatten)]
+    pub rpc: RpcArgs,
 
     /// Path to bundle JSON file (reads calls and existing signatures; writes updated bundle when collecting offchain signatures)
     #[arg(long)]
@@ -825,7 +836,7 @@ pub struct WalletSweepArgs {
     pub password: PasswordArgs,
 }
 
-#[derive(Parser, Clone)]
+#[derive(Args, Clone)]
 pub struct WalletArgs {
     /// Raw private key
     #[arg(long, env = "PRIVATE_KEY")]
@@ -947,7 +958,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(args.value, U256::from(1_500_000_000_000_000_000_u128));
-        assert_eq!(args.max_fee_per_gas, Some(2_000_000_000));
+        assert_eq!(args.opts.max_fee_per_gas, Some(2_000_000_000));
         assert!(send(&["--rotate", "--sweep-reserve", "0.01ether"]).is_ok());
     }
 
@@ -959,7 +970,7 @@ mod tests {
         let Commands::Send(send) = parse(&args).unwrap().command else {
             unreachable!()
         };
-        assert_eq!(send.safe.safe, None);
+        assert_eq!(send.opts.safe.safe, None);
         let mut args = vec!["call", TO, "owner()", "--private-key", "0x01"];
         args.extend(rpc);
         let Commands::Call(call) = parse(&args).unwrap().command else {

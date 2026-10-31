@@ -18,7 +18,7 @@ use safe_rs::{
 };
 
 use crate::bundle::{BundleCall, BundleFile};
-use crate::cli::SendArgs;
+use crate::cli::{SendArgs, SendOpts};
 use crate::commands::default_safe::{recorded_safe, safe_or_default};
 use crate::commands::rotation::{self, RotationRun};
 use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
@@ -42,21 +42,29 @@ fn emit(report: &impl Report, json: bool, console: Console) {
 }
 
 pub async fn run(args: SendArgs, json: bool) -> Result<()> {
-    if args.rotate {
-        return Box::pin(run_rotating(args, json)).await;
+    let calls = build_cli_calls(&args)?;
+    send(calls, args.opts, json).await
+}
+
+/// Sends `calls` through the Safe as `safe send` does, with every option in
+/// `opts`: `--rotate`, `--bundle` signature collection, simulation, then
+/// approveHash, saving to the bundle or execution.
+///
+/// With `--bundle`, `calls` may be empty when the bundle already holds them.
+pub async fn send(calls: Vec<Call>, opts: SendOpts, json: bool) -> Result<()> {
+    if opts.rotate {
+        return Box::pin(run_rotating(opts, calls, json)).await;
     }
-    if args.sweep.no_sweep || args.sweep.sweep_reserve.is_some() {
+    if opts.sweep.no_sweep || opts.sweep.sweep_reserve.is_some() {
         bail!("--no-sweep and --sweep-reserve only apply with --rotate");
     }
-    if args.hd.is_set() && !args.wallet.is_set() {
+    if opts.hd.is_set() && !opts.wallet.is_set() {
         bail!(
             "--hd-wallet or --ledger needs --rotate: sending without rotating would publish \
              an owner key and leave it in charge of the Safe"
         );
     }
-
-    let cli_calls = build_cli_calls(&args)?;
-    execute(args, cli_calls, ExecHooks::default(), json).await
+    execute(opts, calls, ExecHooks::default(), json).await
 }
 
 /// Checks the Safe in the session the simulated transaction was committed to.
@@ -75,9 +83,9 @@ pub struct ExecHooks<'a> {
 
 /// Runs `cli_calls` (with `--bundle` and the other flags in `args`) through the
 /// Safe: signature collection, simulation, then approveHash, saving to the
-/// bundle or execution. `args`' own call arguments are ignored.
+/// bundle or execution. Ignores `--rotate`: [`send`] handles it.
 pub async fn execute(
-    args: SendArgs,
+    args: SendOpts,
     cli_calls: Vec<Call>,
     hooks: ExecHooks<'_>,
     json: bool,
@@ -678,14 +686,13 @@ pub async fn execute(
 
 /// `send --rotate`: the user's calls followed by a swap of the owner for the HD
 /// wallet's next unused key, then a sweep of the old key's ETH.
-async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
+async fn run_rotating(args: SendOpts, cli_calls: Vec<Call>, json: bool) -> Result<()> {
     if args.wallet.is_set() {
         bail!(
             "with --rotate the owner key comes from --hd-wallet or --ledger: remove --private-key, \
              --keystore and --interactive, and unset PRIVATE_KEY"
         );
     }
-    let cli_calls = build_cli_calls(&args)?;
     let mut bundle_safe = None;
     let calls = if let Some(bundle_path) = &args.bundle {
         if bundle_path.exists() {
@@ -761,7 +768,7 @@ async fn run_rotating(args: SendArgs, json: bool) -> Result<()> {
 async fn simulate(
     provider: &HttpProvider,
     chain_id: u64,
-    args: &SendArgs,
+    args: &SendOpts,
     signed: &SignedSafeTx,
     owners: &[Address],
     threshold: usize,
@@ -860,7 +867,7 @@ fn node_estimate_failed(error: color_eyre::eyre::Report, what: &str) -> color_ey
 /// overrides applied.
 async fn chain_addresses(
     provider: &HttpProvider,
-    args: &SendArgs,
+    args: &SendOpts,
     safe: Address,
 ) -> ChainAddresses {
     let mut addresses = detect_addresses(provider, safe).await;

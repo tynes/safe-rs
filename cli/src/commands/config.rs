@@ -1,14 +1,14 @@
 use std::fmt::Write as _;
 
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, U256};
+use alloy::primitives::Address;
 use color_eyre::eyre::{bail, Result};
 use safe_rs::{
     check_config_post_state, check_new_guards_allow_followup, plan_config, read_safe_state,
     ConfigChanges, ConfigOp, ConfigPlan, ForkSession, ReadSafeStateOptions,
 };
 
-use crate::cli::{ConfigArgs, SafeArgs, SendArgs, SweepArgs};
+use crate::cli::{ConfigArgs, SafeArgs, SendOpts, SweepArgs};
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::http_provider;
 use crate::commands::send::{self, ExecHooks};
@@ -56,7 +56,7 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
             signer,
             post_check: None,
         };
-        return send::execute(send_args(args), Vec::new(), hooks, json).await;
+        return send::execute(send_opts(args), Vec::new(), hooks, json).await;
     }
 
     let raw_to_stdout =
@@ -126,9 +126,9 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
         signer,
         post_check: Some(&check),
     };
-    let mut send_args = send_args(args);
-    send_args.safe.safe = Some(safe);
-    send::execute(send_args, plan.calls(), hooks, json).await
+    let mut opts = send_opts(args);
+    opts.safe.safe = Some(safe);
+    send::execute(opts, plan.calls(), hooks, json).await
 }
 
 /// The planned changes and the configuration they lead to, for the console.
@@ -164,19 +164,14 @@ fn describe(plan: &ConfigPlan) -> String {
     s
 }
 
-/// The `send` arguments that run the planned calls: always through
+/// The `send` options that run the planned calls: always through
 /// MultiSendCallOnly, fail-closed (`safeTxGas = 0`) and without rotation.
-fn send_args(args: ConfigArgs) -> SendArgs {
-    SendArgs {
-        to: None,
-        sig: None,
-        args: Vec::new(),
+fn send_opts(args: ConfigArgs) -> SendOpts {
+    SendOpts {
         safe: SafeArgs {
             safe: args.safe.safe,
         },
         rpc: args.rpc,
-        value: U256::ZERO,
-        calls: Vec::new(),
         bundle: args.bundle,
         merge_bundle: args.merge_bundle,
         approve_hash: args.approve_hash,
