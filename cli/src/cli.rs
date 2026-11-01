@@ -224,17 +224,25 @@ pub struct SendArgs {
     #[arg(long = "call", value_name = "CALL")]
     pub calls: Vec<String>,
 
-    /// Send each call from the signer's own account, one transaction per
-    /// call, instead of through a Safe. Refuses --safe (and SAFE_ADDRESS) and
-    /// the options only a Safe has, such as --bundle, --nonce and --rotate
-    #[arg(long)]
-    pub send_eoa: bool,
+    #[command(flatten)]
+    pub eoa: EoaArgs,
 
     #[command(flatten)]
     pub opts: SendOpts,
 
     #[command(flatten)]
     pub signer: SignerArgs,
+}
+
+/// `--send-eoa`: whether calls go from the signer's own account or through a
+/// Safe. A host that sends calls flattens it to offer the same choice.
+#[derive(Args, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EoaArgs {
+    /// Send each call from the signer's own account, one transaction per
+    /// call, instead of through a Safe. Refuses --safe (and SAFE_ADDRESS) and
+    /// the options only a Safe has, such as --bundle, --nonce and --rotate
+    #[arg(long)]
+    pub send_eoa: bool,
 }
 
 /// Seconds to wait for a receipt after broadcasting (`--timeout`).
@@ -967,8 +975,8 @@ pub(crate) fn check_setup(owners: &[Address], threshold: u64) -> Result<(), Stri
     Ok(())
 }
 
-/// The single key that signs: `--private-key` (`PRIVATE_KEY`), `--keystore`
-/// or `--interactive`.
+/// The single key that signs: `--private-key` (`PRIVATE_KEY`), `--keystore`,
+/// `--hd-key`, `--ledger-key` or `--interactive`.
 #[derive(Args, Clone, Default)]
 pub struct SignerArgs {
     /// Raw private key
@@ -983,13 +991,18 @@ pub struct SignerArgs {
     #[arg(short, long)]
     pub interactive: bool,
 
-    /// A key of an HD wallet: <NAME|PATH>[:<INDEX>], where the wallet is a
-    /// name under ~/.safe-rs/wallets or the path of a mnemonic keystore, and
-    /// INDEX the key (default 0, the funding key). Signing with it is not
-    /// recorded in the wallet's rotation state
+    /// Sign with the key at m/44'/60'/0'/0/INDEX (default 0) of an HD wallet:
+    /// <NAME|PATH>[:<INDEX>], a wallet name under ~/.safe-rs/wallets or the
+    /// path of a mnemonic keystore
     #[cfg(feature = "hd-wallet")]
     #[arg(long, value_name = "WALLET[:INDEX]", value_parser = parse_hd_key)]
     pub hd_key: Option<HdKey>,
+
+    /// Sign with the key at m/44'/60'/0'/0/INDEX (default 0) of a connected
+    /// Ledger, with the Ethereum app open
+    #[cfg(feature = "ledger")]
+    #[arg(long, value_name = "INDEX", num_args = 0..=1, default_missing_value = "0")]
+    pub ledger_key: Option<u32>,
 }
 
 /// `--hd-key <NAME|PATH>[:<INDEX>]`: one key of an HD wallet.
@@ -998,7 +1011,7 @@ pub struct SignerArgs {
 pub struct HdKey {
     /// A wallet name under the data directory, or a keystore path
     pub wallet: String,
-    /// The key's index (0 is the funding key)
+    /// The key's index: the last step of `m/44'/60'/0'/0/INDEX`
     pub index: u32,
 }
 
@@ -1038,6 +1051,10 @@ impl SignerArgs {
     pub fn is_set(&self) -> bool {
         #[cfg(feature = "hd-wallet")]
         if self.hd_key.is_some() {
+            return true;
+        }
+        #[cfg(feature = "ledger")]
+        if self.ledger_key.is_some() {
             return true;
         }
         self.interactive || self.keystore.is_some() || self.private_key.is_some()
@@ -1125,6 +1142,8 @@ impl fmt::Debug for SignerArgs {
             .field("interactive", &self.interactive);
         #[cfg(feature = "hd-wallet")]
         let debug = debug.field("hd_key", &self.hd_key);
+        #[cfg(feature = "ledger")]
+        let debug = debug.field("ledger_key", &self.ledger_key);
         debug.finish()
     }
 }
@@ -1496,7 +1515,7 @@ mod tests {
     #[test]
     fn send_eoa_is_a_send_flag() {
         let send_eoa = |cli: Cli| match cli.command {
-            Commands::Send(args) => args.send_eoa,
+            Commands::Send(args) => args.eoa.send_eoa,
             _ => panic!("expected send"),
         };
         assert!(send_eoa(

@@ -13,7 +13,6 @@ use std::time::Duration;
 use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 use clap::{Args, Parser};
 use color_eyre::eyre::eyre;
 use safe_rs::{
@@ -28,6 +27,7 @@ pub use implementation::{
 use serde::Serialize;
 use url::Url;
 
+use crate::any_signer::AnySigner;
 use crate::cli::{FeeArgs, SafeSetupArgs};
 #[cfg(feature = "hd-wallet")]
 use crate::cli::{HdArgs, SweepArgs};
@@ -213,7 +213,7 @@ pub struct CreateContext {
     /// First owner and deployer (unless `--payer-private-key` pays). `None`
     /// with `--hd-wallet` / `--ledger`, where the owner is the wallet's next
     /// unused key.
-    pub signer: Option<PrivateKeySigner>,
+    pub signer: Option<AnySigner>,
     /// Where progress and warnings go (default: nowhere)
     pub logger: Arc<dyn Logger>,
     /// What asks for confirmation and passwords (default: the terminal)
@@ -238,8 +238,8 @@ impl CreateContext {
         }
     }
 
-    pub fn with_signer(mut self, signer: PrivateKeySigner) -> Self {
-        self.signer = Some(signer);
+    pub fn with_signer(mut self, signer: impl Into<AnySigner>) -> Self {
+        self.signer = Some(signer.into());
         self
     }
 
@@ -423,7 +423,7 @@ async fn create_with(
     let provider = http_provider(&ctx.rpc_url);
     let implementation = opts.implementation.get();
     let plan = implementation.plan(&provider, &setup, &signer).await?;
-    let payer = create_payer(&opts.payer)?.unwrap_or(signer);
+    let payer = create_payer(&opts.payer)?.map_or(signer, AnySigner::from);
     let safe = plan.safe;
     let mut details = String::from("Computing Safe address...\n");
     if !opts.implementation.is_standard() {
@@ -637,7 +637,7 @@ pub(crate) async fn run_with(
     let signer = if args.opts.uses_hd() {
         None
     } else {
-        Some(create_signer(&args.signer, &args.opts.password, console)?)
+        Some(create_signer(&args.signer, &args.opts.password, console).await?)
     };
     let mut ctx = CreateContext::new(args.rpc.rpc_url);
     ctx.signer = signer;

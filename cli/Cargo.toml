@@ -19,6 +19,8 @@ clap = { version = "4", features = ["derive", "env", "string"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 alloy = "2.5"
 alloy-dyn-abi = "1.6"
+alloy-signer-ledger = { version = "2.5", default-features = false, features = ["eip712"], optional = true }
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 eyre = "0.6"
@@ -38,9 +40,10 @@ default = ["ledger"]
 # One-time owner keys: `--rotate`, `--hd-wallet`, `safe rotate`, `safe wallet`
 # and `safe create --hd-wallet`.
 hd-wallet = ["safe-rs/hd-wallet", "dep:rand"]
-# Owner keys on a Ledger (`--ledger`; implies hd-wallet). Builds libusb from
-# source on Linux when the system has none.
-ledger = ["hd-wallet", "safe-rs/ledger"]
+# Keys on a Ledger: `--ledger-key` signs with one, `--ledger` rotates owner
+# keys on one (implies hd-wallet). Builds libusb from source on Linux when the
+# system has none.
+ledger = ["hd-wallet", "safe-rs/ledger", "dep:alloy-signer-ledger"]
 # `log::TracingLogger`, for a host that already has a `tracing` subscriber.
 tracing = ["dep:tracing"]
 

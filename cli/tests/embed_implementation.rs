@@ -25,7 +25,6 @@ use safe_rs_cli::create::{
 use safe_rs_cli::prompt::NoPrompt;
 #[cfg(feature = "hd-wallet")]
 use safe_rs_cli::OptionsError;
-use safe_rs_cli::PrivateKeySigner;
 
 /// A factory of the host's own: always one owner, and its own salt.
 #[derive(Clone, Default)]
@@ -45,7 +44,7 @@ impl SafeImplementation for HostFactory {
         &'a self,
         provider: &'a HttpProvider,
         setup: &'a ResolvedSetup,
-        owner: &'a PrivateKeySigner,
+        owner: &'a safe_rs_cli::AnySigner,
     ) -> BoxFuture<'a, Result<SafeDeployment, CreateError>> {
         Box::pin(async move {
             self.seen.lock().unwrap().push(owner.address());

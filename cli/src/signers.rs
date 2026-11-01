@@ -5,14 +5,34 @@ use color_eyre::eyre::{eyre, Result, WrapErr};
 use safe_rs::keystore::decrypt_keystore;
 use zeroize::Zeroizing;
 
+use crate::any_signer::AnySigner;
 use crate::cli::{PasswordArgs, PayerArgs, SignerArgs};
 use crate::console::Console;
 #[cfg(feature = "hd-wallet")]
 pub use hd::*;
 
 /// The signer the options name, asking `console`'s prompt for an
-/// `--interactive` key or a keystore password.
-pub fn create_signer(
+/// `--interactive` key or a keystore password, or connecting to the Ledger.
+pub async fn create_signer(
+    args: &SignerArgs,
+    password: &PasswordArgs,
+    console: &Console,
+) -> Result<AnySigner> {
+    #[cfg(feature = "ledger")]
+    if let Some(index) = args.ledger_key {
+        if args.interactive || args.keystore.is_some() || args.hd_key.is_some() {
+            return Err(eyre!(
+                "--ledger-key cannot be combined with --interactive, --keystore or --hd-key"
+            ));
+        }
+        let keys = safe_rs::LedgerKeys::connect().await?;
+        return Ok(keys.signer(index).await?.into());
+    }
+    local_signer(args, password, console).map(AnySigner::from)
+}
+
+/// A local key the options name (anything but `--ledger-key`).
+fn local_signer(
     args: &SignerArgs,
     password: &PasswordArgs,
     console: &Console,
@@ -30,7 +50,8 @@ pub fn create_signer(
         parse_private_key(private_key)
     } else {
         Err(eyre!(
-            "No wallet specified. Use --private-key, --keystore, --hd-key or --interactive"
+            "No wallet specified. Use --private-key, --keystore, --hd-key, --ledger-key or \
+             --interactive"
         ))
     }
 }
@@ -38,14 +59,15 @@ pub fn create_signer(
 impl SignerArgs {
     /// The signer these flags name, as the `safe` commands resolve it:
     /// `--interactive` asks `prompt` for the key, `--keystore` reads the
-    /// password from `password` or asks `prompt`.
-    pub fn resolve(
+    /// password from `password` or asks `prompt`, `--ledger-key` connects
+    /// to the Ledger.
+    pub async fn resolve(
         &self,
         password: &PasswordArgs,
         prompt: std::sync::Arc<dyn crate::prompt::Prompt>,
-    ) -> Result<PrivateKeySigner> {
+    ) -> Result<AnySigner> {
         let console = Console::new(std::sync::Arc::new(crate::log::NoopLogger), prompt);
-        create_signer(self, password, &console)
+        create_signer(self, password, &console).await
     }
 }
 
@@ -271,8 +293,9 @@ mod hd {
         }
     }
 
-    /// Key `key.index` of the HD wallet `key.wallet` (under `home`, default the
-    /// data directory), decrypting the wallet with `password` or the prompt.
+    /// The key at `m/44'/60'/0'/0/{key.index}` of the HD wallet `key.wallet`
+    /// (under `home`, default the data directory), decrypting the wallet with
+    /// `password` or the prompt.
     pub fn hd_key_signer(
         key: &crate::cli::HdKey,
         password: &PasswordArgs,
@@ -281,10 +304,7 @@ mod hd {
     ) -> Result<PrivateKeySigner> {
         let path = paths::wallet_file(&paths::home_or(home)?, &key.wallet);
         let wallet = load_phrase(&path, password, console)?;
-        if key.index == 0 {
-            return Ok(wallet.funding().clone());
-        }
-        Ok(wallet.owner(key.index)?)
+        Ok(wallet.key_at(key.index)?)
     }
 
     /// The wallet's funding address, which identifies it: read from the keystore

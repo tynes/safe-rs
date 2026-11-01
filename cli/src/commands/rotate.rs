@@ -30,7 +30,7 @@ pub async fn run(args: RotateArgs, console: &Console) -> Result<()> {
         let provider = http_provider(&args.rpc.rpc_url);
         if let Some(signer) = &legacy_owner {
             let header = ParentHeader::fetch(&provider, BlockId::latest()).await?;
-            read_default_safe(&provider, signer.clone(), header.block_id())
+            read_default_safe(&provider, signer.address(), header.block_id())
                 .await?
                 .address
         } else {

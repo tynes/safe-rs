@@ -539,12 +539,9 @@ pub async fn wallet_address(
     })
 }
 
-/// Key `index` of the HD wallet `wallet` (a name under the data directory, or
-/// a keystore path) as a signer: 0 is the funding key, 1 and up the owner
-/// keys. Asks `ctx`'s prompt for the password unless `password` gives it.
-///
-/// Signing with the key is not recorded in the wallet's rotation state, so a
-/// key that owns a Safe under `--rotate` stays marked unexposed.
+/// The key at `m/44'/60'/0'/0/{index}` of the HD wallet `wallet` (a name
+/// under the data directory, or a keystore path) as a signer. Asks `ctx`'s
+/// prompt for the password unless `password` gives it.
 pub fn signer(
     ctx: &WalletContext,
     wallet: &str,

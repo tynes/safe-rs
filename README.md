@@ -468,7 +468,7 @@ Commands that sign with a single key, and `safe info` and `safe call` when they 
 | `--private-key <key>` | Private key (hex) |
 | `--keystore <path>` | Keystore file (Web3 Secret Storage v3, as written by `cast wallet import`) |
 | `-i, --interactive` | Prompt for private key securely |
-| `--hd-key <wallet>[:<index>]` | Key `index` of an HD wallet (default 0, the funding key); the wallet is a name under `~/.safe-rs/wallets` or a keystore path. Not recorded in the wallet's rotation state |
+| `--hd-key <wallet>[:<index>]` | The key at `m/44'/60'/0'/0/<index>` (default 0) of an HD wallet: a name under `~/.safe-rs/wallets` or a keystore path |
 | `PRIVATE_KEY` env var | Environment variable |
 
 A keystore or HD wallet password is read from `--password-file <path>`, then `--password <text>` (visible in the process list; avoid it), then a prompt.
