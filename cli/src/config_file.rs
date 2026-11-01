@@ -159,7 +159,6 @@ pub fn settle_signer(signer: &mut SignerArgs, matches: &ArgMatches) {
     if signer.keystore.is_some() && configured("keystore") && other_given("keystore") {
         signer.keystore = None;
     }
-    #[cfg(feature = "hd-wallet")]
     if signer.hd_key.is_some() && configured("hd_key") && other_given("hd_key") {
         signer.hd_key = None;
     }

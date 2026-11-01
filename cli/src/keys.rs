@@ -2,7 +2,6 @@
 
 use alloy::primitives::Address;
 use safe_rs::rotation::KeySource;
-#[cfg(feature = "ledger")]
 use safe_rs::LedgerKeys;
 use safe_rs::{HdWallet, OuterTxParams, PreparedSafeTx, SignedOuterTx, SignedSafeTx};
 
@@ -11,7 +10,6 @@ pub enum CliKeys {
     /// A phrase decrypted from its keystore
     Phrase(Box<HdWallet>),
     /// A connected Ledger
-    #[cfg(feature = "ledger")]
     Ledger(LedgerKeys),
 }
 
@@ -26,7 +24,6 @@ impl KeySource for CliKeys {
     async fn address(&self, index: u32) -> safe_rs::Result<Address> {
         match self {
             Self::Phrase(keys) => keys.address(index).await,
-            #[cfg(feature = "ledger")]
             Self::Ledger(keys) => keys.address(index).await,
         }
     }
@@ -34,7 +31,6 @@ impl KeySource for CliKeys {
     fn scan_limit(&self) -> u32 {
         match self {
             Self::Phrase(keys) => keys.scan_limit(),
-            #[cfg(feature = "ledger")]
             Self::Ledger(keys) => keys.scan_limit(),
         }
     }
@@ -42,7 +38,6 @@ impl KeySource for CliKeys {
     async fn sign_safe_tx(&self, index: u32, tx: &PreparedSafeTx) -> safe_rs::Result<SignedSafeTx> {
         match self {
             Self::Phrase(keys) => keys.sign_safe_tx(index, tx).await,
-            #[cfg(feature = "ledger")]
             Self::Ledger(keys) => keys.sign_safe_tx(index, tx).await,
         }
     }
@@ -54,7 +49,6 @@ impl KeySource for CliKeys {
     ) -> safe_rs::Result<SignedOuterTx> {
         match self {
             Self::Phrase(keys) => keys.sign_outer_tx(index, params).await,
-            #[cfg(feature = "ledger")]
             Self::Ledger(keys) => keys.sign_outer_tx(index, params).await,
         }
     }

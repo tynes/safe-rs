@@ -5,7 +5,6 @@
 //! command without clashing with that CLI's own flags.
 
 use std::fmt;
-#[cfg(feature = "hd-wallet")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +28,6 @@ use url::Url;
 
 use crate::any_signer::AnySigner;
 use crate::cli::{FeeArgs, SafeSetupArgs};
-#[cfg(feature = "hd-wallet")]
 use crate::cli::{HdArgs, SweepArgs};
 use crate::cli::{PasswordArgs, PayerArgs, RpcArgs, SignerArgs};
 use crate::commands::{http_provider, outer_fees};
@@ -43,11 +41,9 @@ use crate::prompt::{Prompt, TerminalPrompt};
 use crate::signers::{create_payer, create_signer};
 use crate::RunConfig;
 
-#[cfg(feature = "hd-wallet")]
 mod hd;
 mod implementation;
 
-#[cfg(feature = "hd-wallet")]
 pub use hd::{parse_same_as, SameAs};
 
 /// How often to poll for the deployment receipt.
@@ -76,7 +72,6 @@ pub struct CreateOpts {
     /// Deploy the same Safe an HD wallet created on another chain, given as
     /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
     /// must be rotated right away
-    #[cfg(feature = "hd-wallet")]
     #[arg(
         long,
         value_name = "CHAIN_ID:SAFE",
@@ -87,15 +82,12 @@ pub struct CreateOpts {
 
     /// Create a Safe whose owner key rotates: its first owner is the next
     /// unused key of --hd-wallet or --ledger, used once and then replaced
-    #[cfg(feature = "hd-wallet")]
     #[arg(long)]
     pub rotate: bool,
 
-    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
 
-    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub sweep: SweepArgs,
 
@@ -128,9 +120,6 @@ impl CreateOpts {
     /// signer, `--hd-wallet` needs `--rotate` (without a signer), and
     /// `--same-as`, `--no-sweep` and `--sweep-reserve` need `--rotate`.
     pub fn validate(&self, has_signer: bool) -> Result<(), OptionsError> {
-        #[cfg(not(feature = "hd-wallet"))]
-        let _ = has_signer;
-        #[cfg(feature = "hd-wallet")]
         {
             let setup = &self.setup;
             let defaults = SafeSetupArgs::default();
@@ -195,10 +184,7 @@ impl CreateOpts {
 
     /// Whether the owner comes from an HD wallet or Ledger (`--rotate`).
     pub fn uses_hd(&self) -> bool {
-        #[cfg(feature = "hd-wallet")]
-        return self.rotate;
-        #[cfg(not(feature = "hd-wallet"))]
-        return false;
+        self.rotate
     }
 }
 
@@ -232,7 +218,6 @@ pub struct CreateContext {
     pub prompt: Arc<dyn Prompt>,
     /// Where HD wallets and their state live (default: `$SAFE_RS_HOME` or
     /// `~/.safe-rs`)
-    #[cfg(feature = "hd-wallet")]
     pub home: Option<PathBuf>,
 }
 
@@ -245,7 +230,6 @@ impl CreateContext {
             signer: None,
             logger: Arc::new(NoopLogger),
             prompt: Arc::new(TerminalPrompt::new()),
-            #[cfg(feature = "hd-wallet")]
             home: None,
         }
     }
@@ -268,7 +252,6 @@ impl CreateContext {
     }
 
     /// Looks for HD wallets and their state under `home`.
-    #[cfg(feature = "hd-wallet")]
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.home = Some(home);
         self
@@ -352,7 +335,6 @@ impl Report for CreateOutcome {
     fn human(&self) -> String {
         match document(self) {
             Some(Document::Plain(doc)) => doc.human(),
-            #[cfg(feature = "hd-wallet")]
             Some(Document::Hd(doc)) => doc.human(),
             None => format!("Aborted: Safe {} was not deployed", self.safe()),
         }
@@ -362,12 +344,10 @@ impl Report for CreateOutcome {
 /// What `safe create` prints for an outcome, as it always has.
 enum Document {
     Plain(CreateOutput),
-    #[cfg(feature = "hd-wallet")]
     Hd(hd::HdCreateOutput),
 }
 
 fn document(outcome: &CreateOutcome) -> Option<Document> {
-    #[cfg(feature = "hd-wallet")]
     if let Some(doc) = hd::HdCreateOutput::from_outcome(outcome) {
         return Some(Document::Hd(doc));
     }
@@ -421,7 +401,6 @@ async fn create_with(
     console: &Console,
 ) -> Result<CreateOutcome, CreateError> {
     opts.validate(ctx.signer.is_some())?;
-    #[cfg(feature = "hd-wallet")]
     if opts.hd.is_set() {
         return Box::pin(hd::create(ctx, opts, console)).await;
     }
@@ -530,7 +509,6 @@ pub(crate) async fn predict(
 
 /// The unsigned `createProxyWithNonce` transaction, sent by `from`, with the
 /// `--gas-limit` and fee overrides applied.
-#[cfg(feature = "hd-wallet")]
 pub(crate) async fn deployment(
     provider: &HttpProvider,
     chain_id: u64,
@@ -645,7 +623,6 @@ pub(crate) async fn run_with(
     // `--json` never prompts: it is the result document's only output.
     args.opts.no_confirm |= json;
     // With --rotate, --ledger names where the rotating owner keys come from.
-    #[cfg(feature = "hd-wallet")]
     if args.opts.rotate {
         crate::cli::LedgerArg::take_for_rotation(&mut args.signer.ledger, &mut args.opts.hd)?;
     }
@@ -663,7 +640,6 @@ pub(crate) async fn run_with(
     let outcome = create_with(ctx, args.opts, console).await?;
     match document(&outcome) {
         Some(Document::Plain(doc)) => console.emit(&doc),
-        #[cfg(feature = "hd-wallet")]
         Some(Document::Hd(doc)) => console.emit(&doc),
         None => {}
     }

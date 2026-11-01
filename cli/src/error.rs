@@ -7,7 +7,6 @@
 
 use std::error::Error as StdError;
 use std::fmt;
-#[cfg(feature = "hd-wallet")]
 use std::path::PathBuf;
 
 use alloy::primitives::{Address, B256};
@@ -326,7 +325,6 @@ impl CreateError {
 }
 
 /// Why a [`wallet`](crate::wallet) function failed.
-#[cfg(feature = "hd-wallet")]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum WalletError {
@@ -359,7 +357,6 @@ pub enum WalletError {
     Other(#[from] eyre::Report),
 }
 
-#[cfg(feature = "hd-wallet")]
 impl From<safe_rs::Error> for WalletError {
     fn from(error: safe_rs::Error) -> Self {
         match error {
@@ -369,7 +366,6 @@ impl From<safe_rs::Error> for WalletError {
     }
 }
 
-#[cfg(feature = "hd-wallet")]
 impl From<std::io::Error> for WalletError {
     fn from(error: std::io::Error) -> Self {
         Self::Other(error.into())

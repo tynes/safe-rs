@@ -79,20 +79,14 @@ mod commands;
 pub mod config_file;
 mod console;
 mod error;
-#[cfg(feature = "hd-wallet")]
 mod keys;
 pub mod log;
 mod output;
-#[cfg_attr(
-    not(feature = "hd-wallet"),
-    allow(dead_code, reason = "the wallet paths are only used with hd-wallet")
-)]
 mod paths;
 pub mod policy;
 pub mod prompt;
 mod sig_parser;
 mod signers;
-#[cfg(feature = "hd-wallet")]
 pub mod wallet;
 
 use std::sync::Arc;
@@ -141,7 +135,6 @@ pub mod args {
         SendOpts, SignerArgs, SimArgs, SimulateArgs, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT,
     };
     /// The HD wallet and sweep flags of `--rotate` (`hd-wallet` feature).
-    #[cfg(feature = "hd-wallet")]
     pub use crate::cli::{parse_hd_key, HdArgs, HdKey, SweepArgs};
 }
 
@@ -152,7 +145,6 @@ pub mod create {
         create, run, BoxFuture, CreateArgs, CreateContext, CreateOpts, CreateOutcome, HttpProvider,
         Implementation, ResolvedSetup, SafeDeployment, SafeImplementation, StandardSafe,
     };
-    #[cfg(feature = "hd-wallet")]
     pub use crate::commands::create::{parse_same_as, SameAs};
     pub use crate::error::CreateError;
     pub use crate::output::{OwnerKey, SweptEth};
@@ -216,12 +208,10 @@ pub async fn run(command: Commands, config: RunConfig) -> Result<()> {
             commands::config::run(*args, &console).await
         }
         Commands::Create(args) => commands::create::run_with(*args, &console, json).await,
-        #[cfg(feature = "hd-wallet")]
         Commands::Rotate(mut args) => {
             args.no_confirm |= json;
             commands::rotate::run(*args, &console).await
         }
-        #[cfg(feature = "hd-wallet")]
         Commands::Wallet(args) => run_wallet(args, &console).await,
     };
     reports.print(json);
@@ -230,7 +220,6 @@ pub async fn run(command: Commands, config: RunConfig) -> Result<()> {
 
 /// `safe wallet`, with its `--rpc-url` and `--safe`. `SAFE_ADDRESS` picks the
 /// Safe of `sync` and `sweep` only, so it does not filter `status`.
-#[cfg(feature = "hd-wallet")]
 async fn run_wallet(args: cli::WalletCliArgs, console: &Console) -> Result<()> {
     use wallet::WalletCommand;
 

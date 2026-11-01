@@ -3,14 +3,26 @@
 use std::future::Future;
 use std::path::Path;
 
-use alloy::network::AnyNetwork;
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::network::{AnyNetwork, TxSigner};
+use alloy::primitives::{Address, Bytes, Signature, U256};
 use alloy::providers::Provider;
+use alloy::signers::Signer;
 
 use crate::chain::ChainConfig;
 use crate::error::Result;
 use crate::safe::ExecutionResult;
 use crate::types::{CallBuilder, Operation};
+
+/// The key a [`Safe`](crate::Safe) or [`Eoa`](crate::Eoa) client signs with:
+/// any alloy signer that signs EIP-712 typed data (the Safe transaction) and
+/// transactions, and is cheap to clone. A local key, a hardware wallet or a
+/// remote signer behind an `Arc` all qualify.
+///
+/// It needs no raw-hash signing: hardware wallets refuse `sign_hash`, so the
+/// clients only call `sign_typed_data` and `sign_transaction`.
+pub trait AccountSigner: Signer + TxSigner<Signature> + Clone + Send + Sync + 'static {}
+
+impl<T> AccountSigner for T where T: Signer + TxSigner<Signature> + Clone + Send + Sync + 'static {}
 
 /// Trait for account types that can sign and execute transactions.
 ///

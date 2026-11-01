@@ -23,7 +23,6 @@ use safe_rs_cli::create::{
     SafeDeployment, SafeImplementation, StandardSafe,
 };
 use safe_rs_cli::prompt::NoPrompt;
-#[cfg(feature = "hd-wallet")]
 use safe_rs_cli::OptionsError;
 
 /// A factory of the host's own: always one owner, and its own salt.
@@ -139,7 +138,6 @@ async fn a_host_implementation_refuses_setups_it_cannot_deploy() {
     assert!(matches!(error, CreateError::InvalidSetup(_)), "{error:?}");
 }
 
-#[cfg(feature = "hd-wallet")]
 #[tokio::test]
 async fn a_host_implementation_is_refused_with_an_hd_wallet() {
     let mut opts = CreateOpts::default().with_implementation(HostFactory::default());
@@ -286,7 +284,6 @@ async fn a_policy_decides_from_the_plan_and_the_simulated_safe() {
 
 /// A rotation goes through the policy too, with its plan: the owners it swaps
 /// and the owners it leaves.
-#[cfg(feature = "hd-wallet")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_policy_sees_a_rotation_plan() {
     use safe_rs_cli::args::{PasswordArgs, SendOpts};

@@ -2,14 +2,11 @@ use std::fmt::{self, Display, Write as _};
 
 use alloy::primitives::utils::format_ether;
 use alloy::primitives::{Address, Bytes, TxHash, B256, U256};
-#[cfg(feature = "hd-wallet")]
 use safe_rs::rotation::RotationTx;
 use safe_rs::{Operation, SafeState, SignedOuterTx, SignedSafeTx};
 use serde::Serialize;
 
-#[cfg(feature = "hd-wallet")]
 mod rotation;
-#[cfg(feature = "hd-wallet")]
 pub use rotation::*;
 
 /// A command result that `safe` prints either as JSON or as text.
@@ -525,7 +522,6 @@ pub struct SignedTxOutput {
     pub raw: Bytes,
     pub tx_hash: B256,
     /// The owner swap the Safe transaction ends with, for `send --rotate`
-    #[cfg(feature = "hd-wallet")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<RotationPlanOutput>,
 }
@@ -591,13 +587,11 @@ impl SignedTxOutput {
             },
             raw: outer.raw.clone(),
             tx_hash: outer.tx_hash,
-            #[cfg(feature = "hd-wallet")]
             rotation: None,
         }
     }
 
     /// The document for a rotating transaction, including the owner swap.
-    #[cfg(feature = "hd-wallet")]
     pub fn for_rotation(tx: &RotationTx) -> Self {
         Self {
             rotation: Some(RotationPlanOutput::new(tx)),

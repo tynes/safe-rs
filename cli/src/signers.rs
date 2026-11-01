@@ -8,7 +8,6 @@ use zeroize::Zeroizing;
 use crate::any_signer::AnySigner;
 use crate::cli::{PasswordArgs, PayerArgs, SignerArgs};
 use crate::console::Console;
-#[cfg(feature = "hd-wallet")]
 pub use hd::*;
 
 /// The signer the options name, asking `console`'s prompt for an
@@ -29,17 +28,9 @@ pub async fn create_signer(
     local_signer(args, password, console).map(AnySigner::from)
 }
 
-#[cfg(feature = "ledger")]
 async fn ledger_signer(index: u32) -> Result<AnySigner> {
     let keys = safe_rs::LedgerKeys::connect().await?;
     Ok(keys.signer(index).await?.into())
-}
-
-#[cfg(not(feature = "ledger"))]
-async fn ledger_signer(_index: u32) -> Result<AnySigner> {
-    Err(eyre!(
-        "this build of safe has no Ledger support (it was built without the `ledger` feature)"
-    ))
 }
 
 /// A local key the options name (anything but `--ledger`).
@@ -82,24 +73,8 @@ impl SignerArgs {
     }
 }
 
-#[cfg(feature = "hd-wallet")]
 fn hd_key(args: &SignerArgs) -> Option<&crate::cli::HdKey> {
     args.hd_key.as_ref()
-}
-
-#[cfg(not(feature = "hd-wallet"))]
-fn hd_key(_: &SignerArgs) -> Option<&std::convert::Infallible> {
-    None
-}
-
-#[cfg(not(feature = "hd-wallet"))]
-fn hd_key_signer(
-    key: &std::convert::Infallible,
-    _: &PasswordArgs,
-    _: Option<&Path>,
-    _: &Console,
-) -> Result<PrivateKeySigner> {
-    match *key {}
 }
 
 /// The separate gas payer, if one was given.
@@ -156,7 +131,6 @@ pub fn read_password(
 }
 
 /// Keys and state for `--hd-wallet` and `--ledger`.
-#[cfg(feature = "hd-wallet")]
 mod hd {
     use std::path::{Path, PathBuf};
 
@@ -272,20 +246,8 @@ mod hd {
             .wrap_err_with(|| format!("cannot open HD wallet {}", path.display()))
     }
 
-    #[cfg(feature = "ledger")]
     async fn connect_ledger() -> Result<CliKeys> {
         Ok(CliKeys::Ledger(safe_rs::LedgerKeys::connect().await?))
-    }
-
-    #[cfg(not(feature = "ledger"))]
-    #[allow(
-        clippy::unused_async,
-        reason = "matches the signature of the Ledger build"
-    )]
-    async fn connect_ledger() -> Result<CliKeys> {
-        bail!(
-            "this build of safe has no Ledger support (it was built without the `ledger` feature)"
-        )
     }
 
     /// The keys `--hd-wallet` / `--ledger` chose. A phrase is decrypted (asking
@@ -356,12 +318,9 @@ mod hd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "hd-wallet")]
     use crate::cli::HdArgs;
-    #[cfg(feature = "hd-wallet")]
     use safe_rs::HdWallet;
 
-    #[cfg(feature = "hd-wallet")]
     #[test]
     fn ledger_wins_over_an_hd_wallet_from_the_environment() {
         let home = Path::new("/data");
@@ -393,11 +352,9 @@ mod tests {
         };
         let console = Console::default();
         assert_eq!(*read_password(&args, "", &console).unwrap(), " two words ");
-        #[cfg(feature = "hd-wallet")]
         assert_eq!(*new_password(&args, &console).unwrap(), " two words ");
     }
 
-    #[cfg(feature = "hd-wallet")]
     #[test]
     fn empty_new_passwords_are_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -423,7 +380,6 @@ mod tests {
         assert!(env_key.is_set());
     }
 
-    #[cfg(feature = "hd-wallet")]
     #[test]
     fn a_keystore_file_yields_its_key() {
         use rand::rngs::OsRng;

@@ -8,8 +8,9 @@ use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, TxHash, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer;
 
-use crate::account::Account;
+use crate::account::{Account, AccountSigner};
 use crate::chain::{ChainAddresses, ChainConfig};
 use crate::contracts::ISafe;
 use crate::envelope::{batch_params, BatchTarget, PreparedSafeTx, SafeTxGasPolicy};
@@ -69,12 +70,13 @@ pub struct ExecutionResult {
     pub success: bool,
 }
 
-/// Safe client for interacting with Safe v1.4.1 smart accounts
-pub struct Safe<P> {
+/// Safe client for interacting with Safe v1.4.1 smart accounts, signing as
+/// owner `S` (a local key by default; see [`AccountSigner`])
+pub struct Safe<P, S = PrivateKeySigner> {
     /// The provider for RPC calls
     provider: P,
     /// The signer for transactions
-    signer: PrivateKeySigner,
+    signer: S,
     /// The Safe contract address
     address: Address,
     /// Chain configuration
@@ -83,17 +85,13 @@ pub struct Safe<P> {
     debug_output_dir: Option<PathBuf>,
 }
 
-impl<P> Safe<P>
+impl<P, S> Safe<P, S>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
+    S: AccountSigner,
 {
     /// Creates a new Safe client
-    pub fn new(
-        provider: P,
-        signer: PrivateKeySigner,
-        address: Address,
-        config: ChainConfig,
-    ) -> Self {
+    pub fn new(provider: P, signer: S, address: Address, config: ChainConfig) -> Self {
         Self {
             provider,
             signer,
@@ -116,7 +114,7 @@ where
     /// Creates a Safe client with auto-detected chain configuration: the chain
     /// ID and the canonical contracts for the Safe's version (see
     /// [`detect_addresses`]). Use [`Safe::new`] to set the addresses explicitly.
-    pub async fn connect(provider: P, signer: PrivateKeySigner, address: Address) -> Result<Self> {
+    pub async fn connect(provider: P, signer: S, address: Address) -> Result<Self> {
         let chain_id = provider
             .get_chain_id()
             .await
@@ -188,9 +186,9 @@ where
     pub async fn verify_owner(&self) -> Result<(Vec<Address>, u64)> {
         let owners = self.owners().await?;
         let threshold = self.threshold().await?;
-        if !owners.contains(&self.signer.address()) {
+        if !owners.contains(&self.signer_address()) {
             return Err(Error::NotOwner {
-                signer: self.signer.address(),
+                signer: self.signer_address(),
                 safe: self.address,
             });
         }
@@ -207,10 +205,10 @@ where
             return Err(Error::InvalidThreshold { threshold });
         }
 
-        let is_owner = self.is_owner(self.signer.address()).await?;
+        let is_owner = self.is_owner(self.signer_address()).await?;
         if !is_owner {
             return Err(Error::NotOwner {
-                signer: self.signer.address(),
+                signer: self.signer_address(),
                 safe: self.address,
             });
         }
@@ -220,8 +218,8 @@ where
 }
 
 /// Builder for constructing multicall transactions
-pub struct SafeBuilder<'a, P> {
-    safe: &'a Safe<P>,
+pub struct SafeBuilder<'a, P, S = PrivateKeySigner> {
+    safe: &'a Safe<P, S>,
     calls: Vec<Call>,
     use_call_only: bool,
     gas: SafeTxGasPolicy,
@@ -235,11 +233,12 @@ pub struct SafeBuilder<'a, P> {
     simulation_result: Option<SimulationResult>,
 }
 
-impl<'a, P> SafeBuilder<'a, P>
+impl<'a, P, S> SafeBuilder<'a, P, S>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
+    S: AccountSigner,
 {
-    fn new(safe: &'a Safe<P>) -> Self {
+    fn new(safe: &'a Safe<P, S>) -> Self {
         SafeBuilder {
             safe,
             calls: Vec::new(),
@@ -381,7 +380,7 @@ where
     pub async fn simulate(mut self) -> Result<Self> {
         let prepared = self.prepare().await?;
         let signed = prepared.sign(&self.safe.signer).await?;
-        let owner = self.safe.signer.address();
+        let owner = Signer::address(&self.safe.signer);
         let owners = self.safe.owners().await.unwrap_or_default();
         let threshold = self.safe.threshold().await.unwrap_or(1) as usize;
         let sim_signed = if threshold > 1 && !owners.is_empty() {
@@ -544,7 +543,7 @@ where
 
         let signed = prepared.sign(&self.safe.signer).await?;
         let tx = <AnyNetwork as Network>::TransactionRequest::default()
-            .with_from(self.safe.signer.address())
+            .with_from(Signer::address(&self.safe.signer))
             .with_to(self.safe.address)
             .with_input(signed.exec_calldata());
 
@@ -589,9 +588,10 @@ where
     }
 }
 
-impl<P> CallBuilder for SafeBuilder<'_, P>
+impl<P, S> CallBuilder for SafeBuilder<'_, P, S>
 where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
+    S: AccountSigner,
 {
     fn calls_mut(&mut self) -> &mut Vec<Call> {
         &mut self.calls
@@ -621,13 +621,14 @@ where
     }
 }
 
-impl<P> crate::account::Account for Safe<P>
+impl<P, S> crate::account::Account for Safe<P, S>
 where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
+    S: AccountSigner,
 {
     type Provider = P;
     type Builder<'a>
-        = SafeBuilder<'a, P>
+        = SafeBuilder<'a, P, S>
     where
         Self: 'a;
 
@@ -636,7 +637,7 @@ where
     }
 
     fn signer_address(&self) -> Address {
-        self.signer.address()
+        Signer::address(&self.signer)
     }
 
     fn config(&self) -> &ChainConfig {
@@ -660,7 +661,7 @@ where
         Ok(nonce)
     }
 
-    fn batch(&self) -> SafeBuilder<'_, P> {
+    fn batch(&self) -> SafeBuilder<'_, P, S> {
         SafeBuilder::new(self)
     }
 

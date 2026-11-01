@@ -17,7 +17,6 @@ use crate::signers::create_signer;
 
 /// `safe config`.
 pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
-    #[cfg(feature = "hd-wallet")]
     if args.hd.is_set() && !args.signer.is_set() {
         bail!(
             "safe config does not rotate owner keys: signing with --hd-wallet or --ledger would \
@@ -58,7 +57,6 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
             rpc_url: args.rpc.rpc_url.clone(),
             safe: args.safe.safe,
             signer,
-            #[cfg(feature = "hd-wallet")]
             home: None,
         };
         send::execute(
@@ -139,7 +137,6 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
         rpc_url: args.rpc.rpc_url.clone(),
         safe: Some(safe),
         signer,
-        #[cfg(feature = "hd-wallet")]
         home: None,
     };
     send::execute(target, send_opts(args), plan.calls(), hooks, console).await?;
@@ -194,11 +191,8 @@ fn send_opts(args: ConfigArgs) -> SendOpts {
         multi_send: None,
         multi_send_call_only: args.multi_send_call_only,
         no_confirm: args.no_confirm,
-        #[cfg(feature = "hd-wallet")]
         rotate: false,
-        #[cfg(feature = "hd-wallet")]
         hd: args.hd,
-        #[cfg(feature = "hd-wallet")]
         sweep: crate::cli::SweepArgs::default(),
         password: args.password,
         payer: args.payer,

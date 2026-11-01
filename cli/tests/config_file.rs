@@ -92,7 +92,6 @@ fn an_invalid_config_file_is_refused_by_name() {
     );
 }
 
-#[cfg(feature = "hd-wallet")]
 #[tokio::test]
 async fn every_hd_wallet_key_is_usable_as_a_signer() {
     use safe_rs_cli::args::{HdArgs, PasswordArgs};

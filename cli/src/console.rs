@@ -71,10 +71,6 @@ impl Console {
         self.logger.log(Level::Warn, format_args!("{text}"));
     }
 
-    #[cfg_attr(
-        not(feature = "hd-wallet"),
-        allow(dead_code, reason = "only the HD wallet commands collect warnings")
-    )]
     pub fn warnings(&self, warnings: &[String]) {
         for warning in warnings {
             self.warn(warning);
