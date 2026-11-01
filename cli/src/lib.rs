@@ -75,13 +75,17 @@
 mod bundle;
 mod cli;
 mod commands;
+pub mod config_file;
 mod console;
 mod error;
 #[cfg(feature = "hd-wallet")]
 mod keys;
 pub mod log;
 mod output;
-#[cfg(feature = "hd-wallet")]
+#[cfg_attr(
+    not(feature = "hd-wallet"),
+    allow(dead_code, reason = "the wallet paths are only used with hd-wallet")
+)]
 mod paths;
 pub mod prompt;
 mod sig_parser;
@@ -99,7 +103,6 @@ pub use commands::info::{info, InfoError, SafeInfo};
 pub use commands::send::{send, EoaTx, SendContext, SendOutcome, Sender};
 pub use error::{BroadcastError, CreateError, OptionsError, SendError};
 pub use output::Report;
-#[cfg(feature = "hd-wallet")]
 pub use paths::{home, HOME_ENV};
 /// The library the calls are built with, at the version this crate uses.
 pub use safe_rs;
@@ -136,7 +139,7 @@ pub mod args {
     };
     /// The HD wallet and sweep flags of `--rotate` (`hd-wallet` feature).
     #[cfg(feature = "hd-wallet")]
-    pub use crate::cli::{HdArgs, SweepArgs};
+    pub use crate::cli::{parse_hd_key, HdArgs, HdKey, SweepArgs};
 }
 
 /// `safe create` and [`create`](create::create) for a CLI that deploys Safes.

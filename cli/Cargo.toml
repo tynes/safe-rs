@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 safe-rs = { path = "..", version = "0.13", default-features = false, features = ["simulation", "keystore"] }
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "string"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 alloy = "2.5"
 alloy-dyn-abi = "1.6"
@@ -23,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 eyre = "0.6"
 thiserror = "2"
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 color-eyre = "0.6"
 dialoguer = "0.11"
 hex = "0.4"

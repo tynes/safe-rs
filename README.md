@@ -468,6 +468,7 @@ Commands that sign with a single key, and `safe info` and `safe call` when they 
 | `--private-key <key>` | Private key (hex) |
 | `--keystore <path>` | Keystore file (Web3 Secret Storage v3, as written by `cast wallet import`) |
 | `-i, --interactive` | Prompt for private key securely |
+| `--hd-key <wallet>[:<index>]` | Key `index` of an HD wallet (default 0, the funding key); the wallet is a name under `~/.safe-rs/wallets` or a keystore path. Not recorded in the wallet's rotation state |
 | `PRIVATE_KEY` env var | Environment variable |
 
 A keystore or HD wallet password is read from `--password-file <path>`, then `--password <text>` (visible in the process list; avoid it), then a prompt.
@@ -566,6 +567,20 @@ Under `~/.safe-rs` (or `$SAFE_RS_HOME`), all readable by you only:
 |------|----------|
 | `wallets/<name>.json` | The phrase, encrypted with your password |
 | `state/<funding address>.json` | Addresses and key indices: which key owns which Safe, and the addresses of the next keys. No secrets |
+| `config.toml` | Defaults for flags, optional (below) |
+
+`config.toml` holds defaults that `safe` and any CLI embedding it read. A flag or its environment variable always wins, and `keystore` / `hd_key` are used only when no other signer is given. Unknown keys are an error. Private keys and passwords never go here.
+
+```toml
+rpc_url = "https://polygon.drpc.org"   # --rpc-url, ETH_RPC_URL
+safe = "0x…"                           # --safe, SAFE_ADDRESS
+hd_wallet = "treasury"                 # --hd-wallet, SAFE_HD_WALLET
+password_file = "/home/me/.safe-rs/pw" # --password-file, SAFE_PASSWORD_FILE
+keystore = "/home/me/.foundry/keystores/me"   # --keystore
+hd_key = "treasury:3"                  # --hd-key
+```
+
+A CLI that embeds the commands applies it to its own command tree before parsing: `ConfigFile::load()?.apply(command)`.
 
 The keystore is Web3 Secret Storage v3, the format geth and Foundry use, with the `x-ethers` field ethers.js defines for a phrase. Foundry and geth open it as an ordinary keystore for the funding key (`cast wallet address --keystore ~/.safe-rs/wallets/<name>.json`); ethers.js and safe-rs also recover the phrase.
 

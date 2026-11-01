@@ -35,7 +35,7 @@ pub use crate::output::{OwnerKey, SweptEth};
 use crate::paths;
 use crate::prompt::{Prompt, TerminalPrompt};
 use crate::signers::{
-    check_new_password, new_password, open_keys, open_state, open_wallet, wallet_id,
+    check_new_password, hd_key_signer, new_password, open_keys, open_state, open_wallet, wallet_id,
 };
 
 type Result<T, E = WalletError> = std::result::Result<T, E>;
@@ -537,6 +537,26 @@ pub async fn wallet_address(
         address,
         path: key_path(index),
     })
+}
+
+/// Key `index` of the HD wallet `wallet` (a name under the data directory, or
+/// a keystore path) as a signer: 0 is the funding key, 1 and up the owner
+/// keys. Asks `ctx`'s prompt for the password unless `password` gives it.
+///
+/// Signing with the key is not recorded in the wallet's rotation state, so a
+/// key that owns a Safe under `--rotate` stays marked unexposed.
+pub fn signer(
+    ctx: &WalletContext,
+    wallet: &str,
+    index: u32,
+    password: &PasswordArgs,
+) -> Result<alloy::signers::local::PrivateKeySigner> {
+    let key = crate::cli::HdKey {
+        wallet: wallet.to_string(),
+        index,
+    };
+    let home = ctx.home()?;
+    hd_key_signer(&key, password, Some(&home), &ctx.console()).map_err(classify)
 }
 
 fn exposure_label(exposure: Exposure) -> &'static str {
