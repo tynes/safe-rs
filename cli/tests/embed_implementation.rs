@@ -350,6 +350,8 @@ async fn a_policy_sees_a_rotation_plan() {
             ..SendOpts::default()
         };
         opts.hd.hd_wallet = Some("demo".into());
+        // The harness deploys MultiSendCallOnly at its own address.
+        opts.multi_send_call_only = Some(h.addresses.multi_send_call_only);
         opts.password = PasswordArgs {
             password: Some("pw".into()),
             ..PasswordArgs::default()
