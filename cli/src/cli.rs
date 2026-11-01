@@ -972,7 +972,7 @@ pub(crate) fn check_setup(owners: &[Address], threshold: u64) -> Result<(), Stri
 #[derive(Args, Clone, Default)]
 pub struct SignerArgs {
     /// Raw private key
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     pub private_key: Option<String>,
 
     /// Path to a keystore file (Web3 Secret Storage v3, as written by `cast wallet import`)
@@ -1051,7 +1051,7 @@ pub struct SweepArgs {
 pub struct PayerArgs {
     /// Private key that sends the outer transaction and pays for gas, instead
     /// of the owner key (with --hd-wallet on create: instead of the funding key)
-    #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY")]
+    #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY", hide_env_values = true)]
     pub payer_private_key: Option<String>,
 }
 
