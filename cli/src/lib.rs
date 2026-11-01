@@ -55,6 +55,11 @@
 //! # }
 //! ```
 //!
+//! A CLI whose Safes come from a factory of its own sets
+//! [`CreateOpts::implementation`](create::CreateOpts) (see
+//! [`create::SafeImplementation`]); [`create::create`] then deploys through it,
+//! and [`info`] shows the implementation (singleton) the Safe uses.
+//!
 //! [`SendContext::eoa`] sends the same calls from the signer's own account,
 //! one transaction per call, for an app that also supports accounts without a
 //! Safe.
@@ -90,9 +95,12 @@ use color_eyre::eyre::Result;
 
 pub use alloy::signers::local::PrivateKeySigner;
 pub use cli::{Cli, Commands};
+pub use commands::info::{info, InfoError, SafeInfo};
 pub use commands::send::{send, EoaTx, SendContext, SendOutcome, Sender};
 pub use error::{BroadcastError, CreateError, OptionsError, SendError};
 pub use output::Report;
+#[cfg(feature = "hd-wallet")]
+pub use paths::{home, HOME_ENV};
 /// The library the calls are built with, at the version this crate uses.
 pub use safe_rs;
 pub use url::Url;
@@ -135,7 +143,8 @@ pub mod args {
 pub mod create {
     pub use crate::cli::{FeeArgs, SafeSetupArgs, SafeVersion};
     pub use crate::commands::create::{
-        create, run, CreateArgs, CreateContext, CreateOpts, CreateOutcome,
+        create, run, BoxFuture, CreateArgs, CreateContext, CreateOpts, CreateOutcome, HttpProvider,
+        Implementation, ResolvedSetup, SafeDeployment, SafeImplementation, StandardSafe,
     };
     #[cfg(feature = "hd-wallet")]
     pub use crate::commands::create::{parse_same_as, SameAs};

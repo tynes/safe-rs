@@ -17,8 +17,13 @@ use alloy::signers::local::PrivateKeySigner;
 use clap::{Args, Parser};
 use color_eyre::eyre::eyre;
 use safe_rs::{
-    encode_create_proxy_with_nonce, fetch_proxy_creation_code, is_safe_with, predict_safe_address,
-    sign_outer_tx, submit_and_wait, OuterTxParams, SignedOuterTx, Submission,
+    fetch_proxy_creation_code, is_safe_with, predict_safe_address, sign_outer_tx, submit_and_wait,
+    OuterTxParams, SignedOuterTx, Submission,
+};
+
+pub use implementation::{
+    BoxFuture, HttpProvider, Implementation, ResolvedSetup, SafeDeployment, SafeImplementation,
+    StandardSafe,
 };
 use serde::Serialize;
 use url::Url;
@@ -26,8 +31,8 @@ use url::Url;
 use crate::cli::{FeeArgs, SafeSetupArgs};
 #[cfg(feature = "hd-wallet")]
 use crate::cli::{HdArgs, SweepArgs};
-use crate::cli::{PasswordArgs, PayerArgs, ResolvedSetup, RpcArgs, SignerArgs};
-use crate::commands::{http_provider, outer_fees, HttpProvider};
+use crate::cli::{PasswordArgs, PayerArgs, RpcArgs, SignerArgs};
+use crate::commands::{http_provider, outer_fees};
 use crate::console::{Console, Reports};
 pub use crate::error::CreateError;
 use crate::error::{BroadcastError, OptionsError};
@@ -40,6 +45,7 @@ use crate::RunConfig;
 
 #[cfg(feature = "hd-wallet")]
 mod hd;
+mod implementation;
 
 #[cfg(feature = "hd-wallet")]
 pub use hd::{parse_same_as, SameAs};
@@ -92,9 +98,25 @@ pub struct CreateOpts {
 
     #[command(flatten)]
     pub payer: PayerArgs,
+
+    /// How the Safe is deployed (default: the standard Safe proxy factory).
+    /// Not a flag: a CLI whose Safes come from another factory sets it in
+    /// code. Not supported with `--hd-wallet` or `--ledger`.
+    #[arg(skip)]
+    pub implementation: Implementation,
 }
 
 impl CreateOpts {
+    /// Deploys with `implementation` instead of the standard Safe proxy
+    /// factory.
+    pub fn with_implementation(
+        mut self,
+        implementation: impl SafeImplementation + 'static,
+    ) -> Self {
+        self.implementation = Implementation::custom(implementation);
+        self
+    }
+
     /// The flag conflicts clap enforces, checked again for options built in
     /// code, then: `--same-as`, `--no-sweep` and `--sweep-reserve` need
     /// `--hd-wallet` or `--ledger`, and a signer with `--hd-wallet` is
@@ -135,6 +157,16 @@ impl CreateOpts {
             if self.hd.is_set() {
                 if has_signer {
                     return Err(OptionsError::SignerWithHd);
+                }
+                if !self.implementation.is_standard() {
+                    return Err(OptionsError::Conflict {
+                        flag: "a custom Safe implementation",
+                        with: if self.hd.ledger {
+                            "--ledger"
+                        } else {
+                            "--hd-wallet"
+                        },
+                    });
                 }
             } else if self.same_as.is_some() {
                 return Err(OptionsError::HdOnly { flag: "--same-as" });
@@ -387,27 +419,34 @@ async fn create_with(
         .validate(first)
         .map_err(CreateError::InvalidSetup)?;
     let setup = opts.setup.resolve(first);
-    let payer = create_payer(&opts.payer)?.unwrap_or(signer);
 
     let provider = http_provider(&ctx.rpc_url);
-    let (safe, initializer) = predict(&provider, &setup).await?;
+    let implementation = opts.implementation.get();
+    let plan = implementation.plan(&provider, &setup, &signer).await?;
+    let payer = create_payer(&opts.payer)?.unwrap_or(signer);
+    let safe = plan.safe;
     let mut details = String::from("Computing Safe address...\n");
-    details.push_str(&format!("  Factory: {}\n", setup.factory));
-    details.push_str(&format!("  Singleton: {}\n", setup.singleton));
-    details.push_str(&format!("  Salt Nonce: {}\n", setup.salt_nonce));
-    details.push_str(&format!("  Owners: {:?}\n", setup.owners));
-    details.push_str(&format!("  Threshold: {}\n", setup.threshold));
+    if !opts.implementation.is_standard() {
+        details.push_str(&format!("  Implementation: {}\n", implementation.name()));
+    }
+    details.push_str(&format!("  Factory: {}\n", plan.to));
+    details.push_str(&format!("  Singleton: {}\n", plan.singleton));
+    if opts.implementation.is_standard() {
+        details.push_str(&format!("  Salt Nonce: {}\n", setup.salt_nonce));
+    }
+    details.push_str(&format!("  Owners: {:?}\n", plan.owners));
+    details.push_str(&format!("  Threshold: {}\n", plan.threshold));
     if payer.address() != first {
         details.push_str(&format!("  Payer: {}\n", payer.address()));
     }
     console.line(&details);
 
-    let deployed = is_safe_with(&provider, safe, &[setup.singleton]).await?;
+    let deployed = is_safe_with(&provider, safe, &[plan.singleton]).await?;
     if opts.compute_only {
         return Ok(CreateOutcome::Computed {
             safe,
-            owners: setup.owners,
-            threshold: setup.threshold,
+            owners: plan.owners,
+            threshold: plan.threshold,
             deployed,
             owner_key: None,
             payer: None,
@@ -417,8 +456,8 @@ async fn create_with(
         console.line(format!("Safe already deployed at {safe}"));
         return Ok(CreateOutcome::AlreadyDeployed {
             safe,
-            owners: setup.owners,
-            threshold: setup.threshold,
+            owners: plan.owners,
+            threshold: plan.threshold,
             owner_key: None,
             payer: None,
             sweep: None,
@@ -434,25 +473,25 @@ async fn create_with(
     }
 
     let chain_id = provider.get_chain_id().await?;
-    let params = deployment(
+    let params = deployment_tx(
         &provider,
         chain_id,
         payer.address(),
-        &setup,
-        initializer,
+        plan.to,
+        plan.input.clone(),
         &opts.fees,
     )
     .await?;
     let outer = sign_outer_tx(&payer, params).await?;
     let tx_hash = submit(&provider, &outer, safe, opts.fees.timeout, console).await?;
-    if !is_safe_with(&provider, safe, &[setup.singleton]).await? {
+    if !is_safe_with(&provider, safe, &[plan.singleton]).await? {
         return Err(CreateError::NotDeployed { safe, tx_hash });
     }
     Ok(CreateOutcome::Deployed {
         safe,
         tx_hash,
-        owners: setup.owners,
-        threshold: setup.threshold,
+        owners: plan.owners,
+        threshold: plan.threshold,
         payer: payer.address(),
         owner_key: None,
         sweep: None,
@@ -479,6 +518,7 @@ pub(crate) async fn predict(
 
 /// The unsigned `createProxyWithNonce` transaction, sent by `from`, with the
 /// `--gas-limit` and fee overrides applied.
+#[cfg(feature = "hd-wallet")]
 pub(crate) async fn deployment(
     provider: &HttpProvider,
     chain_id: u64,
@@ -487,13 +527,27 @@ pub(crate) async fn deployment(
     initializer: Bytes,
     fees: &FeeArgs,
 ) -> Result<OuterTxParams, CreateError> {
-    let input = encode_create_proxy_with_nonce(setup.singleton, initializer, setup.salt_nonce);
+    let input =
+        safe_rs::encode_create_proxy_with_nonce(setup.singleton, initializer, setup.salt_nonce);
+    deployment_tx(provider, chain_id, from, setup.factory, input, fees).await
+}
+
+/// The unsigned deployment transaction calling `to` with `input`, sent by
+/// `from`, with the `--gas-limit` and fee overrides applied.
+async fn deployment_tx(
+    provider: &HttpProvider,
+    chain_id: u64,
+    from: Address,
+    to: Address,
+    input: Bytes,
+    fees: &FeeArgs,
+) -> Result<OuterTxParams, CreateError> {
     let gas_limit = if let Some(gas) = fees.gas_limit {
         gas
     } else {
         let request = <AnyNetwork as Network>::TransactionRequest::default()
             .with_from(from)
-            .with_to(setup.factory)
+            .with_to(to)
             .with_input(input.clone());
         let estimate = provider
             .estimate_gas(request)
@@ -514,7 +568,7 @@ pub(crate) async fn deployment(
         gas_limit,
         max_fee_per_gas: estimated.max_fee_per_gas,
         max_priority_fee_per_gas: estimated.max_priority_fee_per_gas,
-        to: setup.factory,
+        to,
         value: U256::ZERO,
         input,
     })

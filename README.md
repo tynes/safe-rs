@@ -285,7 +285,7 @@ Output:
 Safe: 0xYourSafe
 Block: 21000000 (0x...)
 Version: 1.4.1
-Singleton: 0x41675C099F32341bf84BFc5382aF534df5C7461a
+Implementation (singleton): 0x41675C099F32341bf84BFc5382aF534df5C7461a
 Balance: 1.250000000000000000 ETH
 Nonce: 42
 Threshold: 1

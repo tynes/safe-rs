@@ -33,6 +33,20 @@ pub fn create_signer(
     }
 }
 
+impl SignerArgs {
+    /// The signer these flags name, as the `safe` commands resolve it:
+    /// `--interactive` asks `prompt` for the key, `--keystore` reads the
+    /// password from `password` or asks `prompt`.
+    pub fn resolve(
+        &self,
+        password: &PasswordArgs,
+        prompt: std::sync::Arc<dyn crate::prompt::Prompt>,
+    ) -> Result<PrivateKeySigner> {
+        let console = Console::new(std::sync::Arc::new(crate::log::NoopLogger), prompt);
+        create_signer(self, password, &console)
+    }
+}
+
 /// The separate gas payer, if one was given.
 pub fn create_payer(args: &PayerArgs) -> Result<Option<PrivateKeySigner>> {
     args.payer_private_key
