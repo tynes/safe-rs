@@ -161,7 +161,7 @@ async fn a_host_implementation_is_refused_with_an_hd_wallet() {
 
 /// A host policy sees every Safe transaction's result before it is signed:
 /// `FixedOwners` lets a plain call through and stops an owner change.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn a_policy_refuses_owner_changes_found_in_simulation() {
     use alloy::sol_types::SolCall as _;
     use safe_rs_cli::args::SendOpts;
