@@ -6,8 +6,8 @@ use safe_rs::{read_safe_state, ParentHeader, ReadSafeStateOptions};
 use crate::cli::InfoArgs;
 use crate::commands::default_safe::read_default_safe;
 use crate::commands::http_provider;
-use crate::output::SafeInfoOutput;
 use crate::console::Console;
+use crate::output::SafeInfoOutput;
 use crate::signers::create_signer;
 
 pub async fn run(args: InfoArgs, console: &Console) -> Result<()> {
@@ -31,6 +31,11 @@ pub async fn run(args: InfoArgs, console: &Console) -> Result<()> {
 
     let balance = provider.get_balance(state.address).block_id(block).await?;
 
-    console.emit(&SafeInfoOutput::new(state, balance, header.number, header.hash));
+    console.emit(&SafeInfoOutput::new(
+        state,
+        balance,
+        header.number,
+        header.hash,
+    ));
     Ok(())
 }

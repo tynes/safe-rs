@@ -104,7 +104,11 @@ use crate::prompt::{Prompt, TerminalPrompt};
 /// The flag groups of the `safe` commands, for flattening into another CLI's
 /// commands with `#[command(flatten)]`.
 ///
-/// [`SendOpts`](args::SendOpts) is the one a send needs. `RpcArgs`,
+/// [`SendOpts`](args::SendOpts) is the one a send needs. It is made of
+/// [`CollectArgs`](args::CollectArgs), [`SimulateArgs`](args::SimulateArgs),
+/// [`FeeArgs`](args::FeeArgs) and [`RawTxArgs`](args::RawTxArgs), which
+/// `safe config` and `safe rotate` share, and which a host can flatten one
+/// by one into a command of its own. `RpcArgs`,
 /// `SafeArgs` and `SignerArgs` are the `safe` CLI's own `--rpc-url`, `--safe`
 /// and signer flags, with their `ETH_RPC_URL`, `SAFE_ADDRESS` and
 /// `PRIVATE_KEY` environment variables, for a CLI that wants those too.
@@ -118,9 +122,9 @@ pub mod args {
     #[allow(deprecated, reason = "the old name stays exported for one release")]
     pub use crate::cli::WalletArgs;
     pub use crate::cli::{
-        parse_block_id, parse_ether_value, parse_fee_value, EvmSpec, FeeArgs, PasswordArgs,
-        PayerArgs, RpcArgs, SafeArgs, SafeSetupArgs, SafeVersion, SendOpts, SignerArgs, SimArgs,
-        DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT,
+        parse_block_id, parse_ether_value, parse_fee_value, CollectArgs, EvmSpec, FeeArgs,
+        PasswordArgs, PayerArgs, RawTxArgs, RpcArgs, SafeArgs, SafeSetupArgs, SafeVersion,
+        SendOpts, SignerArgs, SimArgs, SimulateArgs, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT,
     };
     /// The HD wallet and sweep flags of `--rotate` (`hd-wallet` feature).
     #[cfg(feature = "hd-wallet")]
@@ -130,11 +134,11 @@ pub mod args {
 /// `safe create` and [`create`](create::create) for a CLI that deploys Safes.
 pub mod create {
     pub use crate::cli::{FeeArgs, SafeSetupArgs, SafeVersion};
-    #[cfg(feature = "hd-wallet")]
-    pub use crate::commands::create::{parse_same_as, SameAs};
     pub use crate::commands::create::{
         create, run, CreateArgs, CreateContext, CreateOpts, CreateOutcome,
     };
+    #[cfg(feature = "hd-wallet")]
+    pub use crate::commands::create::{parse_same_as, SameAs};
     pub use crate::error::CreateError;
     pub use crate::output::{OwnerKey, SweptEth};
 }
@@ -205,7 +209,12 @@ async fn run_wallet(args: cli::WalletCliArgs, console: &Console) -> Result<()> {
     use wallet::WalletCommand;
 
     let mut safe = args.safe;
-    if safe.is_none() && matches!(args.command, WalletCommand::Sync(_) | WalletCommand::Sweep(_)) {
+    if safe.is_none()
+        && matches!(
+            args.command,
+            WalletCommand::Sync(_) | WalletCommand::Sweep(_)
+        )
+    {
         if let Some(value) = std::env::var_os("SAFE_ADDRESS").filter(|v| !v.is_empty()) {
             let value = value.to_string_lossy();
             safe = Some(value.parse().map_err(|_| {

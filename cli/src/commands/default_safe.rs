@@ -14,8 +14,8 @@ use safe_rs::{
 };
 
 use crate::cli::SafeVersion;
-use crate::console::Console;
 use crate::commands::HttpProvider;
+use crate::console::Console;
 
 /// The Safe a `--safe` command acts on: `--safe` (or `SAFE_ADDRESS`) when
 /// given, else the signer's default Safe, read at `block`.

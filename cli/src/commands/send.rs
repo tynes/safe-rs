@@ -27,10 +27,10 @@ use crate::commands::default_safe::safe_or_default;
 #[cfg(feature = "hd-wallet")]
 use crate::commands::rotation::{self, RotationRun};
 use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
+use crate::console::Console;
 #[cfg(feature = "hd-wallet")]
 use crate::error::OptionsError;
 use crate::error::{BroadcastError, SendError};
-use crate::console::Console;
 use crate::log::{Logger, NoopLogger};
 use crate::output::{
     calls_summary, ApproveHashOutput, BundleSavedOutput, EoaExecutionOutput, ExecutionOutput,
@@ -195,7 +195,7 @@ pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
         );
     }
     checked?;
-    if calls.is_empty() && args.opts.bundle.is_none() && !args.opts.rotates() {
+    if calls.is_empty() && args.opts.collect.bundle.is_none() && !args.opts.rotates() {
         eyre::bail!("Target address required for single call mode");
     }
     let signer = if args.signer.is_set() {
@@ -286,7 +286,7 @@ async fn execute_eoa(
     console: &Console,
 ) -> Result<SendOutcome> {
     check_eoa_calls(&calls)?;
-    if let (Some(gas), [call]) = (args.gas_limit, calls.as_mut_slice()) {
+    if let (Some(gas), [call]) = (args.fees.gas_limit, calls.as_mut_slice()) {
         call.gas_limit = Some(gas);
     }
     let from = signer.address();
@@ -298,8 +298,8 @@ async fn execute_eoa(
 
     let fees = outer_fees(
         &provider,
-        args.max_fee_per_gas,
-        args.max_priority_fee_per_gas,
+        args.fees.max_fee_per_gas,
+        args.fees.max_priority_fee_per_gas,
     )
     .await?;
 
@@ -309,13 +309,14 @@ async fn execute_eoa(
         let nonce = provider.get_transaction_count(from).await?;
         (nonce..).zip(calls.iter().map(|c| c.gas_limit)).collect()
     } else {
-        let session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
+        let session = fork_session(provider.clone(), chain_id, &args.simulate.sim, true).await?;
         let simulated = simulate_eoa_calls(&session, from, &calls, fees)?;
         let failed = simulated
             .iter()
             .position(|s| !s.result.success)
             .map(|i| (i, &simulated[i].result));
         let traces = args
+            .simulate
             .trace
             .then(|| {
                 let all: Vec<String> = simulated
@@ -346,7 +347,7 @@ async fn execute_eoa(
         };
         if failed.is_some() {
             console.emit_or_line(&report);
-        } else if args.simulate_only {
+        } else if args.simulate.simulate_only {
             console.emit(&report);
         } else {
             console.line(report.human());
@@ -355,7 +356,7 @@ async fn execute_eoa(
         if let Some(reason) = revert_reason {
             return Err(SendError::SimulationFailed { reason });
         }
-        if args.simulate_only {
+        if args.simulate.simulate_only {
             return Ok(SendOutcome::EoaSimulated { gas_used });
         }
         simulated
@@ -393,7 +394,7 @@ async fn execute_eoa(
                 simulated_gas,
                 fees,
             },
-            args.timeout,
+            args.fees.timeout,
             console,
         )
         .await;
@@ -521,8 +522,8 @@ pub async fn execute(
     console: &Console,
 ) -> Result<SendOutcome> {
     // 1. Load/Build Calls & Existing Bundle State
-    let bundle_existed = args.bundle.as_ref().is_some_and(|p| p.exists());
-    let mut bundle = if let Some(bundle_path) = &args.bundle {
+    let bundle_existed = args.collect.bundle.as_ref().is_some_and(|p| p.exists());
+    let mut bundle = if let Some(bundle_path) = &args.collect.bundle {
         if bundle_path.exists() {
             let mut loaded = BundleFile::load(bundle_path)?;
             if !cli_calls.is_empty() {
@@ -555,7 +556,7 @@ pub async fn execute(
         BundleFile::from_calls(&cli_calls)
     };
 
-    for merge_path in &args.merge_bundle {
+    for merge_path in &args.collect.merge_bundle {
         let other = BundleFile::load(merge_path)?;
         bundle.merge_from_file(&other)?;
     }
@@ -568,9 +569,10 @@ pub async fn execute(
     // `--no-submit` without a destination writes the signed transaction to
     // stdout, unless the caller prints its own output.
     let raw_out = args
+        .raw
         .raw_out
         .clone()
-        .or_else(|| (args.no_submit && console.prints_results()).then(|| "-".to_string()));
+        .or_else(|| (args.raw.no_submit && console.prints_results()).then(|| "-".to_string()));
     if raw_out.as_deref() == Some("-") {
         console.stdout_carries_data();
     }
@@ -599,7 +601,7 @@ pub async fn execute(
     let addresses = chain_addresses(&provider, &args, safe_address).await;
     let config = ChainConfig::with_addresses(chain_id, addresses.clone());
 
-    let sim_block = args.sim.block.unwrap_or_else(BlockId::latest);
+    let sim_block = args.simulate.sim.block.unwrap_or_else(BlockId::latest);
     let state = read_safe_state(
         &provider,
         safe_address,
@@ -692,7 +694,7 @@ pub async fn execute(
         if let Some(gas) = args.safe_tx_gas {
             builder = builder.with_safe_tx_gas(gas);
         }
-        if let (false, Some(block)) = (args.skip_simulation, args.sim.block) {
+        if let (false, Some(block)) = (args.skip_simulation, args.simulate.sim.block) {
             builder = builder.with_batch_target_block(block);
         }
         builder.prepare().await?
@@ -724,10 +726,10 @@ pub async fn execute(
 
     if let Some(signer) = &signer_opt {
         if signer_is_owner {
-            if args.approve_hash {
+            if args.collect.approve_hash {
                 // When approving on-chain, the owner authorizes via approveHash (v = 1)
                 // unless they also want an offchain signature in --bundle.
-                if args.bundle.is_some() && !offchain_sigs.contains_key(&signer.address()) {
+                if args.collect.bundle.is_some() && !offchain_sigs.contains_key(&signer.address()) {
                     let sig_tx = prepared.sign(signer).await?;
                     if let Some(sig) = sig_tx.signature() {
                         signed.insert_signature(signer.address(), sig.clone())?;
@@ -753,7 +755,7 @@ pub async fn execute(
     }
 
     let have = signed.signatures.len();
-    if !signer_is_owner && (args.approve_hash || args.sign_only || have < need) {
+    if !signer_is_owner && (args.collect.approve_hash || args.collect.sign_only || have < need) {
         let bad_signer = signer_opt.as_ref().map_or(from, |s| s.address());
         return Err(Error::NotOwner {
             signer: bad_signer,
@@ -780,8 +782,8 @@ pub async fn execute(
 
     let fees = outer_fees(
         &provider,
-        args.max_fee_per_gas,
-        args.max_priority_fee_per_gas,
+        args.fees.max_fee_per_gas,
+        args.fees.max_priority_fee_per_gas,
     )
     .await?;
 
@@ -810,7 +812,11 @@ pub async fn execute(
             gas_used: result.gas_used,
             revert_reason: result.revert_reason.clone(),
             safe_tx_hash: Some(prepared.safe_tx_hash),
-            traces: args.trace.then(|| result.format_traces()).flatten(),
+            traces: args
+                .simulate
+                .trace
+                .then(|| result.format_traces())
+                .flatten(),
             signatures_collected: Some(have),
             threshold: Some(need),
             ready_to_execute: Some(have >= need),
@@ -818,7 +824,7 @@ pub async fn execute(
         if !result.success {
             // A host only sees the error: show it the traces too.
             console.emit_or_line(&report);
-        } else if args.simulate_only {
+        } else if args.simulate.simulate_only {
             console.emit(&report);
         } else {
             console.line(report.human());
@@ -832,7 +838,7 @@ pub async fn execute(
                     .unwrap_or_else(|| "unknown reason".to_string()),
             });
         }
-        if args.simulate_only {
+        if args.simulate.simulate_only {
             return Ok(SendOutcome::Simulated {
                 safe_tx_hash: prepared.safe_tx_hash,
                 gas_used: result.gas_used,
@@ -843,12 +849,12 @@ pub async fn execute(
 
     // 5. Smart Action Branching
     // Branch A: --approve-hash
-    if args.approve_hash {
+    if args.collect.approve_hash {
         let signer = signer_opt.as_ref().ok_or_else(|| {
             SendError::other("--approve-hash requires an owner wallet (--private-key, --keystore, or --interactive)")
         })?;
         let approver = signer.address();
-        let bundle_path_str = if let Some(bundle_path) = &args.bundle {
+        let bundle_path_str = if let Some(bundle_path) = &args.collect.bundle {
             bundle.merge(&prepared, &offchain_sigs, &[])?;
             bundle.save(bundle_path)?;
             Some(bundle_path.display().to_string())
@@ -858,7 +864,7 @@ pub async fn execute(
 
         let (approve_nonce, approve_gas) = if args.skip_simulation {
             let nonce = provider.get_transaction_count(approver).await?;
-            let gas = if let Some(g) = args.gas_limit {
+            let gas = if let Some(g) = args.fees.gas_limit {
                 g
             } else {
                 let tx = <AnyNetwork as Network>::TransactionRequest::default()
@@ -870,7 +876,8 @@ pub async fn execute(
             };
             (nonce, gas)
         } else {
-            let session = fork_session(provider.clone(), chain_id, &args.sim, false).await?;
+            let session =
+                fork_session(provider.clone(), chain_id, &args.simulate.sim, false).await?;
             let sim = simulate_approve_hash(
                 &session,
                 chain_id,
@@ -878,7 +885,7 @@ pub async fn execute(
                 prepared.safe_tx_hash,
                 approver,
                 fees,
-                args.gas_limit,
+                args.fees.gas_limit,
             )?;
             if !sim.result.success {
                 return Err(SendError::ApproveHashSimulationFailed {
@@ -888,7 +895,7 @@ pub async fn execute(
                         .unwrap_or_else(|| "unknown reason".to_string()),
                 });
             }
-            let gas = if args.gas_limit.is_some() {
+            let gas = if args.fees.gas_limit.is_some() {
                 sim.gas_limit
             } else {
                 let tx = <AnyNetwork as Network>::TransactionRequest::default()
@@ -929,19 +936,19 @@ pub async fn execute(
 
         broadcast(&provider, outer.tx_hash, &outer.raw, console).await?;
         console.line(format!("Sent {}, waiting for receipt...", outer.tx_hash));
-        let receipt = receipt(&provider, outer.tx_hash, args.timeout).await?;
+        let receipt = receipt(&provider, outer.tx_hash, args.fees.timeout).await?;
 
         let success = receipt.status();
         console.emit(&ApproveHashOutput {
-                tx_hash: outer.tx_hash,
-                success,
-                gas_used: receipt.gas_used,
-                safe_tx_hash: prepared.safe_tx_hash,
-                safe_nonce: prepared.params.nonce,
-                approver,
-                signatures_collected: have,
-                threshold: need,
-                bundle_path: bundle_path_str,
+            tx_hash: outer.tx_hash,
+            success,
+            gas_used: receipt.gas_used,
+            safe_tx_hash: prepared.safe_tx_hash,
+            safe_nonce: prepared.params.nonce,
+            approver,
+            signatures_collected: have,
+            threshold: need,
+            bundle_path: bundle_path_str,
         });
         if !success {
             return Err(SendError::ApproveHashReverted {
@@ -957,8 +964,8 @@ pub async fn execute(
     }
 
     // Branch B: Offchain signature collection (`have < need` or `--sign-only`)
-    if have < need || args.sign_only {
-        let Some(bundle_path) = &args.bundle else {
+    if have < need || args.collect.sign_only {
+        let Some(bundle_path) = &args.collect.bundle else {
             return Err(SendError::BelowThreshold { have, need });
         };
         bundle.merge(&prepared, &offchain_sigs, &[])?;
@@ -971,13 +978,13 @@ pub async fn execute(
             .filter(|o| !signed.signatures.contains_key(o))
             .collect();
         console.emit(&BundleSavedOutput {
-                safe_tx_hash: prepared.safe_tx_hash,
-                safe_nonce: prepared.params.nonce,
-                signatures_collected: have,
-                threshold: need,
-                signers,
-                remaining_owners,
-                bundle_path: bundle_path.display().to_string(),
+            safe_tx_hash: prepared.safe_tx_hash,
+            safe_nonce: prepared.params.nonce,
+            signatures_collected: have,
+            threshold: need,
+            signers,
+            remaining_owners,
+            bundle_path: bundle_path.display().to_string(),
         });
         return Ok(SendOutcome::Signed {
             safe_tx_hash: prepared.safe_tx_hash,
@@ -989,8 +996,8 @@ pub async fn execute(
     }
 
     // Branch C: Threshold met (`have >= need`) -> Execute `execTransaction`
-    if !args.no_submit {
-        if let Some(bundle_path) = &args.bundle {
+    if !args.raw.no_submit {
+        if let Some(bundle_path) = &args.collect.bundle {
             if !bundle_existed || bundle.tx.is_some() {
                 bundle.merge(&prepared, &offchain_sigs, &[])?;
                 bundle.save(bundle_path)?;
@@ -1008,7 +1015,7 @@ pub async fn execute(
         .collect();
 
     let (eoa_nonce, gas_limit) = if let Some((nonce, simulated)) = sim_info {
-        let gas_limit = if args.gas_limit.is_some() {
+        let gas_limit = if args.fees.gas_limit.is_some() {
             simulated
         } else {
             let est = provider
@@ -1020,7 +1027,7 @@ pub async fn execute(
         (nonce, gas_limit)
     } else {
         let nonce = provider.get_transaction_count(from).await?;
-        let gas_limit = if let Some(gas) = args.gas_limit {
+        let gas_limit = if let Some(gas) = args.fees.gas_limit {
             gas
         } else {
             estimate_outer_gas(&provider, &exec_signed, from).await?
@@ -1046,7 +1053,7 @@ pub async fn execute(
         }
     }
 
-    if args.no_submit {
+    if args.raw.no_submit {
         if raw_out.as_deref() == Some("-") {
             console.emit_human(&document);
         } else {
@@ -1075,7 +1082,7 @@ pub async fn execute(
 
     broadcast(&provider, outer.tx_hash, &outer.raw, console).await?;
     console.line(format!("Sent {}, waiting for receipt...", outer.tx_hash));
-    let receipt = receipt(&provider, outer.tx_hash, args.timeout).await?;
+    let receipt = receipt(&provider, outer.tx_hash, args.fees.timeout).await?;
     let outcome = safe_outcome_for_receipt(&receipt, safe_address, prepared.safe_tx_hash)?;
 
     console.emit(&ExecutionOutput {
@@ -1110,7 +1117,7 @@ async fn run_rotating(
     console: &Console,
 ) -> Result<SendOutcome> {
     let mut bundle_safe = None;
-    let calls = if let Some(bundle_path) = &args.bundle {
+    let calls = if let Some(bundle_path) = &args.collect.bundle {
         if bundle_path.exists() {
             let loaded = BundleFile::load(bundle_path)?;
             bundle_safe = loaded.tx.as_ref().map(|tx| tx.safe);
@@ -1157,20 +1164,20 @@ async fn run_rotating(
         sweep: &args.sweep,
         calls,
         multi_send_call_only: args.multi_send_call_only,
-        sim: &args.sim,
-        gas_limit: args.gas_limit,
-        max_fee_per_gas: args.max_fee_per_gas,
-        max_priority_fee_per_gas: args.max_priority_fee_per_gas,
-        timeout: args.timeout,
-        trace: args.trace,
-        simulate_only: args.simulate_only,
-        raw_out: args.raw_out.clone(),
-        no_submit: args.no_submit,
+        sim: &args.simulate.sim,
+        gas_limit: args.fees.gas_limit,
+        max_fee_per_gas: args.fees.max_fee_per_gas,
+        max_priority_fee_per_gas: args.fees.max_priority_fee_per_gas,
+        timeout: args.fees.timeout,
+        trace: args.simulate.trace,
+        simulate_only: args.simulate.simulate_only,
+        raw_out: args.raw.raw_out.clone(),
+        no_submit: args.raw.no_submit,
         no_confirm: args.no_confirm,
-        bundle: args.bundle.clone(),
-        merge_bundle: args.merge_bundle.clone(),
-        approve_hash: args.approve_hash,
-        sign_only: args.sign_only,
+        bundle: args.collect.bundle.clone(),
+        merge_bundle: args.collect.merge_bundle.clone(),
+        approve_hash: args.collect.approve_hash,
+        sign_only: args.collect.sign_only,
         console,
     })
     .await
@@ -1191,7 +1198,7 @@ async fn simulate(
     from: Address,
     fees: Eip1559Estimation,
 ) -> Result<ExecSimulation> {
-    let session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
+    let session = fork_session(provider.clone(), chain_id, &args.simulate.sim, true).await?;
     Ok(simulate_exec_with_threshold(
         &session,
         signed,
@@ -1199,7 +1206,7 @@ async fn simulate(
         threshold,
         from,
         fees,
-        args.gas_limit,
+        args.fees.gas_limit,
     )?)
 }
 

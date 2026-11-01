@@ -7,9 +7,9 @@ use safe_rs::SimTx;
 use crate::cli::CallArgs;
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::{fork_session, http_provider};
+use crate::console::Console;
 use crate::output::CallOutput;
 use crate::sig_parser::encode_function_call;
-use crate::console::Console;
 use crate::signers::create_signer;
 
 pub async fn run(args: CallArgs, console: &Console) -> Result<()> {

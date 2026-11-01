@@ -47,7 +47,7 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
     // planning again: the planned calls depend on the chain state they were
     // planned against.
     if changes.is_empty() {
-        if args.bundle.is_none() {
+        if args.collect.bundle.is_none() {
             bail!(
                 "nothing to change: pass --add-owner, --remove-owner, --swap-owner, --threshold, \
                  --enable-module, --disable-module, --guard, --fallback-handler or \
@@ -142,14 +142,7 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
         #[cfg(feature = "hd-wallet")]
         home: None,
     };
-    send::execute(
-        target,
-        send_opts(args),
-        plan.calls(),
-        hooks,
-        console,
-    )
-    .await?;
+    send::execute(target, send_opts(args), plan.calls(), hooks, console).await?;
     Ok(())
 }
 
@@ -190,23 +183,14 @@ fn describe(plan: &ConfigPlan) -> String {
 /// MultiSendCallOnly, fail-closed (`safeTxGas = 0`) and without rotation.
 fn send_opts(args: ConfigArgs) -> SendOpts {
     SendOpts {
-        bundle: args.bundle,
-        merge_bundle: args.merge_bundle,
-        approve_hash: args.approve_hash,
-        sign_only: args.sign_only,
+        collect: args.collect,
         call_only: true,
-        simulate_only: args.simulate_only,
+        simulate: args.simulate,
         skip_simulation: args.skip_simulation,
         safe_tx_gas: None,
         nonce: args.nonce,
-        gas_limit: args.gas_limit,
-        max_fee_per_gas: args.max_fee_per_gas,
-        max_priority_fee_per_gas: args.max_priority_fee_per_gas,
-        raw_out: args.raw_out,
-        no_submit: args.no_submit,
-        timeout: args.timeout,
-        trace: args.trace,
-        sim: args.sim,
+        fees: args.fees,
+        raw: args.raw,
         multi_send: None,
         multi_send_call_only: args.multi_send_call_only,
         no_confirm: args.no_confirm,

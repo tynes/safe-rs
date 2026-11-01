@@ -34,7 +34,9 @@ use crate::output::Report;
 pub use crate::output::{OwnerKey, SweptEth};
 use crate::paths;
 use crate::prompt::{Prompt, TerminalPrompt};
-use crate::signers::{check_new_password, new_password, open_keys, open_state, open_wallet, wallet_id};
+use crate::signers::{
+    check_new_password, new_password, open_keys, open_state, open_wallet, wallet_id,
+};
 
 type Result<T, E = WalletError> = std::result::Result<T, E>;
 
@@ -828,7 +830,11 @@ pub async fn sweep_wallet(ctx: &WalletContext, opts: WalletSweepOpts) -> Result<
 /// `safe wallet`: asks `ctx.prompt` for a phrase and a new password where
 /// needed, calls the functions above, and prints the outcome as `safe` does
 /// (JSON with `json`).
-pub async fn run(command: WalletCommand, ctx: &WalletContext, json: bool) -> color_eyre::Result<()> {
+pub async fn run(
+    command: WalletCommand,
+    ctx: &WalletContext,
+    json: bool,
+) -> color_eyre::Result<()> {
     let reports = Arc::new(Reports::default());
     let console = ctx.console().with_reports(reports.clone());
     let result = run_in(command, ctx, &console).await;
@@ -951,7 +957,10 @@ mod tests {
         assert!(imported.warnings[0].contains("--start-index"));
         assert!(dir.path().join("wallets/demo.json").exists());
         let again = import_wallet(&ctx, "demo", PHRASE, "pw", None).unwrap_err();
-        assert!(matches!(again, WalletError::AlreadyExists { .. }), "{again}");
+        assert!(
+            matches!(again, WalletError::AlreadyExists { .. }),
+            "{again}"
+        );
 
         let listed = list_wallets(&ctx).unwrap();
         assert_eq!(listed.len(), 1);
@@ -974,11 +983,16 @@ mod tests {
             password_file: None,
             password: Some("nope".to_string()),
         };
-        let refused = wallet_address(&ctx, &hd, &wrong, Some(1)).await.unwrap_err();
+        let refused = wallet_address(&ctx, &hd, &wrong, Some(1))
+            .await
+            .unwrap_err();
         assert!(matches!(refused, WalletError::WrongPassword), "{refused}");
 
         let status = wallet_status(&ctx, &hd).await.unwrap();
-        assert_eq!(status.next_index, 3, "--start-index 3 leaves 1 and 2 unused");
+        assert_eq!(
+            status.next_index, 3,
+            "--start-index 3 leaves 1 and 2 unused"
+        );
 
         let missing = HdArgs {
             hd_wallet: Some("missing".to_string()),

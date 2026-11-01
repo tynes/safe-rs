@@ -9,8 +9,8 @@ use crate::bundle::BundleFile;
 use crate::cli::ApprovalsArgs;
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::http_provider;
-use crate::output::SafeApprovalsOutput;
 use crate::console::Console;
+use crate::output::SafeApprovalsOutput;
 use crate::signers::create_signer;
 
 pub async fn run(args: ApprovalsArgs, console: &Console) -> Result<()> {

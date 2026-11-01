@@ -8,8 +8,7 @@ use alloy::primitives::{Address, TxHash};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use safe_rs::rotation::{
-    binding_key, CreationParams, Keyring, OwnerRef, Reserved, RotatingSafe,
-    SETUP_LOOKAHEAD,
+    binding_key, CreationParams, Keyring, OwnerRef, Reserved, RotatingSafe, SETUP_LOOKAHEAD,
 };
 use safe_rs::{is_safe_with, sign_outer_tx};
 use serde::Serialize;
@@ -274,11 +273,16 @@ pub(super) async fn create(
     // The owner, and whether it is a new key to reserve once confirmed.
     let (owner, setup, fresh) = if let Some(same_as) = &opts.same_as {
         let key = same_as.key();
-        let params = ring.state().binding(&key)?.creation.clone().ok_or_else(|| {
-            CreateError::InvalidSetup(format!(
-                "{key} was not created by this wallet, so its creation parameters are unknown"
-            ))
-        })?;
+        let params = ring
+            .state()
+            .binding(&key)?
+            .creation
+            .clone()
+            .ok_or_else(|| {
+                CreateError::InvalidSetup(format!(
+                    "{key} was not created by this wallet, so its creation parameters are unknown"
+                ))
+            })?;
         let owner = Reserved {
             index: params.owner_index,
             address: ring.address(params.owner_index).await?,
@@ -352,7 +356,8 @@ pub(super) async fn create(
     let tx_hash = if already_deployed {
         None
     } else {
-        let params = deployment(&provider, chain_id, payer, &setup, initializer, &opts.fees).await?;
+        let params =
+            deployment(&provider, chain_id, payer, &setup, initializer, &opts.fees).await?;
         let outer = match &explicit_payer {
             Some(key) => sign_outer_tx(key, params).await?,
             None => ring.sign_outer_tx(0, ring.id(), params).await?,

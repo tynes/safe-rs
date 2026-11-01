@@ -12,9 +12,10 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use clap::{CommandFactory, Parser, Subcommand};
-use safe_rs_cli::args::{SendOpts, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT};
+use safe_rs_cli::args::{FeeArgs, SendOpts, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT};
+use safe_rs_cli::prompt::NoPrompt;
 use safe_rs_cli::safe_rs::{Address, Bytes, Call, U256};
-use safe_rs_cli::{OptionsError, Output, SendContext, SendError};
+use safe_rs_cli::{OptionsError, SendContext, SendError};
 
 #[derive(Parser)]
 struct Host {
@@ -69,7 +70,7 @@ fn the_host_keeps_its_own_rpc_url_and_private_key() {
 
     let (host, _, send) = parse(&["approve", "set"]).unwrap();
     assert_eq!(host.rpc_url, None);
-    assert_eq!(send.timeout, DEFAULT_TIMEOUT);
+    assert_eq!(send.fees.timeout, DEFAULT_TIMEOUT);
 
     // Before and after the subcommand: either way the flag is the host's.
     for args in [
@@ -94,8 +95,8 @@ fn the_host_keeps_its_own_rpc_url_and_private_key() {
     .unwrap();
     assert_eq!(host.private_key.as_deref(), Some("0x01"));
     assert_eq!(amount, Some(U256::from(5)));
-    assert!(send.sign_only);
-    assert_eq!(send.gas_limit, Some(100_000));
+    assert!(send.collect.sign_only);
+    assert_eq!(send.fees.gas_limit, Some(100_000));
 }
 
 #[test]
@@ -117,9 +118,12 @@ fn the_conflicts_survive_flattening() {
 fn defaults_match_the_flag_defaults() {
     let defaults = SendOpts::default();
     let (_, _, parsed) = parse(&["approve", "set"]).unwrap();
-    assert_eq!(defaults.timeout, parsed.timeout);
-    assert_eq!(defaults.sim.block_time, parsed.sim.block_time);
-    assert_eq!(defaults.sim.block_time, DEFAULT_BLOCK_TIME);
+    assert_eq!(defaults.fees.timeout, parsed.fees.timeout);
+    assert_eq!(
+        defaults.simulate.sim.block_time,
+        parsed.simulate.sim.block_time
+    );
+    assert_eq!(defaults.simulate.sim.block_time, DEFAULT_BLOCK_TIME);
     assert!(defaults.validate().is_ok());
 }
 
@@ -141,7 +145,7 @@ fn context() -> SendContext {
         "http://127.0.0.1:9".parse().unwrap(),
         Address::repeat_byte(0x11),
     )
-    .with_output(Output::Quiet)
+    .with_prompt(NoPrompt)
 }
 
 fn call() -> Vec<Call> {
@@ -159,7 +163,7 @@ async fn options_built_in_code_are_checked_like_flags() {
     )]
     let mut cases: Vec<OptionsCase> = vec![(
         |o| {
-            o.simulate_only = true;
+            o.simulate.simulate_only = true;
             o.skip_simulation = true;
         },
         OptionsError::Conflict {
@@ -259,7 +263,7 @@ fn eoa_context() -> SendContext {
     // that runs before the chain is reached.
     SendContext::eoa("http://127.0.0.1:9".parse().unwrap())
         .with_signer(safe_rs_cli::PrivateKeySigner::random())
-        .with_output(Output::Quiet)
+        .with_prompt(NoPrompt)
 }
 
 #[tokio::test]
@@ -270,11 +274,11 @@ async fn an_eoa_send_refuses_the_options_only_a_safe_has() {
         allow(unused_mut, reason = "the rotation cases need hd-wallet")
     )]
     let mut cases: Vec<Case> = vec![
-        (|o| o.bundle = Some("tx.json".into()), "--bundle"),
-        (|o| o.sign_only = true, "--sign-only"),
-        (|o| o.approve_hash = true, "--approve-hash"),
+        (|o| o.collect.bundle = Some("tx.json".into()), "--bundle"),
+        (|o| o.collect.sign_only = true, "--sign-only"),
+        (|o| o.collect.approve_hash = true, "--approve-hash"),
         (|o| o.nonce = Some(U256::from(1)), "--nonce"),
-        (|o| o.no_submit = true, "--no-submit"),
+        (|o| o.raw.no_submit = true, "--no-submit"),
         (
             |o| o.payer.payer_private_key = Some("0x01".into()),
             "--payer-private-key",
@@ -305,7 +309,10 @@ async fn an_eoa_send_refuses_the_options_only_a_safe_has() {
 #[tokio::test]
 async fn an_eoa_send_takes_a_gas_limit_for_one_call_only() {
     let opts = SendOpts {
-        gas_limit: Some(100_000),
+        fees: FeeArgs {
+            gas_limit: Some(100_000),
+            ..FeeArgs::default()
+        },
         ..SendOpts::default()
     };
     let two = vec![call().remove(0), call().remove(0)];

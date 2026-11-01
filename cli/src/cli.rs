@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
 use alloy_dyn_abi::DynSolType;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use safe_rs::{ChainAddresses, SpecId};
 use url::Url;
 
@@ -251,30 +251,23 @@ pub const DEFAULT_BLOCK_TIME: u64 = 12;
 /// a CLI that embeds these flags resolves those itself. Flatten it into a
 /// command with `#[command(flatten)]`, or build it in code from
 /// [`Default`], which matches the flag defaults.
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone, Debug, Default)]
+#[command(
+    group(ArgGroup::new("send_approve_or_simulate").args(["approve_hash", "simulate_only"])),
+    group(ArgGroup::new("send_sign_or_simulate").args(["sign_only", "simulate_only"])),
+    group(ArgGroup::new("send_raw_or_simulate").args(["raw_out", "simulate_only"])),
+    group(ArgGroup::new("send_no_submit_or_simulate").args(["no_submit", "simulate_only"])),
+)]
 pub struct SendOpts {
-    /// Path to bundle JSON file (reads calls and existing signatures; writes updated bundle when collecting offchain signatures)
-    #[arg(long)]
-    pub bundle: Option<PathBuf>,
+    #[command(flatten)]
+    pub collect: CollectArgs,
 
-    /// Merge offchain signatures from additional bundle file(s) into this run
-    #[arg(long = "merge-bundle", value_name = "PATH")]
-    pub merge_bundle: Vec<PathBuf>,
-
-    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
-    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
-    pub approve_hash: bool,
-
-    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
-    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
-    pub sign_only: bool,
     /// Use MultiSendCallOnly (safer, no delegatecall)
     #[arg(long)]
     pub call_only: bool,
 
-    /// Only simulate, don't sign or broadcast the outer transaction
-    #[arg(long)]
-    pub simulate_only: bool,
+    #[command(flatten)]
+    pub simulate: SimulateArgs,
 
     /// Skip simulation and execute directly (use with caution)
     #[arg(long, conflicts_with = "simulate_only")]
@@ -289,40 +282,11 @@ pub struct SendOpts {
     #[arg(long)]
     pub nonce: Option<U256>,
 
-    /// Gas limit of the outer transaction (default: simulated gas + 20%)
-    #[arg(long)]
-    pub gas_limit: Option<u64>,
-
-    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
-    /// ("30gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_fee_per_gas: Option<u128>,
-
-    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
-    /// unit ("1gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_priority_fee_per_gas: Option<u128>,
-
-    /// Write the signed transaction as JSON to PATH ("-" for stdout) before it
-    /// is broadcast
-    #[arg(long, value_name = "PATH", conflicts_with = "simulate_only")]
-    pub raw_out: Option<String>,
-
-    /// Sign the transaction but do not broadcast it (writes it to --raw-out,
-    /// stdout by default)
-    #[arg(long, conflicts_with_all = ["simulate_only"])]
-    pub no_submit: bool,
-
-    /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
-    pub timeout: u64,
-
-    /// Print call traces of the simulated transaction
-    #[arg(long)]
-    pub trace: bool,
+    #[command(flatten)]
+    pub fees: FeeArgs,
 
     #[command(flatten)]
-    pub sim: SimArgs,
+    pub raw: RawTxArgs,
 
     /// MultiSend address (default: canonical for the Safe's version)
     #[arg(long)]
@@ -357,39 +321,59 @@ pub struct SendOpts {
     pub payer: PayerArgs,
 }
 
-impl Default for SendOpts {
-    fn default() -> Self {
-        Self {
-            bundle: None,
-            merge_bundle: Vec::new(),
-            approve_hash: false,
-            sign_only: false,
-            call_only: false,
-            simulate_only: false,
-            skip_simulation: false,
-            safe_tx_gas: None,
-            nonce: None,
-            gas_limit: None,
-            max_fee_per_gas: None,
-            max_priority_fee_per_gas: None,
-            raw_out: None,
-            no_submit: false,
-            timeout: DEFAULT_TIMEOUT,
-            trace: false,
-            sim: SimArgs::default(),
-            multi_send: None,
-            multi_send_call_only: None,
-            no_confirm: false,
-            #[cfg(feature = "hd-wallet")]
-            rotate: false,
-            #[cfg(feature = "hd-wallet")]
-            hd: HdArgs::default(),
-            #[cfg(feature = "hd-wallet")]
-            sweep: SweepArgs::default(),
-            password: PasswordArgs::default(),
-            payer: PayerArgs::default(),
-        }
-    }
+/// How a Safe transaction collects its signatures: `--bundle`,
+/// `--merge-bundle`, `--approve-hash` and `--sign-only`.
+///
+/// `--approve-hash` and `--sign-only` conflict with `--simulate-only` of
+/// [`SimulateArgs`]; a command that flattens both declares that itself, as
+/// [`SendOpts`] does, so this group also flattens on its own.
+#[derive(Args, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CollectArgs {
+    /// Path to bundle JSON file (reads calls and existing signatures; writes updated bundle when collecting offchain signatures)
+    #[arg(long)]
+    pub bundle: Option<PathBuf>,
+
+    /// Merge offchain signatures from additional bundle file(s) into this run
+    #[arg(long = "merge-bundle", value_name = "PATH")]
+    pub merge_bundle: Vec<PathBuf>,
+
+    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
+    #[arg(long, conflicts_with = "sign_only")]
+    pub approve_hash: bool,
+
+    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
+    #[arg(long)]
+    pub sign_only: bool,
+}
+
+/// Simulation of the outer transaction: `--simulate-only`, `--trace` and the
+/// [`SimArgs`] (`--block`, `--evm-spec`, `--block-time`).
+#[derive(Args, Clone, Debug, Default)]
+pub struct SimulateArgs {
+    /// Only simulate, don't sign or broadcast the outer transaction
+    #[arg(long)]
+    pub simulate_only: bool,
+
+    /// Print call traces of the simulated transaction
+    #[arg(long)]
+    pub trace: bool,
+
+    #[command(flatten)]
+    pub sim: SimArgs,
+}
+
+/// The signed transaction itself: `--raw-out` and `--no-submit`.
+#[derive(Args, Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawTxArgs {
+    /// Write the signed transaction as JSON to PATH ("-" for stdout) before it
+    /// is broadcast
+    #[arg(long, value_name = "PATH")]
+    pub raw_out: Option<String>,
+
+    /// Sign the transaction but do not broadcast it (writes it to --raw-out,
+    /// stdout by default)
+    #[arg(long)]
+    pub no_submit: bool,
 }
 
 impl SendOpts {
@@ -398,32 +382,32 @@ impl SendOpts {
     pub fn validate(&self) -> Result<(), OptionsError> {
         let conflicts = [
             (
-                self.approve_hash && self.sign_only,
+                self.collect.approve_hash && self.collect.sign_only,
                 "--approve-hash",
                 "--sign-only",
             ),
             (
-                self.approve_hash && self.simulate_only,
+                self.collect.approve_hash && self.simulate.simulate_only,
                 "--approve-hash",
                 "--simulate-only",
             ),
             (
-                self.sign_only && self.simulate_only,
+                self.collect.sign_only && self.simulate.simulate_only,
                 "--sign-only",
                 "--simulate-only",
             ),
             (
-                self.skip_simulation && self.simulate_only,
+                self.skip_simulation && self.simulate.simulate_only,
                 "--skip-simulation",
                 "--simulate-only",
             ),
             (
-                self.raw_out.is_some() && self.simulate_only,
+                self.raw.raw_out.is_some() && self.simulate.simulate_only,
                 "--raw-out",
                 "--simulate-only",
             ),
             (
-                self.no_submit && self.simulate_only,
+                self.raw.no_submit && self.simulate.simulate_only,
                 "--no-submit",
                 "--simulate-only",
             ),
@@ -504,7 +488,7 @@ impl SendOpts {
         if let Some(flag) = self.safe_only_flag() {
             return Err(OptionsError::SafeOnly { flag });
         }
-        if self.gas_limit.is_some() && calls > 1 {
+        if self.fees.gas_limit.is_some() && calls > 1 {
             return Err(OptionsError::GasLimitForBatch { calls });
         }
         Ok(())
@@ -513,15 +497,15 @@ impl SendOpts {
     /// The first option given that only a send through a Safe uses.
     fn safe_only_flag(&self) -> Option<&'static str> {
         let safe_only = [
-            (self.bundle.is_some(), "--bundle"),
-            (!self.merge_bundle.is_empty(), "--merge-bundle"),
-            (self.approve_hash, "--approve-hash"),
-            (self.sign_only, "--sign-only"),
+            (self.collect.bundle.is_some(), "--bundle"),
+            (!self.collect.merge_bundle.is_empty(), "--merge-bundle"),
+            (self.collect.approve_hash, "--approve-hash"),
+            (self.collect.sign_only, "--sign-only"),
             (self.call_only, "--call-only"),
             (self.safe_tx_gas.is_some(), "--safe-tx-gas"),
             (self.nonce.is_some(), "--nonce"),
-            (self.raw_out.is_some(), "--raw-out"),
-            (self.no_submit, "--no-submit"),
+            (self.raw.raw_out.is_some(), "--raw-out"),
+            (self.raw.no_submit, "--no-submit"),
             (self.multi_send.is_some(), "--multi-send"),
             (
                 self.multi_send_call_only.is_some(),
@@ -576,6 +560,16 @@ pub fn parse_owner_swap(s: &str) -> Result<(Address, Address), String> {
 }
 
 #[derive(Parser, Clone)]
+#[command(
+    mut_arg("bundle", |a| a.help(
+        "Path to bundle JSON file. Saves the planned transaction and signatures \
+         when the threshold is not met; co-signers pass it without change flags",
+    )),
+    group(ArgGroup::new("config_approve_or_simulate").args(["approve_hash", "simulate_only"])),
+    group(ArgGroup::new("config_sign_or_simulate").args(["sign_only", "simulate_only"])),
+    group(ArgGroup::new("config_raw_or_simulate").args(["raw_out", "simulate_only"])),
+    group(ArgGroup::new("config_no_submit_or_simulate").args(["no_submit", "simulate_only"])),
+)]
 pub struct ConfigArgs {
     #[command(flatten)]
     pub safe: SafeArgs,
@@ -627,26 +621,11 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub allow_unchecked_guard: bool,
 
-    /// Path to bundle JSON file. Saves the planned transaction and signatures
-    /// when the threshold is not met; co-signers pass it without change flags
-    #[arg(long)]
-    pub bundle: Option<PathBuf>,
+    #[command(flatten)]
+    pub collect: CollectArgs,
 
-    /// Merge offchain signatures from additional bundle file(s) into this run
-    #[arg(long = "merge-bundle", value_name = "PATH")]
-    pub merge_bundle: Vec<PathBuf>,
-
-    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
-    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
-    pub approve_hash: bool,
-
-    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
-    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
-    pub sign_only: bool,
-
-    /// Only simulate, don't sign or broadcast the outer transaction
-    #[arg(long)]
-    pub simulate_only: bool,
+    #[command(flatten)]
+    pub simulate: SimulateArgs,
 
     /// Skip simulation, and with it the check of the resulting configuration
     /// (use with caution)
@@ -657,40 +636,11 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub nonce: Option<U256>,
 
-    /// Gas limit of the outer transaction (default: simulated gas + 20%)
-    #[arg(long)]
-    pub gas_limit: Option<u64>,
-
-    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
-    /// ("30gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_fee_per_gas: Option<u128>,
-
-    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
-    /// unit ("1gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_priority_fee_per_gas: Option<u128>,
-
-    /// Write the signed transaction as JSON to PATH ("-" for stdout) before it
-    /// is broadcast
-    #[arg(long, value_name = "PATH", conflicts_with = "simulate_only")]
-    pub raw_out: Option<String>,
-
-    /// Sign the transaction but do not broadcast it (writes it to --raw-out,
-    /// stdout by default)
-    #[arg(long, conflicts_with_all = ["simulate_only"])]
-    pub no_submit: bool,
-
-    /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
-    pub timeout: u64,
-
-    /// Print call traces of the simulated transaction
-    #[arg(long)]
-    pub trace: bool,
+    #[command(flatten)]
+    pub fees: FeeArgs,
 
     #[command(flatten)]
-    pub sim: SimArgs,
+    pub raw: RawTxArgs,
 
     /// MultiSendCallOnly address, used when there are several changes
     /// (default: canonical for the Safe's version)
@@ -809,6 +759,17 @@ pub struct ApprovalsArgs {
 
 #[cfg(feature = "hd-wallet")]
 #[derive(Parser, Clone)]
+#[command(
+    mut_arg("bundle", |a| a.help(
+        "Path to bundle JSON file (reads existing signatures/rotations; writes \
+         updated bundle when collecting offchain signatures)",
+    )),
+    mut_arg("simulate_only", |a| a.help(
+        "Only simulate, don't sign off or broadcast the transaction",
+    )),
+    group(ArgGroup::new("rotate_approve_or_simulate").args(["approve_hash", "simulate_only"])),
+    group(ArgGroup::new("rotate_sign_or_simulate").args(["sign_only", "simulate_only"])),
+)]
 pub struct RotateArgs {
     /// Safe contract address (default: the wallet's sole recorded Safe on this
     /// chain, or the legacy signer's default Safe with --from-*)
@@ -847,54 +808,18 @@ pub struct RotateArgs {
     #[command(flatten)]
     pub payer: PayerArgs,
 
-    /// Only simulate, don't sign off or broadcast the transaction
-    #[arg(long)]
-    pub simulate_only: bool,
-
-    /// Gas limit of the outer transaction (default: simulated gas + 20%)
-    #[arg(long)]
-    pub gas_limit: Option<u64>,
-
-    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
-    /// ("30gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_fee_per_gas: Option<u128>,
-
-    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
-    /// unit ("1gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_priority_fee_per_gas: Option<u128>,
-
-    /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
-    pub timeout: u64,
-
-    /// Print call traces of the simulated transaction
-    #[arg(long)]
-    pub trace: bool,
+    #[command(flatten)]
+    pub simulate: SimulateArgs,
 
     #[command(flatten)]
-    pub sim: SimArgs,
+    pub fees: FeeArgs,
 
     /// MultiSendCallOnly address (default: canonical for the Safe's version)
     #[arg(long)]
     pub multi_send_call_only: Option<Address>,
 
-    /// Path to bundle JSON file (reads existing signatures/rotations; writes updated bundle when collecting offchain signatures)
-    #[arg(long)]
-    pub bundle: Option<PathBuf>,
-
-    /// Merge offchain signatures from additional bundle file(s) into this run
-    #[arg(long = "merge-bundle", value_name = "PATH")]
-    pub merge_bundle: Vec<PathBuf>,
-
-    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
-    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
-    pub approve_hash: bool,
-
-    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
-    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
-    pub sign_only: bool,
+    #[command(flatten)]
+    pub collect: CollectArgs,
 
     /// Skip confirmation prompt
     #[arg(long)]
@@ -1218,7 +1143,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(args.value, U256::from(1_500_000_000_000_000_000_u128));
-        assert_eq!(args.opts.max_fee_per_gas, Some(2_000_000_000));
+        assert_eq!(args.opts.fees.max_fee_per_gas, Some(2_000_000_000));
         #[cfg(feature = "hd-wallet")]
         assert!(send(&["--rotate", "--sweep-reserve", "0.01ether"]).is_ok());
     }
@@ -1238,7 +1163,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(call.safe.safe, None);
-        assert!(call.wallet.is_set());
+        assert!(call.signer.is_set());
     }
 
     fn parse_info(args: &[&str]) -> Result<InfoArgs, clap::Error> {
@@ -1285,7 +1210,7 @@ mod tests {
 
         let info = parse_info(&["--private-key", "0x01"]).unwrap();
         assert_eq!(info.safe, None);
-        assert!(info.wallet.is_set());
+        assert!(info.signer.is_set());
 
         assert!(parse_info(&["--safe", SAFE]).is_err());
     }
@@ -1528,6 +1453,40 @@ mod tests {
         assert!(!send_eoa(send(&[]).unwrap()));
     }
 
+    /// Each shared group flattens on its own into a host's command: none
+    /// names an argument from another group.
+    #[test]
+    fn each_flag_group_flattens_alone() {
+        fn check<T: Args>(name: &'static str) {
+            T::augment_args(clap::Command::new(name)).debug_assert();
+        }
+        check::<CollectArgs>("collect");
+        check::<SimulateArgs>("simulate");
+        check::<FeeArgs>("fees");
+        check::<RawTxArgs>("raw");
+        check::<SendOpts>("send");
+        check::<SafeSetupArgs>("setup");
+    }
+
+    #[test]
+    fn the_groups_keep_their_conflicts_with_simulate_only() {
+        for flag in [
+            &["--approve-hash"][..],
+            &["--sign-only"],
+            &["--no-submit"],
+            &["--raw-out", "-"],
+        ] {
+            let args = [flag, &["--simulate-only"][..]].concat();
+            let error = send(&args).err().expect("a conflict");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{flag:?}"
+            );
+        }
+        assert!(send(&["--approve-hash", "--sign-only"]).is_err());
+    }
+
     #[test]
     fn an_eoa_send_refuses_what_only_a_safe_does() {
         let opts = SendOpts::default();
@@ -1542,7 +1501,10 @@ mod tests {
         );
         assert_eq!(with_nonce.validate_safe(true), Ok(()));
         let gas = SendOpts {
-            gas_limit: Some(21_000),
+            fees: FeeArgs {
+                gas_limit: Some(21_000),
+                ..FeeArgs::default()
+            },
             ..SendOpts::default()
         };
         assert_eq!(gas.validate_eoa(1), Ok(()));
@@ -1552,9 +1514,15 @@ mod tests {
         );
         // The flag conflicts come first, for either kind of send.
         let conflicting = SendOpts {
-            simulate_only: true,
+            simulate: SimulateArgs {
+                simulate_only: true,
+                ..SimulateArgs::default()
+            },
             skip_simulation: true,
-            bundle: Some("tx.json".into()),
+            collect: CollectArgs {
+                bundle: Some("tx.json".into()),
+                ..CollectArgs::default()
+            },
             ..SendOpts::default()
         };
         let conflict = Err(OptionsError::Conflict {

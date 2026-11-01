@@ -23,17 +23,17 @@ use safe_rs::{
 use serde::Serialize;
 use url::Url;
 
+use crate::cli::{FeeArgs, SafeSetupArgs};
 #[cfg(feature = "hd-wallet")]
 use crate::cli::{HdArgs, SweepArgs};
 use crate::cli::{PasswordArgs, PayerArgs, ResolvedSetup, RpcArgs, SignerArgs};
-use crate::cli::{FeeArgs, SafeSetupArgs};
 use crate::commands::{http_provider, outer_fees, HttpProvider};
 use crate::console::{Console, Reports};
 pub use crate::error::CreateError;
 use crate::error::{BroadcastError, OptionsError};
 use crate::log::{Logger, NoopLogger};
-pub use crate::output::{OwnerKey, SweptEth};
 use crate::output::{CreateOutput, Report};
+pub use crate::output::{OwnerKey, SweptEth};
 use crate::prompt::{Prompt, TerminalPrompt};
 use crate::signers::{create_payer, create_signer};
 use crate::RunConfig;
@@ -111,7 +111,10 @@ impl CreateOpts {
                     (!setup.owners.is_empty(), "--owner"),
                     (setup.threshold != defaults.threshold, "--threshold"),
                     (setup.salt_nonce != defaults.salt_nonce, "--salt-nonce"),
-                    (setup.safe_version != defaults.safe_version, "--safe-version"),
+                    (
+                        setup.safe_version != defaults.safe_version,
+                        "--safe-version",
+                    ),
                     (setup.singleton.is_some(), "--singleton"),
                     (setup.factory.is_some(), "--factory"),
                     (setup.fallback_handler.is_some(), "--fallback-handler"),
@@ -498,7 +501,12 @@ pub(crate) async fn deployment(
             .map_err(|e| eyre!("cannot estimate the deployment ({from} may need ETH): {e}"))?;
         estimate + estimate / 5
     };
-    let estimated = outer_fees(provider, fees.max_fee_per_gas, fees.max_priority_fee_per_gas).await?;
+    let estimated = outer_fees(
+        provider,
+        fees.max_fee_per_gas,
+        fees.max_priority_fee_per_gas,
+    )
+    .await?;
     Ok(OuterTxParams {
         chain_id,
         from,
@@ -604,8 +612,8 @@ mod tests {
 
     #[test]
     fn defaults_match_the_flag_defaults() {
-        let parsed = CreateArgs::try_parse_from(["create", "--rpc-url", "http://localhost:8545"])
-            .unwrap();
+        let parsed =
+            CreateArgs::try_parse_from(["create", "--rpc-url", "http://localhost:8545"]).unwrap();
         assert_eq!(parsed.opts.setup, SafeSetupArgs::default());
         assert_eq!(parsed.opts.fees, FeeArgs::default());
         assert!(!parsed.opts.compute_only && !parsed.opts.no_confirm);
@@ -627,7 +635,10 @@ mod tests {
             threshold: 4,
             ..setup.clone()
         };
-        assert!(too_high.validate(first).unwrap_err().contains("must be 1-3"));
+        assert!(too_high
+            .validate(first)
+            .unwrap_err()
+            .contains("must be 1-3"));
         let zero = SafeSetupArgs {
             owners: vec![Address::ZERO],
             ..SafeSetupArgs::default()
@@ -706,9 +717,17 @@ mod tests {
             panic!("a plain create prints the plain document");
         };
         let json = serde_json::to_value(&doc).unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().collect();
+        keys.sort();
         assert_eq!(
-            json.as_object().unwrap().keys().collect::<Vec<_>>(),
-            ["already_deployed", "owners", "safe_address", "threshold", "tx_hash"]
+            keys,
+            [
+                "already_deployed",
+                "owners",
+                "safe_address",
+                "threshold",
+                "tx_hash"
+            ]
         );
         assert!(document(&CreateOutcome::Aborted { safe }).is_none());
     }

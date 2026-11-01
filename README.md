@@ -833,7 +833,8 @@ clap = { version = "4", features = ["derive", "env"] }
 use clap::Parser;
 use safe_rs_cli::args::SendOpts;
 use safe_rs_cli::safe_rs::{Address, Call, U256};
-use safe_rs_cli::{Output, PrivateKeySigner, SendContext, SendError, SendOutcome, Url};
+use safe_rs_cli::log::{ConsoleLogger, Level};
+use safe_rs_cli::{PrivateKeySigner, SendContext, SendError, SendOutcome, Url};
 
 #[derive(Parser)]
 struct Deposit {
@@ -856,7 +857,7 @@ async fn main() -> color_eyre::Result<()> {
     let calls: Vec<Call> = build_deposit_calls(deposit.amount);
     let ctx = SendContext::new(deposit.rpc_url, MY_APP_SAFE)
         .with_signer(deposit.private_key)
-        .with_output(Output::Quiet);
+        .with_logger(ConsoleLogger::new(Level::Info));
     match safe_rs_cli::send(ctx, calls, deposit.send).await {
         Ok(SendOutcome::Executed { tx_hash, .. }) => println!("Deposited in {tx_hash}"),
         Ok(SendOutcome::Aborted { .. }) => println!("Cancelled"),
@@ -893,8 +894,8 @@ The enum derives `Serialize` (tagged by `outcome`), so it can go into your own J
 | `NoSigner`, `NoCalls` | Nothing to sign with, or nothing to send |
 | `SimulationFailed` | The calls revert in simulation. Nothing was signed or sent |
 | `BelowThreshold` | Fewer signatures than the threshold, and no `--bundle` to save them to |
-| `Rejected` | The node refused the signed transaction. Carries the node's reason and its `RejectClass` |
-| `BroadcastAmbiguous`, `ReceiptTimeout`, `RotationUnconfirmed` | The transaction may still be mined. `SendError::may_be_pending()` is true for these |
+| `Broadcast(BroadcastError::Rejected)` | The node refused the signed transaction. Carries the node's reason and its `RejectClass` |
+| `Broadcast(BroadcastError::Ambiguous \| ReceiptTimeout)`, `RotationUnconfirmed` | The transaction may still be mined. `SendError::may_be_pending()` is true for these |
 | `ApproveHashReverted`, `SafeTxFailed`, `NotRotated` | The transaction was mined and did not succeed |
 | `EoaTxReverted` | A transaction of an EOA send was mined and reverted |
 | `EoaBatchFailed` | An EOA send stopped part way. Carries the hashes already mined, the index of the call that failed and its error |
@@ -903,20 +904,20 @@ The enum derives `Serialize` (tagged by `outcome`), so it can go into your own J
 
 Everything else, such as a bundle file that does not parse, is `Other`. The enum is `#[non_exhaustive]`.
 
-**What `send` prints.** Set this with `SendContext::with_output`:
-- `Output::Human` prints like `safe send`.
-- `Output::Json` prints `safe send --json`'s document on stdout and never prompts.
-- `Output::Quiet` sends progress and the confirmation prompt to stderr, prints no result, and leaves stdout to your CLI.
+**What `send` prints.** Nothing: the library never writes to stdout or stderr, so your CLI owns both.
+- Progress and warnings go to the context's `Logger` (`with_logger`). The default, `NoopLogger`, drops them. `ConsoleLogger::new(Level::Info)` writes them to stderr, `log::from_fn(|level, args| ...)` hands them to your own code, and `TracingLogger` (the `tracing` feature) forwards them to `tracing`.
+- The confirmation and any password go to the context's `Prompt` (`with_prompt`). The default, `TerminalPrompt`, asks on the terminal and shows the summary first. `NoPrompt` declines every confirmation and refuses every secret, for servers and tests. Set `no_confirm` to send without asking.
+- The result is the returned `SendOutcome`, for your CLI to print as it likes.
 
 **Sending from an EOA.** `SendContext::eoa(rpc_url).with_signer(key)` sends the calls from the key's own account instead of a Safe, so an app can offer both with one code path. Each call becomes its own transaction. They are simulated together in order first, and nothing is sent unless all of them pass. After one confirmation they are broadcast one at a time, each after the one before it is mined. Simulation, `--trace`, `--block`, `--spec`, the fee flags, `--timeout` and `--no-confirm` work as for a Safe. `--gas-limit` works when there is a single call. Options only a Safe has, such as `--bundle`, `--nonce`, `--no-submit`, `--rotate` and `--payer-private-key`, fail with `OptionsError::SafeOnly`. An EOA send is not atomic: if one transaction fails after others were mined, `SendError::EoaBatchFailed` lists the ones on chain.
 
-**Building `SendOpts` in code.** `SendOpts::default()` matches the flag defaults. `send` checks options built in code for the same conflicts clap enforces on the flags, such as `--rotate` with `--nonce`.
+**Building `SendOpts` in code.** `SendOpts::default()` matches the flag defaults. Its flags come in groups that `safe config` and `safe rotate` share, and that you can also flatten one by one: `CollectArgs` (`--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`), `SimulateArgs` (`--simulate-only`, `--trace` and the `SimArgs`), `FeeArgs` (`--gas-limit`, the fee flags, `--timeout`) and `RawTxArgs` (`--raw-out`, `--no-submit`). So `--sign-only` is `opts.collect.sign_only` and `--gas-limit` is `opts.fees.gas_limit`. `send` checks options built in code for the same conflicts clap enforces on the flags, such as `--rotate` with `--nonce`.
 
 **Other notes:**
 - Use `safe_rs_cli::safe_rs` to build the calls, and `safe_rs_cli::PrivateKeySigner` and `safe_rs_cli::Url` for the context. They come from the same versions the CLI uses.
 - Always name the Safe for a Safe send. Without `--safe`, `safe send` falls back to the signer's default Safe, which is wrong for a Safe from another factory, so `SendContext` requires one.
 - With `--rotate`, the owner key comes from `--hd-wallet` or `--ledger`, so the context carries no signer.
-- The `safe` CLI's own `--rpc-url`, `--safe` and wallet flags are in `safe_rs_cli::args` as `RpcArgs`, `SafeArgs` and `WalletArgs`, for a CLI that wants those too. `safe_rs_cli::Commands` with `safe_rs_cli::run(command, json)` embeds the whole `safe` command tree as a subcommand.
+- The `safe` CLI's own `--rpc-url`, `--safe` and signer flags are in `safe_rs_cli::args` as `RpcArgs`, `SafeArgs` and `SignerArgs` (`WalletArgs` is a deprecated alias), for a CLI that wants those too. `safe_rs_cli::Commands` with `safe_rs_cli::run(command, RunConfig::terminal(json))` embeds the whole `safe` command tree as a subcommand; `RunConfig` picks its logger and prompt.
 - `SendOpts` takes these flag names, so your command can't define them too:
   - `--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`, `--call-only`
   - `--simulate-only`, `--skip-simulation`, `--trace`, `--block`, `--spec`, `--block-time`
@@ -927,6 +928,15 @@ Everything else, such as a bundle file that does not parse, is `Other`. The enum
   - `--password`, `--password-file`, `--payer-private-key`
 - `SendOpts` also reads three environment variables: `SAFE_HD_WALLET`, `SAFE_PASSWORD_FILE` and `SAFE_PAYER_PRIVATE_KEY`.
 - To catch a flag-name clash, parse a sample command line in a test. `Command::debug_assert()` alone misses a clash between a global flag and one of these, and clap panics at parse time instead.
+
+## Reusing `safe create` and `safe wallet` in your own CLI
+
+The same pattern covers deploying Safes and managing HD wallets:
+
+- `safe_rs_cli::create::CreateOpts` holds the `safe create` flags without `--rpc-url` or the signer: the setup (`SafeSetupArgs`: `--owner`, `--threshold`, `--salt-nonce`, `--safe-version`, `--singleton`, `--factory`, `--fallback-handler`), `--compute-only`, `--no-confirm`, the fee flags, and with `hd-wallet` `--hd-wallet`, `--ledger`, `--same-as` and the sweep flags. Build a `CreateContext::new(rpc_url).with_signer(key)` (no signer with `--hd-wallet` or `--ledger`) and call `create::create(ctx, opts)`. It returns a `CreateOutcome` (`Computed`, `AlreadyDeployed`, `Deployed` or `Aborted`, each with the Safe's address) or a `CreateError`. `CreateError::may_be_pending()` is true when the deployment may still be mined, and `CreateError::safe()` gives the address it was deploying to.
+- `safe_rs_cli::wallet` (the `hd-wallet` feature) has `WalletCommand`, the `safe wallet` subcommands, to mount with `#[command(subcommand)]`, and one function per subcommand: `new_wallet`, `import_wallet`, `list_wallets`, `wallet_address`, `wallet_status`, `sync_wallet` and `sweep_wallet`. Each takes a `WalletContext` (`with_rpc_url`, `with_safe`, `with_home`, logger and prompt) and returns a typed outcome or a `WalletError`, such as `NotFound`, `WrongPassword`, `Locked`, or `Sweep` with what was moved and what is still owed. `wallet::run` runs a parsed `WalletCommand` and prints like `safe wallet`.
+
+Neither defines `--rpc-url`, `--private-key` or `--safe`, so your CLI's own global flags for those keep working. `cli/tests/embed_create.rs` is a host shaped this way.
 
 ## Bundle Format
 

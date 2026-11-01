@@ -20,9 +20,10 @@ use alloy::network::ReceiptResponse as _;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::Provider;
 use common::LocalHarness;
-use safe_rs_cli::args::SendOpts;
+use safe_rs_cli::args::{CollectArgs, RawTxArgs, SendOpts, SimulateArgs};
+use safe_rs_cli::prompt::NoPrompt;
 use safe_rs_cli::safe_rs::Call;
-use safe_rs_cli::{Output, SendContext, SendError, SendOutcome};
+use safe_rs_cli::{SendContext, SendError, SendOutcome};
 
 const RECIPIENT: Address = Address::repeat_byte(0x42);
 
@@ -33,7 +34,7 @@ fn transfer() -> Vec<Call> {
 fn context(h: &LocalHarness, safe: Address) -> SendContext {
     SendContext::new(h.url(), safe)
         .with_signer(h.owner.clone())
-        .with_output(Output::Quiet)
+        .with_prompt(NoPrompt)
 }
 
 fn opts() -> SendOpts {
@@ -54,7 +55,10 @@ async fn each_way_a_send_ends_is_returned() {
         context(&h, safe),
         transfer(),
         SendOpts {
-            simulate_only: true,
+            simulate: SimulateArgs {
+                simulate_only: true,
+                ..SimulateArgs::default()
+            },
             ..opts()
         },
     )
@@ -73,8 +77,11 @@ async fn each_way_a_send_ends_is_returned() {
         context(&h, safe),
         transfer(),
         SendOpts {
-            sign_only: true,
-            bundle: Some(bundle.clone()),
+            collect: CollectArgs {
+                sign_only: true,
+                bundle: Some(bundle.clone()),
+                ..CollectArgs::default()
+            },
             ..opts()
         },
     )
@@ -94,7 +101,10 @@ async fn each_way_a_send_ends_is_returned() {
         context(&h, safe),
         transfer(),
         SendOpts {
-            no_submit: true,
+            raw: RawTxArgs {
+                no_submit: true,
+                ..RawTxArgs::default()
+            },
             ..opts()
         },
     )
@@ -159,7 +169,7 @@ async fn a_failed_simulation_is_returned_as_its_own_error() {
 fn eoa_context(h: &LocalHarness) -> SendContext {
     SendContext::eoa(h.url())
         .with_signer(h.owner.clone())
-        .with_output(Output::Quiet)
+        .with_prompt(NoPrompt)
 }
 
 async fn owner_nonce(h: &LocalHarness) -> u64 {
@@ -184,7 +194,10 @@ async fn an_eoa_sends_each_call_as_its_own_transaction() {
         eoa_context(&h),
         calls.clone(),
         SendOpts {
-            simulate_only: true,
+            simulate: SimulateArgs {
+                simulate_only: true,
+                ..SimulateArgs::default()
+            },
             ..opts()
         },
     )

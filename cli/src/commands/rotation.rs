@@ -20,9 +20,9 @@ use crate::bundle::{BundleFile, BundleRotationSwap};
 use crate::cli::{SimArgs, SweepArgs};
 use crate::commands::send::{broadcast, receipt};
 use crate::commands::{http_provider, latest_sim_spec, outer_fees};
+use crate::console::Console;
 use crate::error::SendError;
 use crate::keys::CliKeys;
-use crate::console::Console;
 use crate::output::{
     rotation_summary, ApproveHashOutput, BundleSavedOutput, Report, RotationOutput,
     RotationPlanOutput, SendOutcome, SignedTxOutput, SimulationOutput,
@@ -314,15 +314,15 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
         let receipt = receipt(&provider, tx.outer.tx_hash, run.timeout).await?;
         let success = receipt.status();
         console.emit(&ApproveHashOutput {
-                tx_hash: tx.outer.tx_hash,
-                success,
-                gas_used: receipt.gas_used,
-                safe_tx_hash: tx.plan.prepared.safe_tx_hash,
-                safe_nonce: tx.plan.prepared.params.nonce,
-                approver: tx.from.address(),
-                signatures_collected: have,
-                threshold: need,
-                bundle_path: bundle_path_str,
+            tx_hash: tx.outer.tx_hash,
+            success,
+            gas_used: receipt.gas_used,
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            safe_nonce: tx.plan.prepared.params.nonce,
+            approver: tx.from.address(),
+            signatures_collected: have,
+            threshold: need,
+            bundle_path: bundle_path_str,
         });
         if !success {
             return Err(SendError::ApproveHashReverted {
@@ -357,13 +357,13 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
             .filter(|o| !tx.signed.signatures.contains_key(o))
             .collect();
         console.emit(&BundleSavedOutput {
-                safe_tx_hash: tx.plan.prepared.safe_tx_hash,
-                safe_nonce: tx.plan.prepared.params.nonce,
-                signatures_collected: have,
-                threshold: need,
-                signers,
-                remaining_owners,
-                bundle_path: bundle_path.display().to_string(),
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            safe_nonce: tx.plan.prepared.params.nonce,
+            signatures_collected: have,
+            threshold: need,
+            signers,
+            remaining_owners,
+            bundle_path: bundle_path.display().to_string(),
         });
         return Ok(SendOutcome::Signed {
             safe_tx_hash: tx.plan.prepared.safe_tx_hash,
