@@ -3,7 +3,10 @@ use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use clap::ValueEnum;
-use color_eyre::eyre::{bail, eyre, Result};
+#[cfg(feature = "hd-wallet")]
+use color_eyre::eyre::eyre;
+use color_eyre::eyre::{bail, Result};
+#[cfg(feature = "hd-wallet")]
 use safe_rs::rotation::RotationState;
 use safe_rs::{
     read_safe_state, ChainAddresses, Error, ReadSafeStateOptions, SafeState, WalletBuilder,
@@ -86,6 +89,7 @@ pub(super) async fn read_default_safe(
 /// Select only within the connected chain; never guess between wallet bindings.
 ///
 /// `choose` tells how to pass an address instead, such as "--safe <SAFE>".
+#[cfg(feature = "hd-wallet")]
 pub(super) fn recorded_safe(state: &RotationState, chain_id: u64, choose: &str) -> Result<Address> {
     let mut candidates = Vec::new();
     for key in state.safes.keys() {
@@ -122,6 +126,7 @@ pub(super) fn recorded_safe(state: &RotationState, chain_id: u64, choose: &str) 
 }
 
 #[cfg(test)]
+#[cfg(feature = "hd-wallet")]
 mod tests {
     use super::*;
     use safe_rs::rotation::{binding_key, OwnerRef};

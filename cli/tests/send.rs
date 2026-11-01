@@ -579,6 +579,11 @@ async fn multi_owner_onchain_approve_hash_flow() {
 /// Runs `safe <args> --json` against the harness chain, with none of the
 /// ambient environment variables the CLI reads.
 fn safe_cli(h: &LocalHarness, home: &Path, args: &[&str]) -> Output {
+    safe_cli_with_env(h, home, args, &[])
+}
+
+/// [`safe_cli`] with `env` set on top of the cleared environment.
+fn safe_cli_with_env(h: &LocalHarness, home: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_safe"));
     command
         .args(args)
@@ -595,6 +600,7 @@ fn safe_cli(h: &LocalHarness, home: &Path, args: &[&str]) -> Output {
     ] {
         command.env_remove(name);
     }
+    command.envs(env.iter().copied());
     let output = command.output().expect("run safe");
     Output {
         ok: output.status.success(),
@@ -690,4 +696,108 @@ async fn send_and_call_default_to_the_signers_one_of_one_safe() {
     )
     .json();
     assert_eq!(called["success"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_eoa_sends_each_call_from_the_signers_own_account() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let key = hex::encode_prefixed(h.owner.to_bytes());
+    let from = h.owner.address();
+    let recipient = Address::repeat_byte(0x73);
+    let nonce = h.provider.get_transaction_count(from).await.unwrap();
+
+    // A transfer: one transaction from the signer, no Safe involved.
+    let sent = safe_cli(
+        &h,
+        home,
+        &[
+            "send",
+            &recipient.to_string(),
+            "--value",
+            "7",
+            "--send-eoa",
+            "--private-key",
+            &key,
+            "--no-confirm",
+        ],
+    )
+    .json();
+    assert_eq!(
+        sent["from"].as_str().unwrap().parse::<Address>().unwrap(),
+        from
+    );
+    assert_eq!(sent["txs"].as_array().unwrap().len(), 1, "{sent}");
+    assert_eq!(balance(&h, recipient).await, U256::from(7));
+    assert_eq!(
+        h.provider.get_transaction_count(from).await.unwrap(),
+        nonce + 1
+    );
+
+    // Each --call is its own transaction.
+    let call = format!("{}:getThreshold()", h.addresses.safe_singleton);
+    let batch = safe_cli(
+        &h,
+        home,
+        &[
+            "send",
+            "--send-eoa",
+            "--call",
+            &call,
+            "--call",
+            &call,
+            "--private-key",
+            &key,
+            "--no-confirm",
+        ],
+    )
+    .json();
+    assert_eq!(batch["txs"].as_array().unwrap().len(), 2, "{batch}");
+    assert_eq!(
+        h.provider.get_transaction_count(from).await.unwrap(),
+        nonce + 3
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_eoa_refuses_a_safe_and_its_options() {
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let key = hex::encode_prefixed(h.owner.to_bytes());
+    let recipient = Address::repeat_byte(0x74).to_string();
+    let safe = Address::repeat_byte(0x11).to_string();
+    let base = ["send", &recipient, "--send-eoa", "--private-key", &key];
+    fn with<'a>(base: &[&'a str], extra: &[&'a str]) -> Vec<&'a str> {
+        [base, extra].concat()
+    }
+
+    for (refused, env, message) in [
+        (
+            with(&base, &["--safe", &safe]),
+            &[][..],
+            "remove --safe and unset SAFE_ADDRESS",
+        ),
+        (
+            with(&base, &[]),
+            &[("SAFE_ADDRESS", safe.as_str())][..],
+            "remove --safe and unset SAFE_ADDRESS",
+        ),
+        (
+            with(&base, &["--nonce", "1"]),
+            &[],
+            "--nonce only applies to a send through a Safe",
+        ),
+        (
+            with(&base, &["--bundle", "tx.json"]),
+            &[],
+            "--bundle only applies to a send through a Safe",
+        ),
+    ] {
+        let output = safe_cli_with_env(&h, home, &refused, env);
+        assert!(!output.ok, "{refused:?} must be refused");
+        assert!(output.stderr.contains(message), "{}", output.stderr);
+    }
+    assert_eq!(balance(&h, recipient.parse().unwrap()).await, U256::ZERO);
 }

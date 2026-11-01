@@ -63,9 +63,11 @@ jobs:
         run: |
           cargo check -p safe-rs --lib --locked --no-default-features
           cargo check -p safe-rs --lib --locked
+          cargo check -p safe-rs --lib --locked --no-default-features --features keystore
           cargo check -p safe-rs --lib --locked --no-default-features --features hd-wallet
           cargo check -p safe-rs --lib --locked --no-default-features --features ledger
           cargo check -p safe-rs-cli --bins --locked --no-default-features
+          cargo check -p safe-rs-cli --bins --locked --no-default-features --features hd-wallet
 
       # The e2e tests skip themselves without ETH_RPC_URL; the local ones run
       # against Anvil.

@@ -9,7 +9,7 @@ use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
-use color_eyre::eyre::{self, bail};
+use color_eyre::eyre;
 use safe_rs::{
     broadcast_raw, check_eoa_calls, detect_addresses, is_gs013_revert, read_approved_owners,
     read_safe_state, require_batch_target, safe_outcome_for_receipt, sign_outer_tx,
@@ -21,17 +21,24 @@ use safe_rs::{
 
 use crate::bundle::{BundleCall, BundleFile};
 use crate::cli::{SendArgs, SendOpts};
-use crate::commands::default_safe::{recorded_safe, safe_or_default};
+#[cfg(feature = "hd-wallet")]
+use crate::commands::default_safe::recorded_safe;
+use crate::commands::default_safe::safe_or_default;
+#[cfg(feature = "hd-wallet")]
 use crate::commands::rotation::{self, RotationRun};
 use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
-use crate::error::{OptionsError, SendError};
+#[cfg(feature = "hd-wallet")]
+use crate::error::OptionsError;
+use crate::error::SendError;
 use crate::output::{
     calls_summary, confirm_prompt, emit, ApproveHashOutput, BundleSavedOutput, Console,
     EoaExecutionOutput, ExecutionOutput, Report, SignedTxOutput, SimulationOutput,
 };
 pub use crate::output::{EoaTx, Output, SendOutcome};
 use crate::sig_parser::{encode_function_call, parse_call_spec};
-use crate::wallet::{create_payer, create_signer, open_wallet};
+#[cfg(feature = "hd-wallet")]
+use crate::wallet::open_wallet;
+use crate::wallet::{create_payer, create_signer};
 use url::Url;
 
 /// How often to poll for the receipt after broadcasting.
@@ -132,16 +139,21 @@ pub struct Target {
 
 pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
     let calls = build_cli_calls(&args)?;
-    if args.opts.rotate && args.wallet.is_set() {
-        bail!(
+    if args.send_eoa {
+        return run_eoa(args, calls, json).await;
+    }
+    // Checked before any key or password prompt.
+    let checked = args.opts.validate_safe(args.wallet.is_set());
+    #[cfg(feature = "hd-wallet")]
+    if checked == Err(OptionsError::RotateWithSigner) {
+        eyre::bail!(
             "with --rotate the owner key comes from --hd-wallet or --ledger: remove --private-key, \
              --keystore and --interactive, and unset PRIVATE_KEY"
         );
     }
-    // Checked before any key or password prompt.
-    check(&args.opts, args.wallet.is_set())?;
-    if calls.is_empty() && args.opts.bundle.is_none() && !args.opts.rotate {
-        bail!("Target address required for single call mode");
+    checked?;
+    if calls.is_empty() && args.opts.bundle.is_none() && !args.opts.rotates() {
+        eyre::bail!("Target address required for single call mode");
     }
     let signer = if args.wallet.is_set() {
         Some(create_signer(&args.wallet, &args.opts.password)?)
@@ -154,6 +166,33 @@ pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
         signer,
     };
     dispatch(target, calls, args.opts, Output::from_json(json)).await?;
+    Ok(())
+}
+
+/// `safe send --send-eoa`: the calls go from the signer's own account, one
+/// transaction each, through the same path as [`SendContext::eoa`].
+async fn run_eoa(args: SendArgs, calls: Vec<Call>, json: bool) -> eyre::Result<()> {
+    // `--safe` and SAFE_ADDRESS look the same here; refuse both rather than
+    // send from the EOA when a Safe was asked for.
+    if args.safe.safe.is_some() {
+        eyre::bail!(
+            "--send-eoa sends from the signer's own account, not a Safe: remove --safe and \
+             unset SAFE_ADDRESS"
+        );
+    }
+    // Checked before any key or password prompt.
+    args.opts.validate_eoa(calls.len())?;
+    if calls.is_empty() {
+        eyre::bail!("nothing to send: pass a target address or --call");
+    }
+    if !args.wallet.is_set() {
+        return Err(SendError::NoSigner.into());
+    }
+    let signer = create_signer(&args.wallet, &args.opts.password)?;
+    let ctx = SendContext::eoa(args.rpc.rpc_url)
+        .with_signer(signer)
+        .with_output(Output::from_json(json));
+    send(ctx, calls, args.opts).await?;
     Ok(())
 }
 
@@ -171,10 +210,7 @@ pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
 pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<SendOutcome> {
     match ctx.sender {
         Sender::Safe(safe) => {
-            if opts.rotate && ctx.signer.is_some() {
-                return Err(OptionsError::RotateWithSigner.into());
-            }
-            check(&opts, ctx.signer.is_some())?;
+            opts.validate_safe(ctx.signer.is_some())?;
             let target = Target {
                 rpc_url: ctx.rpc_url,
                 safe: Some(safe),
@@ -183,49 +219,11 @@ pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<
             dispatch(target, calls, opts, ctx.output).await
         }
         Sender::Eoa => {
-            check_eoa(&opts, calls.len())?;
+            opts.validate_eoa(calls.len())?;
             let signer = ctx.signer.ok_or(SendError::NoSigner)?;
             execute_eoa(&ctx.rpc_url, &signer, calls, &opts, ctx.output).await
         }
     }
-}
-
-/// The checks a send from an EOA runs before it touches a key or the chain:
-/// the options that only make sense for a Safe are refused.
-fn check_eoa(opts: &SendOpts, calls: usize) -> Result<(), OptionsError> {
-    opts.validate()?;
-    let safe_only = [
-        (opts.bundle.is_some(), "--bundle"),
-        (!opts.merge_bundle.is_empty(), "--merge-bundle"),
-        (opts.approve_hash, "--approve-hash"),
-        (opts.sign_only, "--sign-only"),
-        (opts.call_only, "--call-only"),
-        (opts.safe_tx_gas.is_some(), "--safe-tx-gas"),
-        (opts.nonce.is_some(), "--nonce"),
-        (opts.raw_out.is_some(), "--raw-out"),
-        (opts.no_submit, "--no-submit"),
-        (opts.multi_send.is_some(), "--multi-send"),
-        (
-            opts.multi_send_call_only.is_some(),
-            "--multi-send-call-only",
-        ),
-        (opts.rotate, "--rotate"),
-        (opts.hd.hd_wallet.is_some(), "--hd-wallet"),
-        (opts.hd.ledger, "--ledger"),
-        (opts.sweep.no_sweep, "--no-sweep"),
-        (opts.sweep.sweep_reserve.is_some(), "--sweep-reserve"),
-        (
-            opts.payer.payer_private_key.is_some(),
-            "--payer-private-key",
-        ),
-    ];
-    if let Some((_, flag)) = safe_only.into_iter().find(|(set, _)| *set) {
-        return Err(OptionsError::SafeOnly { flag });
-    }
-    if opts.gas_limit.is_some() && calls > 1 {
-        return Err(OptionsError::GasLimitForBatch { calls });
-    }
-    Ok(())
 }
 
 /// Sends `calls` from `signer`'s own account, one transaction per call.
@@ -450,27 +448,13 @@ async fn send_eoa_tx(
     })
 }
 
-/// The checks every send runs before it touches a key or the chain.
-fn check(opts: &SendOpts, has_signer: bool) -> Result<(), OptionsError> {
-    opts.validate()?;
-    if opts.rotate {
-        return Ok(());
-    }
-    if opts.sweep.no_sweep || opts.sweep.sweep_reserve.is_some() {
-        return Err(OptionsError::SweepWithoutRotate);
-    }
-    if opts.hd.is_set() && !has_signer {
-        return Err(OptionsError::HdWithoutRotate);
-    }
-    Ok(())
-}
-
 async fn dispatch(
     target: Target,
     calls: Vec<Call>,
     opts: SendOpts,
     output: Output,
 ) -> Result<SendOutcome> {
+    #[cfg(feature = "hd-wallet")]
     if opts.rotate {
         return Box::pin(run_rotating(target, calls, opts, output)).await;
     }
@@ -1088,6 +1072,7 @@ pub async fn execute(
 
 /// `send --rotate`: the user's calls followed by a swap of the owner for the HD
 /// wallet's next unused key, then a sweep of the old key's ETH.
+#[cfg(feature = "hd-wallet")]
 async fn run_rotating(
     target: Target,
     cli_calls: Vec<Call>,

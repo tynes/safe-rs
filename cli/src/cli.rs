@@ -47,9 +47,11 @@ pub enum Commands {
     /// Swap the Safe's owner for the HD wallet's next unused key, with no other
     /// calls. Also moves an existing Safe onto the wallet (--from-*) and retires
     /// a key after a failed transaction
+    #[cfg(feature = "hd-wallet")]
     Rotate(Box<RotateArgs>),
 
     /// Manage HD wallets: the encrypted phrase that one-time owner keys come from
+    #[cfg(feature = "hd-wallet")]
     #[command(subcommand)]
     Wallet(WalletCommand),
 }
@@ -201,6 +203,12 @@ pub struct SendArgs {
     #[arg(long = "call", value_name = "CALL")]
     pub calls: Vec<String>,
 
+    /// Send each call from the signer's own account, one transaction per
+    /// call, instead of through a Safe. Refuses --safe (and SAFE_ADDRESS) and
+    /// the options only a Safe has, such as --bundle, --nonce and --rotate
+    #[arg(long)]
+    pub send_eoa: bool,
+
     #[command(flatten)]
     pub opts: SendOpts,
 
@@ -309,12 +317,15 @@ pub struct SendOpts {
 
     /// Use the Safe's owner key once: append a swap of the owner for the next
     /// unused key of --hd-wallet, then move the old key's ETH to the new one
+    #[cfg(feature = "hd-wallet")]
     #[arg(long, conflicts_with_all = ["skip_simulation", "safe_tx_gas", "multi_send", "nonce"])]
     pub rotate: bool,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub sweep: SweepArgs,
 
@@ -348,8 +359,11 @@ impl Default for SendOpts {
             multi_send: None,
             multi_send_call_only: None,
             no_confirm: false,
+            #[cfg(feature = "hd-wallet")]
             rotate: false,
+            #[cfg(feature = "hd-wallet")]
             hd: HdArgs::default(),
+            #[cfg(feature = "hd-wallet")]
             sweep: SweepArgs::default(),
             password: PasswordArgs::default(),
             payer: PayerArgs::default(),
@@ -392,6 +406,9 @@ impl SendOpts {
                 "--no-submit",
                 "--simulate-only",
             ),
+        ];
+        #[cfg(feature = "hd-wallet")]
+        let rotate_conflicts = [
             (
                 self.rotate && self.skip_simulation,
                 "--rotate",
@@ -414,10 +431,113 @@ impl SendOpts {
                 "--sweep-reserve",
             ),
         ];
-        match conflicts.iter().find(|(conflict, ..)| *conflict) {
+        #[cfg(not(feature = "hd-wallet"))]
+        let rotate_conflicts = [];
+        match conflicts
+            .iter()
+            .chain(&rotate_conflicts)
+            .find(|(conflict, ..)| *conflict)
+        {
             Some(&(_, flag, with)) => Err(OptionsError::Conflict { flag, with }),
             None => Ok(()),
         }
+    }
+
+    /// Checks the options of a send through a Safe before any key or the
+    /// chain is touched: the conflicts of [`validate`](Self::validate), then
+    /// the rotation rules.
+    ///
+    /// `has_signer` is whether the caller brings the owner key (a host's
+    /// signer, or `--private-key`, `--keystore` or `--interactive`). With
+    /// `--rotate` the key comes from the HD wallet or Ledger instead.
+    #[cfg_attr(
+        not(feature = "hd-wallet"),
+        allow(unused_variables, reason = "only the rotation rules need the signer")
+    )]
+    pub fn validate_safe(&self, has_signer: bool) -> Result<(), OptionsError> {
+        self.validate()?;
+        #[cfg(feature = "hd-wallet")]
+        if self.rotate {
+            return if has_signer {
+                Err(OptionsError::RotateWithSigner)
+            } else {
+                Ok(())
+            };
+        }
+        #[cfg(feature = "hd-wallet")]
+        if self.sweep.no_sweep || self.sweep.sweep_reserve.is_some() {
+            return Err(OptionsError::SweepWithoutRotate);
+        }
+        #[cfg(feature = "hd-wallet")]
+        if self.hd.is_set() && !has_signer {
+            return Err(OptionsError::HdWithoutRotate);
+        }
+        Ok(())
+    }
+
+    /// Checks the options of a send of `calls` calls from an EOA before any
+    /// key or the chain is touched: the conflicts of
+    /// [`validate`](Self::validate), then the options only a Safe has.
+    pub fn validate_eoa(&self, calls: usize) -> Result<(), OptionsError> {
+        self.validate()?;
+        if let Some(flag) = self.safe_only_flag() {
+            return Err(OptionsError::SafeOnly { flag });
+        }
+        if self.gas_limit.is_some() && calls > 1 {
+            return Err(OptionsError::GasLimitForBatch { calls });
+        }
+        Ok(())
+    }
+
+    /// The first option given that only a send through a Safe uses.
+    fn safe_only_flag(&self) -> Option<&'static str> {
+        let safe_only = [
+            (self.bundle.is_some(), "--bundle"),
+            (!self.merge_bundle.is_empty(), "--merge-bundle"),
+            (self.approve_hash, "--approve-hash"),
+            (self.sign_only, "--sign-only"),
+            (self.call_only, "--call-only"),
+            (self.safe_tx_gas.is_some(), "--safe-tx-gas"),
+            (self.nonce.is_some(), "--nonce"),
+            (self.raw_out.is_some(), "--raw-out"),
+            (self.no_submit, "--no-submit"),
+            (self.multi_send.is_some(), "--multi-send"),
+            (
+                self.multi_send_call_only.is_some(),
+                "--multi-send-call-only",
+            ),
+            (
+                self.payer.payer_private_key.is_some(),
+                "--payer-private-key",
+            ),
+        ];
+        #[cfg(feature = "hd-wallet")]
+        let rotation = [
+            (self.rotate, "--rotate"),
+            (self.hd.hd_wallet.is_some(), "--hd-wallet"),
+            (self.hd.ledger, "--ledger"),
+            (self.sweep.no_sweep, "--no-sweep"),
+            (self.sweep.sweep_reserve.is_some(), "--sweep-reserve"),
+        ];
+        #[cfg(not(feature = "hd-wallet"))]
+        let rotation: [(bool, &str); 0] = [];
+        safe_only
+            .into_iter()
+            .chain(rotation)
+            .find_map(|(set, flag)| set.then_some(flag))
+    }
+
+    /// Whether the send rotates the owner key (`--rotate`).
+    #[cfg(feature = "hd-wallet")]
+    pub fn rotates(&self) -> bool {
+        self.rotate
+    }
+
+    /// Whether the send rotates the owner key: never without the
+    /// `hd-wallet` feature.
+    #[cfg(not(feature = "hd-wallet"))]
+    pub fn rotates(&self) -> bool {
+        false
     }
 }
 
@@ -560,6 +680,7 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub no_confirm: bool,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
 
@@ -709,12 +830,15 @@ pub struct CreateArgs {
     /// Deploy the same Safe an HD wallet created on another chain, given as
     /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
     /// must be rotated right away
+    #[cfg(feature = "hd-wallet")]
     #[arg(long, value_name = "CHAIN_ID:SAFE", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
     pub same_as: Option<String>,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
 
+    #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub sweep: SweepArgs,
 
@@ -728,6 +852,7 @@ pub struct CreateArgs {
     pub payer: PayerArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Parser, Clone)]
 pub struct RotateArgs {
     /// Safe contract address (default: the wallet's sole recorded Safe on this
@@ -821,6 +946,7 @@ pub struct RotateArgs {
     pub no_confirm: bool,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Subcommand, Clone)]
 pub enum WalletCommand {
     /// Create an HD wallet from a new 24-word phrase and encrypt it to disk
@@ -845,6 +971,7 @@ pub enum WalletCommand {
     Sweep(WalletSweepArgs),
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletNewArgs {
     /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
@@ -854,6 +981,7 @@ pub struct WalletNewArgs {
     pub password: PasswordArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletImportArgs {
     /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
@@ -872,6 +1000,7 @@ pub struct WalletImportArgs {
     pub password: PasswordArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletAddressArgs {
     #[command(flatten)]
@@ -885,6 +1014,7 @@ pub struct WalletAddressArgs {
     pub password: PasswordArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletStatusArgs {
     #[command(flatten)]
@@ -895,6 +1025,7 @@ pub struct WalletStatusArgs {
     pub safe: Option<Address>,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletSyncArgs {
     #[command(flatten)]
@@ -929,6 +1060,7 @@ pub struct WalletSyncArgs {
     pub password: PasswordArgs,
 }
 
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone)]
 pub struct WalletSweepArgs {
     #[command(flatten)]
@@ -989,6 +1121,7 @@ pub struct PasswordArgs {
 }
 
 /// The HD wallet one-time owner keys are derived from.
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone, Debug, Default)]
 pub struct HdArgs {
     /// HD wallet: a name under ~/.safe-rs/wallets, or the path of a mnemonic keystore
@@ -1001,6 +1134,7 @@ pub struct HdArgs {
     pub ledger: bool,
 }
 
+#[cfg(feature = "hd-wallet")]
 impl HdArgs {
     /// Whether an HD wallet or a Ledger was chosen.
     pub fn is_set(&self) -> bool {
@@ -1009,6 +1143,7 @@ impl HdArgs {
 }
 
 /// What happens to a retired owner key's ETH.
+#[cfg(feature = "hd-wallet")]
 #[derive(Args, Clone, Debug, Default)]
 pub struct SweepArgs {
     /// Leave the retired owner key's ETH where it is, instead of moving it to
@@ -1121,6 +1256,7 @@ mod tests {
         };
         assert_eq!(args.value, U256::from(1_500_000_000_000_000_000_u128));
         assert_eq!(args.opts.max_fee_per_gas, Some(2_000_000_000));
+        #[cfg(feature = "hd-wallet")]
         assert!(send(&["--rotate", "--sweep-reserve", "0.01ether"]).is_ok());
     }
 
@@ -1267,6 +1403,7 @@ mod tests {
         parse(&args)
     }
 
+    #[cfg(feature = "hd-wallet")]
     #[test]
     fn rotate_excludes_the_options_that_would_weaken_it() {
         assert!(send(&["--rotate", "--hd-wallet", "w"]).is_ok());
@@ -1290,6 +1427,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hd-wallet")]
     fn rotate(extra: &[&str]) -> Result<Cli, clap::Error> {
         let mut args = vec![
             "rotate",
@@ -1303,6 +1441,7 @@ mod tests {
         parse(&args)
     }
 
+    #[cfg(feature = "hd-wallet")]
     #[test]
     fn rotate_takes_the_safe_as_an_optional_positional() {
         let base = [
@@ -1325,6 +1464,7 @@ mod tests {
         assert!(parse(&flagged).is_err());
     }
 
+    #[cfg(feature = "hd-wallet")]
     #[test]
     fn rotate_takes_one_legacy_key_source_and_one_sweep_choice() {
         assert!(rotate(&[]).is_ok());
@@ -1336,6 +1476,7 @@ mod tests {
         assert!(rotate(&["--sweep-legacy", "--no-sweep"]).is_err());
     }
 
+    #[cfg(feature = "hd-wallet")]
     #[test]
     fn wallet_and_create_options_parse() {
         assert!(parse(&["wallet", "new", "treasury"]).is_ok());
@@ -1395,5 +1536,103 @@ mod tests {
             "so do the version and contracts"
         );
         assert!(with(&["--hd-wallet", "w", "--safe-version", "1.4.1"]).is_ok());
+    }
+
+    #[cfg(not(feature = "hd-wallet"))]
+    #[test]
+    fn rotation_flags_and_commands_are_absent_without_hd_wallet() {
+        for flag in [
+            &["--rotate"][..],
+            &["--hd-wallet", "w"],
+            &["--ledger"],
+            &["--no-sweep"],
+        ] {
+            assert!(send(flag).is_err(), "{flag:?} must not parse");
+        }
+        assert!(parse(&["wallet", "list"]).is_err());
+        assert!(parse(&["rotate", SAFE, "--rpc-url", "http://localhost:8545"]).is_err());
+    }
+
+    #[test]
+    fn send_eoa_is_a_send_flag() {
+        let send_eoa = |cli: Cli| match cli.command {
+            Commands::Send(args) => args.send_eoa,
+            _ => panic!("expected send"),
+        };
+        assert!(send_eoa(
+            parse(&["send", TO, "--send-eoa", "--rpc-url", "http://x"]).unwrap()
+        ));
+        assert!(!send_eoa(send(&[]).unwrap()));
+    }
+
+    #[test]
+    fn an_eoa_send_refuses_what_only_a_safe_does() {
+        let opts = SendOpts::default();
+        assert_eq!(opts.validate_eoa(3), Ok(()));
+        let with_nonce = SendOpts {
+            nonce: Some(U256::from(1)),
+            ..SendOpts::default()
+        };
+        assert_eq!(
+            with_nonce.validate_eoa(1),
+            Err(OptionsError::SafeOnly { flag: "--nonce" })
+        );
+        assert_eq!(with_nonce.validate_safe(true), Ok(()));
+        let gas = SendOpts {
+            gas_limit: Some(21_000),
+            ..SendOpts::default()
+        };
+        assert_eq!(gas.validate_eoa(1), Ok(()));
+        assert_eq!(
+            gas.validate_eoa(2),
+            Err(OptionsError::GasLimitForBatch { calls: 2 })
+        );
+        // The flag conflicts come first, for either kind of send.
+        let conflicting = SendOpts {
+            simulate_only: true,
+            skip_simulation: true,
+            bundle: Some("tx.json".into()),
+            ..SendOpts::default()
+        };
+        let conflict = Err(OptionsError::Conflict {
+            flag: "--skip-simulation",
+            with: "--simulate-only",
+        });
+        assert_eq!(conflicting.validate_eoa(1), conflict);
+        assert_eq!(conflicting.validate_safe(true), conflict);
+    }
+
+    #[cfg(feature = "hd-wallet")]
+    #[test]
+    fn a_safe_send_applies_the_rotation_rules() {
+        let rotate = SendOpts {
+            rotate: true,
+            ..SendOpts::default()
+        };
+        assert!(rotate.rotates());
+        assert_eq!(rotate.validate_safe(false), Ok(()));
+        assert_eq!(
+            rotate.validate_safe(true),
+            Err(OptionsError::RotateWithSigner)
+        );
+        assert_eq!(
+            rotate.validate_eoa(1),
+            Err(OptionsError::SafeOnly { flag: "--rotate" })
+        );
+
+        let mut ledger = SendOpts::default();
+        ledger.hd.ledger = true;
+        assert!(!ledger.rotates());
+        assert_eq!(
+            ledger.validate_safe(false),
+            Err(OptionsError::HdWithoutRotate)
+        );
+
+        let mut no_sweep = SendOpts::default();
+        no_sweep.sweep.no_sweep = true;
+        assert_eq!(
+            no_sweep.validate_safe(true),
+            Err(OptionsError::SweepWithoutRotate)
+        );
     }
 }

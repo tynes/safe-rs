@@ -15,9 +15,12 @@ pub mod config;
 pub mod create;
 mod default_safe;
 pub mod info;
+#[cfg(feature = "hd-wallet")]
 pub mod rotate;
+#[cfg(feature = "hd-wallet")]
 pub mod rotation;
 pub mod send;
+#[cfg(feature = "hd-wallet")]
 pub mod wallet;
 
 /// Read-only provider used by every command.
@@ -63,6 +66,7 @@ pub fn sim_spec(explicit: Option<EvmSpec>, chain_id: u64, timestamp: u64) -> Spe
 
 /// [`sim_spec`] for the block after the latest one, `block_time` seconds
 /// later: the spec for runs that always simulate at the head of the chain.
+#[cfg(feature = "hd-wallet")]
 pub async fn latest_sim_spec(
     provider: &HttpProvider,
     chain_id: u64,

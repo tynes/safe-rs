@@ -14,7 +14,7 @@ name = "safe"
 path = "src/main.rs"
 
 [dependencies]
-safe-rs = { path = "..", version = "0.13", default-features = false, features = ["simulation", "hd-wallet"] }
+safe-rs = { path = "..", version = "0.13", default-features = false, features = ["simulation", "keystore"] }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 alloy = "2.5"
@@ -28,14 +28,17 @@ dialoguer = "0.11"
 hex = "0.4"
 rpassword = "7"
 url = "2"
-rand = "0.8"
+rand = { version = "0.8", optional = true }
 zeroize = "1"
 
 [features]
 default = ["ledger"]
-# Owner keys on a Ledger (`--ledger`). Builds libusb from source on Linux when
-# the system has none.
-ledger = ["safe-rs/ledger"]
+# One-time owner keys: `--rotate`, `--hd-wallet`, `safe rotate`, `safe wallet`
+# and `safe create --hd-wallet`.
+hd-wallet = ["safe-rs/hd-wallet", "dep:rand"]
+# Owner keys on a Ledger (`--ledger`; implies hd-wallet). Builds libusb from
+# source on Linux when the system has none.
+ledger = ["hd-wallet", "safe-rs/ledger"]
 
 [dev-dependencies]
 alloy = { version = "2.5", features = ["full", "signer-local", "node-bindings"] }
@@ -43,3 +46,8 @@ tempfile = "3"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "rotate"
+path = "tests/rotate.rs"
+required-features = ["hd-wallet"]

@@ -100,10 +100,12 @@ jobs:
         run: |
           cargo clippy -p safe-rs --lib --locked --no-default-features -- -D warnings
           cargo clippy -p safe-rs --lib --locked -- -D warnings
+          cargo clippy -p safe-rs --lib --locked --no-default-features --features keystore -- -D warnings
           cargo clippy -p safe-rs --lib --locked --no-default-features --features hd-wallet -- -D warnings
           cargo clippy -p safe-rs --lib --locked --no-default-features --features ledger -- -D warnings
           cargo clippy -p safe-rs-cli --bins --locked -- -D warnings
           cargo clippy -p safe-rs-cli --bins --locked --no-default-features -- -D warnings
+          cargo clippy -p safe-rs-cli --bins --locked --no-default-features --features hd-wallet -- -D warnings
 
   test:
     name: Test
@@ -130,3 +132,10 @@ jobs:
       # against Anvil.
       - name: Test
         run: cargo test --workspace --all-features --locked
+
+      # The tests for builds without HD wallets, which --all-features skips.
+      - name: Test without hd-wallet
+        run: |
+          cargo clippy -p safe-rs-cli --all-targets --locked --no-default-features -- -D warnings
+          cargo test -p safe-rs-cli --lib --bins --test embed --locked --no-default-features
+          cargo test -p safe-rs --lib --locked --no-default-features --features simulation,keystore keystore::

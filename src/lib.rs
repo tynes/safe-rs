@@ -81,7 +81,7 @@ pub mod hd;
 pub mod inspect;
 #[cfg(feature = "simulation")]
 mod json;
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "keystore")]
 pub mod keystore;
 #[cfg(feature = "ledger")]
 pub mod ledger;
