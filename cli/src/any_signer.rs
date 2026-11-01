@@ -16,7 +16,7 @@ use alloy_signer_ledger::LedgerSigner;
 use async_trait::async_trait;
 
 /// The key a command signs with: a local key (`--private-key`, `--keystore`,
-/// `--hd-key`, `--interactive`) or one on a Ledger (`--ledger-key`).
+/// `--hd-key`, `--interactive`) or one on a Ledger (`--ledger`).
 ///
 /// It is an alloy [`Signer`] and [`TxSigner`]. A Ledger signs EIP-712 typed
 /// data and transactions, but not bare hashes: `sign_hash` fails on it, so

@@ -49,8 +49,8 @@ cargo install safe-rs-cli --locked --no-default-features
 
 | CLI feature | Default | Adds |
 |-------------|---------|------|
-| `hd-wallet` | yes | `--rotate`, `--hd-wallet`, `safe rotate`, `safe wallet` and `safe create --hd-wallet` |
-| `ledger` | yes | `--ledger` (implies `hd-wallet`) |
+| `hd-wallet` | yes | `--rotate`, `--hd-wallet`, `safe rotate`, `safe wallet` and `safe create --rotate` |
+| `ledger` | yes | `--ledger`: sign with a Ledger key, or with `--rotate` take the owner keys from one (implies `hd-wallet`) |
 
 Or from a local clone:
 
@@ -107,7 +107,7 @@ Use the owner key once, and hand the Safe to the next key in the same transactio
 ```bash
 safe wallet new treasury                      # encrypts a new 24-word phrase to disk
 # send ETH for gas to the funding address it prints, then:
-safe create --hd-wallet treasury --rpc-url $ETH_RPC_URL
+safe create --rotate --hd-wallet treasury --rpc-url $ETH_RPC_URL
 safe send 0xRecipient --value 1000000000000000000 \
     --safe 0xYourSafe \
     --rpc-url $ETH_RPC_URL \
@@ -211,7 +211,7 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 | `--approve-hash` | Approve the Safe transaction hash on chain (`approveHash`) instead of executing |
 | `--rotate` | Swap the owner for the next unused key of `--hd-wallet` in the same transaction (see [One-time owner keys](#one-time-owner-keys)) |
 | `--hd-wallet <name\|path>` | The HD wallet the owner keys come from (with `--rotate`) |
-| `--ledger` | Take the owner keys from a connected Ledger instead (with `--rotate`; see [On a Ledger](#on-a-ledger)) |
+| `--ledger` | With `--rotate`: take the owner keys from a connected Ledger instead (see [On a Ledger](#on-a-ledger)). Without it, `--ledger [index]` signs with that Ledger key (see [Wallet Options](#wallet-options)) |
 | `--no-sweep` | With `--rotate`: leave the old owner's ETH where it is |
 | `--sweep-reserve <wei>` | With `--rotate`: wei to leave on the old owner when sweeping |
 
@@ -367,7 +367,7 @@ The transaction that installs a guard is not checked by that guard, so its simul
 
 The follow-up proves that the guard lets a self-call through at the next nonce in the simulated block. It does not prove the guard will allow other calls, or the same call later. A guard that depends on time, targets or calldata can still lock the Safe in ways one follow-up cannot catch.
 
-The signing, bundle, simulation and gas options are those of `safe send` (`--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`, `--simulate-only`, `--no-submit`, `--raw-out`, `--nonce`, fees and so on). `--safe-tx-gas` and `--rotate` are not offered: config changes are always fail-closed, and a config change cannot also rotate the signer. `--hd-wallet` and `--ledger` are refused for the same reason as in `send` without `--rotate`.
+The signing, bundle, simulation and gas options are those of `safe send` (`--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`, `--simulate-only`, `--no-submit`, `--raw-out`, `--nonce`, fees and so on). `--safe-tx-gas` and `--rotate` are not offered: config changes are always fail-closed, and a config change cannot also rotate the signer. `--hd-wallet` is refused for the same reason as in `send` without `--rotate`; `--ledger [index]` signs with that Ledger key, like `--private-key`.
 
 On a multi-owner Safe, the first owner plans the change into a bundle. Co-owners then sign what is in the bundle instead of planning again, because `prevOwner` depends on the chain state the plan was made against:
 
@@ -406,7 +406,7 @@ safe create \
 | `--fallback-handler <address>` | Custom fallback handler |
 | `--singleton <address>` / `--factory <address>` | Non-canonical Safe deployment |
 
-With `--hd-wallet <name>` (or `--ledger`) the Safe's first owner is a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--owner` and `--threshold` add co-owners, and `--safe-version` applies as usual. `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version, contracts, owners and threshold it was first created with.
+With `--rotate --hd-wallet <name>` (or `--rotate --ledger`) the Safe's first owner is a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--owner` and `--threshold` add co-owners, and `--safe-version` applies as usual. `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version, contracts, owners and threshold it was first created with.
 
 ### `safe rotate`
 
@@ -469,6 +469,7 @@ Commands that sign with a single key, and `safe info` and `safe call` when they 
 | `--keystore <path>` | Keystore file (Web3 Secret Storage v3, as written by `cast wallet import`) |
 | `-i, --interactive` | Prompt for private key securely |
 | `--hd-key <wallet>[:<index>]` | The key at `m/44'/60'/0'/0/<index>` (default 0) of an HD wallet: a name under `~/.safe-rs/wallets` or a keystore path |
+| `--ledger [index]` | The key at `m/44'/60'/0'/0/<index>` (default 0) of a connected Ledger (Ethereum app open). With `--rotate` (`send`, `create`) the Ledger gives the rotating owner keys instead |
 | `PRIVATE_KEY` env var | Environment variable |
 
 A keystore or HD wallet password is read from `--password-file <path>`, then `--password <text>` (visible in the process list; avoid it), then a prompt.
@@ -501,7 +502,7 @@ safe wallet new treasury
 
 # 2. Send ETH for gas to the funding address it prints, then create a Safe.
 #    The funding key deploys; the Safe's owner is a key that has never signed.
-safe create --hd-wallet treasury --rpc-url $ETH_RPC_URL
+safe create --rotate --hd-wallet treasury --rpc-url $ETH_RPC_URL
 
 # 3. Use it. Each send rotates the owner and moves the gas money along.
 safe send 0xToken 'transfer(address,uint256)' 0xRecipient 1000000 \
@@ -521,11 +522,11 @@ The prompt shows how much ETH the old key holds; all of it moves to the new owne
 
 ### On a Ledger
 
-Pass `--ledger` instead of `--hd-wallet <name>` to keep the keys on a Ledger. It uses the same path, `m/44'/60'/0'/0/i`, so a Ledger seeded with a phrase has the same keys, and the same state, as that phrase.
+Pass `--ledger` instead of `--hd-wallet <name>` to keep the rotating keys on a Ledger (with `--rotate` on `send` and `create`, and on `safe rotate` and `safe wallet`; elsewhere `--ledger [index]` just signs with that key). It uses the same path, `m/44'/60'/0'/0/i`, so a Ledger seeded with a phrase has the same keys, and the same state, as that phrase.
 
 ```bash
 safe wallet address --ledger                  # the funding address (key 0)
-safe create --ledger --rpc-url $ETH_RPC_URL   # records the next 20 keys from the device
+safe create --rotate --ledger --rpc-url $ETH_RPC_URL   # records the next 20 keys from the device
 safe send 0xRecipient --value 1000000000000000000 \
     --safe 0xYourSafe --rpc-url $ETH_RPC_URL --rotate --ledger
 ```
@@ -939,7 +940,8 @@ Everything else, such as a bundle file that does not parse, is `Other`. The enum
   - `--safe-tx-gas`, `--nonce`, `--gas-limit`, `--max-fee-per-gas`, `--max-priority-fee-per-gas`
   - `--raw-out`, `--no-submit`, `--timeout`, `--no-confirm`
   - `--multi-send`, `--multi-send-call-only`
-  - `--rotate`, `--hd-wallet`, `--ledger`, `--no-sweep`, `--sweep-reserve`
+  - `--rotate`, `--hd-wallet`, `--no-sweep`, `--sweep-reserve`
+- `SignerArgs` takes `--private-key`, `--keystore`, `--hd-key`, `--ledger` and `--interactive`. With `--rotate`, the `safe` commands move `--ledger` into `SendOpts::hd` / `CreateOpts::hd` as the source of the rotating keys; set `hd.ledger` yourself when you build the options in code.
   - `--password`, `--password-file`, `--payer-private-key`
 - `SendOpts` also reads three environment variables: `SAFE_HD_WALLET`, `SAFE_PASSWORD_FILE` and `SAFE_PAYER_PRIVATE_KEY`.
 - To catch a flag-name clash, parse a sample command line in a test. `Command::debug_assert()` alone misses a clash between a global flag and one of these, and clap panics at parse time instead.
@@ -959,7 +961,7 @@ The CLI decides nothing itself, and without a policy none of this runs.
 
 The same pattern covers deploying Safes and managing HD wallets:
 
-- `safe_rs_cli::create::CreateOpts` holds the `safe create` flags without `--rpc-url` or the signer: the setup (`SafeSetupArgs`: `--owner`, `--threshold`, `--salt-nonce`, `--safe-version`, `--singleton`, `--factory`, `--fallback-handler`), `--compute-only`, `--no-confirm`, the fee flags, and with `hd-wallet` `--hd-wallet`, `--ledger`, `--same-as` and the sweep flags. Build a `CreateContext::new(rpc_url).with_signer(key)` (no signer with `--hd-wallet` or `--ledger`) and call `create::create(ctx, opts)`. It returns a `CreateOutcome` (`Computed`, `AlreadyDeployed`, `Deployed` or `Aborted`, each with the Safe's address) or a `CreateError`. `CreateError::may_be_pending()` is true when the deployment may still be mined, and `CreateError::safe()` gives the address it was deploying to.
+- `safe_rs_cli::create::CreateOpts` holds the `safe create` flags without `--rpc-url` or the signer: the setup (`SafeSetupArgs`: `--owner`, `--threshold`, `--salt-nonce`, `--safe-version`, `--singleton`, `--factory`, `--fallback-handler`), `--compute-only`, `--no-confirm`, the fee flags, and with `hd-wallet` `--rotate`, `--hd-wallet`, `--same-as` and the sweep flags (`hd.ledger` takes the keys from a Ledger). Build a `CreateContext::new(rpc_url).with_signer(key)` (no signer with `--rotate`) and call `create::create(ctx, opts)`. It returns a `CreateOutcome` (`Computed`, `AlreadyDeployed`, `Deployed` or `Aborted`, each with the Safe's address) or a `CreateError`. `CreateError::may_be_pending()` is true when the deployment may still be mined, and `CreateError::safe()` gives the address it was deploying to.
 - `safe_rs_cli::wallet` (the `hd-wallet` feature) has `WalletCommand`, the `safe wallet` subcommands, to mount with `#[command(subcommand)]`, and one function per subcommand: `new_wallet`, `import_wallet`, `list_wallets`, `wallet_address`, `wallet_status`, `sync_wallet` and `sweep_wallet`. Each takes a `WalletContext` (`with_rpc_url`, `with_safe`, `with_home`, logger and prompt) and returns a typed outcome or a `WalletError`, such as `NotFound`, `WrongPassword`, `Locked`, or `Sweep` with what was moved and what is still owed. `wallet::run` runs a parsed `WalletCommand` and prints like `safe wallet`.
 
 Neither defines `--rpc-url`, `--private-key` or `--safe`, so your CLI's own global flags for those keep working. `cli/tests/embed_create.rs` is a host shaped this way.

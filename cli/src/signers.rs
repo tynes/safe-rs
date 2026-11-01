@@ -18,20 +18,31 @@ pub async fn create_signer(
     password: &PasswordArgs,
     console: &Console,
 ) -> Result<AnySigner> {
-    #[cfg(feature = "ledger")]
-    if let Some(index) = args.ledger_key {
-        if args.interactive || args.keystore.is_some() || args.hd_key.is_some() {
+    if let Some(index) = args.ledger {
+        if args.interactive || args.keystore.is_some() || hd_key(args).is_some() {
             return Err(eyre!(
-                "--ledger-key cannot be combined with --interactive, --keystore or --hd-key"
+                "--ledger cannot be combined with --interactive, --keystore or --hd-key"
             ));
         }
-        let keys = safe_rs::LedgerKeys::connect().await?;
-        return Ok(keys.signer(index).await?.into());
+        return ledger_signer(index).await;
     }
     local_signer(args, password, console).map(AnySigner::from)
 }
 
-/// A local key the options name (anything but `--ledger-key`).
+#[cfg(feature = "ledger")]
+async fn ledger_signer(index: u32) -> Result<AnySigner> {
+    let keys = safe_rs::LedgerKeys::connect().await?;
+    Ok(keys.signer(index).await?.into())
+}
+
+#[cfg(not(feature = "ledger"))]
+async fn ledger_signer(_index: u32) -> Result<AnySigner> {
+    Err(eyre!(
+        "this build of safe has no Ledger support (it was built without the `ledger` feature)"
+    ))
+}
+
+/// A local key the options name (anything but `--ledger`).
 fn local_signer(
     args: &SignerArgs,
     password: &PasswordArgs,
@@ -50,7 +61,7 @@ fn local_signer(
         parse_private_key(private_key)
     } else {
         Err(eyre!(
-            "No wallet specified. Use --private-key, --keystore, --hd-key, --ledger-key or \
+            "No wallet specified. Use --private-key, --keystore, --hd-key, --ledger or \
              --interactive"
         ))
     }
@@ -59,7 +70,7 @@ fn local_signer(
 impl SignerArgs {
     /// The signer these flags name, as the `safe` commands resolve it:
     /// `--interactive` asks `prompt` for the key, `--keystore` reads the
-    /// password from `password` or asks `prompt`, `--ledger-key` connects
+    /// password from `password` or asks `prompt`, `--ledger` connects
     /// to the Ledger.
     pub async fn resolve(
         &self,

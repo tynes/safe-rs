@@ -57,9 +57,22 @@ pub enum OptionsError {
          and --interactive, and unset PRIVATE_KEY"
     )]
     SignerWithHd,
+    /// `--ledger INDEX` where the Ledger gives the rotating owner keys, whose
+    /// index the wallet state picks
+    #[error(
+        "with --rotate (or `safe rotate` and `safe wallet`) the Ledger gives the rotating owner \
+         keys and the wallet state picks which: pass --ledger without an INDEX"
+    )]
+    LedgerIndexWhenRotating,
+    /// `create --hd-wallet` without `--rotate`
+    #[error("--hd-wallet needs --rotate: `create --rotate` makes a Safe whose owner key rotates")]
+    CreateHdWithoutRotate,
+    /// `create --rotate` with no HD wallet or Ledger to take the owner keys from
+    #[error("--rotate needs --hd-wallet or --ledger to take the owner keys from")]
+    RotateWithoutKeys,
     /// An option of `create` that only applies with `--hd-wallet` or
     /// `--ledger`
-    #[error("{flag} needs --hd-wallet or --ledger")]
+    #[error("{flag} needs --rotate")]
     HdOnly { flag: &'static str },
 }
 

@@ -69,13 +69,7 @@ pub enum ConfigError {
 
 /// The flag ids a setting is the default of, with the signer flags that
 /// override it (for the signer settings only).
-const SIGNER_FLAGS: [&str; 5] = [
-    "private_key",
-    "keystore",
-    "hd_key",
-    "ledger_key",
-    "interactive",
-];
+const SIGNER_FLAGS: [&str; 5] = ["private_key", "keystore", "hd_key", "ledger", "interactive"];
 
 impl ConfigFile {
     /// `config.toml` in the data directory (`$SAFE_RS_HOME`, or

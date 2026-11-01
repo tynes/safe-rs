@@ -194,6 +194,15 @@ pub struct Target {
 
 /// `safe send`.
 pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
+    // With --rotate, --ledger names where the rotating owner keys come from.
+    #[cfg(feature = "hd-wallet")]
+    let args = {
+        let mut args = args;
+        if args.opts.rotate {
+            crate::cli::LedgerArg::take_for_rotation(&mut args.signer.ledger, &mut args.opts.hd)?;
+        }
+        args
+    };
     let calls = build_cli_calls(&args)?;
     if args.eoa.send_eoa {
         return run_eoa(args, calls, console).await;

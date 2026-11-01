@@ -23,7 +23,7 @@ use serde::Serialize;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::cli::{parse_ether_value, HdArgs, PasswordArgs, DEFAULT_TIMEOUT};
+use crate::cli::{parse_ether_value, HdArgs, LedgerArg, PasswordArgs, DEFAULT_TIMEOUT};
 use crate::commands::default_safe::recorded_safe;
 use crate::commands::rotation::rotation_config;
 use crate::commands::{http_provider, latest_sim_spec};
@@ -97,6 +97,9 @@ pub struct WalletAddressOpts {
     #[command(flatten)]
     pub hd: HdArgs,
 
+    #[command(flatten)]
+    pub ledger: LedgerArg,
+
     /// Owner key index (default: the funding address, which needs no password)
     #[arg(long)]
     pub index: Option<u32>,
@@ -110,6 +113,9 @@ pub struct WalletAddressOpts {
 pub struct WalletStatusOpts {
     #[command(flatten)]
     pub hd: HdArgs,
+
+    #[command(flatten)]
+    pub ledger: LedgerArg,
 }
 
 /// `sync` reads the context's Safe, or the wallet's sole recorded Safe on
@@ -118,6 +124,9 @@ pub struct WalletStatusOpts {
 pub struct WalletSyncOpts {
     #[command(flatten)]
     pub hd: HdArgs,
+
+    #[command(flatten)]
+    pub ledger: LedgerArg,
 
     /// How many wallet indices to derive and compare (default: 1000 for an HD
     /// wallet file, 52 for a Ledger, which answers one address at a time)
@@ -148,6 +157,9 @@ pub struct WalletSyncOpts {
 pub struct WalletSweepOpts {
     #[command(flatten)]
     pub hd: HdArgs,
+
+    #[command(flatten)]
+    pub ledger: LedgerArg,
 
     /// Wei to leave on the retired owner, or a number with a unit ("0.01ether")
     /// (default: what the chain charges outside gas)
@@ -894,24 +906,34 @@ pub(crate) async fn run_in(
         WalletCommand::List => console.emit(&WalletListOutput {
             wallets: list_wallets(ctx)?,
         }),
-        WalletCommand::Address(opts) => {
+        WalletCommand::Address(mut opts) => {
+            opts.ledger.apply(&mut opts.hd)?;
             console.emit(&wallet_address(ctx, &opts.hd, &opts.password, opts.index).await?);
         }
-        WalletCommand::Status(opts) => console.emit(&wallet_status(ctx, &opts.hd).await?),
-        WalletCommand::Sync(opts) => console.emit(&sync_wallet(ctx, opts).await?),
-        WalletCommand::Sweep(opts) => match sweep_wallet(ctx, opts).await {
-            Ok(sweep) => console.emit(&sweep),
-            Err(WalletError::Sweep { swept, still_owed }) => {
-                let owed = still_owed.len();
-                console.emit(&WalletSweep {
-                    sweeps: swept,
-                    still_owed,
-                    warnings: Vec::new(),
-                });
-                return Err(eyre!("{owed} sweep(s) could not be completed"));
+        WalletCommand::Status(mut opts) => {
+            opts.ledger.apply(&mut opts.hd)?;
+            console.emit(&wallet_status(ctx, &opts.hd).await?);
+        }
+        WalletCommand::Sync(mut opts) => {
+            opts.ledger.apply(&mut opts.hd)?;
+            console.emit(&sync_wallet(ctx, opts).await?);
+        }
+        WalletCommand::Sweep(mut opts) => {
+            opts.ledger.apply(&mut opts.hd)?;
+            match sweep_wallet(ctx, opts).await {
+                Ok(sweep) => console.emit(&sweep),
+                Err(WalletError::Sweep { swept, still_owed }) => {
+                    let owed = still_owed.len();
+                    console.emit(&WalletSweep {
+                        sweeps: swept,
+                        still_owed,
+                        warnings: Vec::new(),
+                    });
+                    return Err(eyre!("{owed} sweep(s) could not be completed"));
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) => return Err(e.into()),
-        },
+        }
     }
     Ok(())
 }

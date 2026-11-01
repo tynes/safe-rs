@@ -38,10 +38,10 @@ zeroize = { version = "1", features = ["serde"] }
 [features]
 default = ["ledger"]
 # One-time owner keys: `--rotate`, `--hd-wallet`, `safe rotate`, `safe wallet`
-# and `safe create --hd-wallet`.
+# and `safe create --rotate`.
 hd-wallet = ["safe-rs/hd-wallet", "dep:rand"]
-# Keys on a Ledger: `--ledger-key` signs with one, `--ledger` rotates owner
-# keys on one (implies hd-wallet). Builds libusb from source on Linux when the
+# Keys on a Ledger: `--ledger [INDEX]` signs with one, or with --rotate
+# rotates owner keys on one (implies hd-wallet). Builds libusb from source on Linux when the
 # system has none.
 ledger = ["hd-wallet", "safe-rs/ledger", "dep:alloy-signer-ledger"]
 # `log::TracingLogger`, for a host that already has a `tracing` subscriber.

@@ -85,6 +85,12 @@ pub struct CreateOpts {
     )]
     pub same_as: Option<SameAs>,
 
+    /// Create a Safe whose owner key rotates: its first owner is the next
+    /// unused key of --hd-wallet or --ledger, used once and then replaced
+    #[cfg(feature = "hd-wallet")]
+    #[arg(long)]
+    pub rotate: bool,
+
     #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
@@ -118,9 +124,9 @@ impl CreateOpts {
     }
 
     /// The flag conflicts clap enforces, checked again for options built in
-    /// code, then: `--same-as`, `--no-sweep` and `--sweep-reserve` need
-    /// `--hd-wallet` or `--ledger`, and a signer with `--hd-wallet` is
-    /// refused.
+    /// code, then: `--rotate` needs `--hd-wallet` or `--ledger` and refuses a
+    /// signer, `--hd-wallet` needs `--rotate` (without a signer), and
+    /// `--same-as`, `--no-sweep` and `--sweep-reserve` need `--rotate`.
     pub fn validate(&self, has_signer: bool) -> Result<(), OptionsError> {
         #[cfg(not(feature = "hd-wallet"))]
         let _ = has_signer;
@@ -154,7 +160,13 @@ impl CreateOpts {
                     with: "--no-sweep",
                 });
             }
-            if self.hd.is_set() {
+            if !self.rotate && self.hd.is_set() && !has_signer {
+                return Err(OptionsError::CreateHdWithoutRotate);
+            }
+            if self.rotate {
+                if !self.hd.is_set() {
+                    return Err(OptionsError::RotateWithoutKeys);
+                }
                 if has_signer {
                     return Err(OptionsError::SignerWithHd);
                 }
@@ -181,10 +193,10 @@ impl CreateOpts {
         Ok(())
     }
 
-    /// Whether the owner comes from an HD wallet or Ledger.
+    /// Whether the owner comes from an HD wallet or Ledger (`--rotate`).
     pub fn uses_hd(&self) -> bool {
         #[cfg(feature = "hd-wallet")]
-        return self.hd.is_set();
+        return self.rotate;
         #[cfg(not(feature = "hd-wallet"))]
         return false;
     }
@@ -632,6 +644,11 @@ pub(crate) async fn run_with(
 ) -> color_eyre::Result<()> {
     // `--json` never prompts: it is the result document's only output.
     args.opts.no_confirm |= json;
+    // With --rotate, --ledger names where the rotating owner keys come from.
+    #[cfg(feature = "hd-wallet")]
+    if args.opts.rotate {
+        crate::cli::LedgerArg::take_for_rotation(&mut args.signer.ledger, &mut args.opts.hd)?;
+    }
     // Checked before any key or password prompt.
     args.opts.validate(args.signer.is_set())?;
     let signer = if args.opts.uses_hd() {
