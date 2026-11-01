@@ -125,9 +125,9 @@ pub enum SendError {
     #[error("simulation failed: {reason}")]
     SimulationFailed { reason: String },
     /// The host's [`SafePolicy`](crate::policy::SafePolicy) refuses the Safe
-    /// transaction or option; nothing was signed or sent
-    #[error("the {policy} policy refuses this: {reason}")]
-    PolicyRefused { policy: String, reason: String },
+    /// transaction; nothing was sent
+    #[error("the {policy} policy refuses this Safe transaction")]
+    PolicyRefused { policy: String },
     /// The `approveHash` transaction reverts in simulation; nothing was sent
     #[error("approveHash simulation failed: {reason}")]
     ApproveHashSimulationFailed { reason: String },

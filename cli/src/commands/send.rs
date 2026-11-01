@@ -37,7 +37,7 @@ use crate::output::{
     Report, SignedTxOutput, SimulationOutput,
 };
 pub use crate::output::{EoaTx, SendOutcome};
-use crate::policy::{SafePolicy, SafeSnapshot};
+use crate::policy::{self, Plan, SafePolicy, SafeSnapshot, SafeTxCheck};
 use crate::prompt::{Prompt, TerminalPrompt};
 use crate::sig_parser::{encode_function_call, parse_call_spec};
 #[cfg(feature = "hd-wallet")]
@@ -157,9 +157,8 @@ impl SendContext {
         self
     }
 
-    /// Holds the Safe transaction to `policy`: it must be simulated, the
-    /// policy checks the Safe before and after, and `--rotate` is refused
-    /// unless the policy allows it.
+    /// Checks every Safe transaction with `policy` before it leaves the
+    /// machine.
     pub fn with_policy(mut self, policy: impl SafePolicy + 'static) -> Self {
         self.policy = Some(Arc::new(policy));
         self
@@ -508,12 +507,6 @@ async fn dispatch(
 ) -> Result<SendOutcome> {
     #[cfg(feature = "hd-wallet")]
     if opts.rotate {
-        if let Some(policy) = console.policy().filter(|p| !p.allows_rotation()) {
-            return Err(SendError::PolicyRefused {
-                policy: policy.name().to_string(),
-                reason: "it does not allow --rotate, which swaps the Safe's owner".to_string(),
-            });
-        }
         return Box::pin(run_rotating(target, calls, opts, console)).await;
     }
     execute(target, opts, calls, ExecHooks::default(), console).await
@@ -540,13 +533,6 @@ pub async fn execute(
     hooks: ExecHooks<'_>,
     console: &Console,
 ) -> Result<SendOutcome> {
-    if let (Some(policy), true) = (console.policy(), args.skip_simulation) {
-        return Err(SendError::PolicyRefused {
-            policy: policy.name().to_string(),
-            reason: "--skip-simulation: the policy checks the simulated result".to_string(),
-        });
-    }
-
     // 1. Load/Build Calls & Existing Bundle State
     let bundle_existed = args.collect.bundle.as_ref().is_some_and(|p| p.exists());
     let mut bundle = if let Some(bundle_path) = &args.collect.bundle {
@@ -814,8 +800,20 @@ pub async fn execute(
     .await?;
 
     // 4. Simulate
+    let policy_check = |after| SafeTxCheck {
+        rpc_url: &target.rpc_url,
+        chain_id,
+        plan: Plan::Send(&args),
+        calls: &calls,
+        prepared: &prepared,
+        before: &state,
+        after,
+    };
     let sim_info = if args.skip_simulation {
         console.line("Skipping simulation (--skip-simulation)\n");
+        if let Some(policy) = console.policy() {
+            policy::enforce(policy.as_ref(), &policy_check(None)).await?;
+        }
         None
     } else {
         let mut simulated = simulate(
@@ -832,27 +830,10 @@ pub async fn execute(
         if let (Some(check), Some(post)) = (hooks.post_check, simulated.post.as_mut()) {
             check(post)?;
         }
-        if let Some(policy) = console.policy() {
-            let refused = |reason| SendError::PolicyRefused {
-                policy: policy.name().to_string(),
-                reason,
-            };
-            match simulated.post.as_mut() {
-                Some(post) => {
-                    let before = SafeSnapshot::from_state(&state);
-                    let after = SafeSnapshot::read(post, safe_address)?;
-                    policy.check(&before, &after).map_err(refused)?;
-                }
-                // A failed simulation is refused below; a passing one without
-                // its post-state cannot be checked, so it is not sent.
-                None if simulated.result.success => {
-                    return Err(refused(
-                        "the simulation kept no post-state to check".to_string(),
-                    ));
-                }
-                None => {}
-            }
-        }
+        let after = match (console.policy(), simulated.post.as_mut()) {
+            (Some(_), Some(post)) => Some(SafeSnapshot::read(post, safe_address)?),
+            _ => None,
+        };
         let result = &simulated.result;
         let report = SimulationOutput {
             success: result.success,
@@ -884,6 +865,9 @@ pub async fn execute(
                     .clone()
                     .unwrap_or_else(|| "unknown reason".to_string()),
             });
+        }
+        if let Some(policy) = console.policy() {
+            policy::enforce(policy.as_ref(), &policy_check(after.as_ref())).await?;
         }
         if args.simulate.simulate_only {
             return Ok(SendOutcome::Simulated {

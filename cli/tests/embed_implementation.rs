@@ -159,40 +159,90 @@ async fn a_host_implementation_is_refused_with_an_hd_wallet() {
     );
 }
 
-/// A host policy sees every Safe transaction's result before it is signed:
-/// `FixedOwners` lets a plain call through and stops an owner change.
+/// A host policy that keeps the owners: it sees the plan and the simulated
+/// Safe, and refuses what it cannot check.
+struct KeepOwners {
+    seen: Arc<Mutex<Vec<(usize, bool)>>>,
+}
+
+impl safe_rs_cli::policy::SafePolicy for KeepOwners {
+    fn name(&self) -> &'static str {
+        "keep owners"
+    }
+
+    fn check(&self, tx: &safe_rs_cli::policy::SafeTxCheck<'_>) -> bool {
+        use safe_rs_cli::policy::Plan;
+        let simulate_only = matches!(tx.plan, Plan::Send(opts) if opts.simulate.simulate_only);
+        self.seen
+            .lock()
+            .unwrap()
+            .push((tx.calls.len(), simulate_only));
+        assert_eq!(tx.prepared.safe, tx.before.address);
+        tx.after
+            .is_some_and(|after| after.owners == tx.before.owners)
+    }
+}
+
+/// A host policy that looks something up before it decides.
+struct AsyncNo;
+
+impl safe_rs_cli::policy::SafePolicy for AsyncNo {
+    fn name(&self) -> &'static str {
+        "async no"
+    }
+
+    fn check_async<'a>(
+        &'a self,
+        tx: &'a safe_rs_cli::policy::SafeTxCheck<'a>,
+    ) -> safe_rs_cli::policy::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            tx.calls.is_empty()
+        })
+    }
+}
+
+/// A policy sees each Safe transaction with the simulated Safe, and its
+/// `false` stops it.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_policy_refuses_owner_changes_found_in_simulation() {
+async fn a_policy_decides_from_the_plan_and_the_simulated_safe() {
     use alloy::sol_types::SolCall as _;
     use safe_rs_cli::args::SendOpts;
-    use safe_rs_cli::policy::FixedOwners;
+    use safe_rs_cli::policy::SafePolicy;
     use safe_rs_cli::safe_rs::{Bytes, Call, ISafe};
     use safe_rs_cli::{SendContext, SendError, SendOutcome};
 
     let h = LocalHarness::new().await;
     let safe = h.deploy_safe(77).await;
-    let ctx = || {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let ctx = |policy: Box<dyn SafePolicy>| {
         SendContext::new(h.url(), safe)
             .with_signer(h.owner.clone())
             .with_prompt(NoPrompt)
-            .with_policy(FixedOwners)
+            .with_policy(policy)
     };
+    let keep = || -> Box<dyn SafePolicy> { Box::new(KeepOwners { seen: seen.clone() }) };
     let opts = || {
         let mut opts = SendOpts::default();
         opts.simulate.simulate_only = true;
         opts
     };
+    let plain = || {
+        vec![Call::new(
+            Address::repeat_byte(0x42),
+            U256::ZERO,
+            Bytes::new(),
+        )]
+    };
 
-    let plain = vec![Call::new(
-        Address::repeat_byte(0x42),
-        U256::ZERO,
-        Bytes::new(),
-    )];
-    let outcome = safe_rs_cli::send(ctx(), plain, opts()).await.unwrap();
+    let outcome = safe_rs_cli::send(ctx(keep()), plain(), opts())
+        .await
+        .unwrap();
     assert!(
         matches!(outcome, SendOutcome::Simulated { .. }),
         "{outcome:?}"
     );
+    assert_eq!(*seen.lock().unwrap(), [(1, true)]);
 
     let add_owner = ISafe::addOwnerWithThresholdCall {
         owner: Address::repeat_byte(0x43),
@@ -203,58 +253,149 @@ async fn a_policy_refuses_owner_changes_found_in_simulation() {
         U256::ZERO,
         Bytes::from(add_owner.abi_encode()),
     )];
-    let error = safe_rs_cli::send(ctx(), calls, opts()).await.unwrap_err();
+    let error = safe_rs_cli::send(ctx(keep()), calls, opts())
+        .await
+        .unwrap_err();
     assert!(
-        matches!(&error, SendError::PolicyRefused { reason, .. } if reason.contains("owners")),
+        matches!(&error, SendError::PolicyRefused { policy } if policy == "keep owners"),
         "{error:?}"
     );
 
+    // Without a simulation there is no Safe after, which this policy refuses.
     let mut unchecked = opts();
     unchecked.simulate.simulate_only = false;
     unchecked.skip_simulation = true;
     unchecked.no_confirm = true;
-    let plain = vec![Call::new(
-        Address::repeat_byte(0x42),
-        U256::ZERO,
-        Bytes::new(),
-    )];
-    let error = safe_rs_cli::send(ctx(), plain, unchecked)
+    let error = safe_rs_cli::send(ctx(keep()), plain(), unchecked)
         .await
         .unwrap_err();
     assert!(
         matches!(error, SendError::PolicyRefused { .. }),
         "{error:?}"
     );
-}
 
-/// `--rotate` is refused by a policy that keeps the owner, before any request.
-#[cfg(feature = "hd-wallet")]
-#[tokio::test]
-async fn a_policy_that_keeps_the_owner_refuses_rotation() {
-    use safe_rs_cli::args::SendOpts;
-    use safe_rs_cli::policy::FixedOwners;
-    use safe_rs_cli::safe_rs::{Bytes, Call};
-    use safe_rs_cli::{SendContext, SendError};
-
-    let ctx = SendContext::new(
-        "http://127.0.0.1:9".parse().unwrap(),
-        Address::repeat_byte(0x11),
-    )
-    .with_prompt(NoPrompt)
-    .with_policy(FixedOwners);
-    let mut opts = SendOpts {
-        rotate: true,
-        ..SendOpts::default()
-    };
-    opts.hd.hd_wallet = Some("demo".into());
-    let calls = vec![Call::new(
-        Address::repeat_byte(0x42),
-        U256::ZERO,
-        Bytes::new(),
-    )];
-    let error = safe_rs_cli::send(ctx, calls, opts).await.unwrap_err();
+    // The async check runs too.
+    let error = safe_rs_cli::send(ctx(Box::new(AsyncNo)), plain(), opts())
+        .await
+        .unwrap_err();
     assert!(
-        matches!(&error, SendError::PolicyRefused { reason, .. } if reason.contains("--rotate")),
+        matches!(&error, SendError::PolicyRefused { policy } if policy == "async no"),
         "{error:?}"
     );
+}
+
+/// A rotation goes through the policy too, with its plan: the owners it swaps
+/// and the owners it leaves.
+#[cfg(feature = "hd-wallet")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_sees_a_rotation_plan() {
+    use safe_rs_cli::args::{PasswordArgs, SendOpts};
+    use safe_rs_cli::policy::{Plan, SafePolicy, SafeTxCheck};
+    use safe_rs_cli::safe_rs::{Bytes, Call, HdWallet};
+    use safe_rs_cli::wallet::{self, WalletContext};
+    use safe_rs_cli::{SendContext, SendError, SendOutcome};
+
+    const PHRASE: &str =
+        "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+    /// Allows everything but a rotation, which it tells from the plan.
+    struct NoRotation;
+
+    impl SafePolicy for NoRotation {
+        fn name(&self) -> &'static str {
+            "no rotation"
+        }
+
+        fn check(&self, tx: &SafeTxCheck<'_>) -> bool {
+            !matches!(tx.plan, Plan::Rotation(_))
+        }
+    }
+
+    /// Allows a rotation that leaves one owner other than the old one.
+    struct SeesRotation {
+        seen: Arc<Mutex<Vec<Vec<Address>>>>,
+    }
+    impl SafePolicy for SeesRotation {
+        fn name(&self) -> &'static str {
+            "sees rotation"
+        }
+        fn check(&self, tx: &SafeTxCheck<'_>) -> bool {
+            let Plan::Rotation(plan) = tx.plan else {
+                return false;
+            };
+            let after = tx.after.expect("a rotation's planned owners");
+            *self.seen.lock().unwrap() = vec![tx.before.owners.clone(), after.owners.clone()];
+            plan.expected_owners == after.owners && after.owners != tx.before.owners
+        }
+    }
+
+    let h = LocalHarness::new().await;
+    let home = tempfile::tempdir().unwrap();
+    let wallet_ctx = WalletContext::new()
+        .with_home(home.path().to_path_buf())
+        .with_prompt(NoPrompt);
+    wallet::import_wallet(&wallet_ctx, "demo", PHRASE, "pw", None).unwrap();
+    let owner = HdWallet::from_phrase(PHRASE)
+        .unwrap()
+        .owner_address(1)
+        .unwrap();
+    let safe = h
+        .deploy_safe_on(h.addresses.safe_singleton, &[owner], 1, 503)
+        .await;
+    h.fund(owner, U256::from(10).pow(U256::from(18))).await;
+
+    let opts = || {
+        let mut opts = SendOpts {
+            rotate: true,
+            ..SendOpts::default()
+        };
+        opts.hd.hd_wallet = Some("demo".into());
+        opts.password = PasswordArgs {
+            password: Some("pw".into()),
+            ..PasswordArgs::default()
+        };
+        opts.simulate.simulate_only = true;
+        opts
+    };
+    let calls = || {
+        vec![Call::new(
+            Address::repeat_byte(0x42),
+            U256::ZERO,
+            Bytes::new(),
+        )]
+    };
+    let ctx = |policy: Box<dyn SafePolicy>| {
+        SendContext::new(h.url(), safe)
+            .with_home(home.path().to_path_buf())
+            .with_prompt(NoPrompt)
+            .with_policy(policy)
+    };
+
+    let error = safe_rs_cli::send(ctx(Box::new(NoRotation)), calls(), opts())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, SendError::PolicyRefused { policy } if policy == "no rotation"),
+        "{error:?}"
+    );
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let outcome = safe_rs_cli::send(
+        ctx(Box::new(SeesRotation { seen: seen.clone() })),
+        calls(),
+        opts(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, SendOutcome::Simulated { .. }),
+        "{outcome:?}"
+    );
+    let seen = seen.lock().unwrap().clone();
+    let [before, after] = &seen[..] else {
+        panic!("the policy did not see the rotation: {seen:?}");
+    };
+    assert_eq!(before, &[owner]);
+    assert_eq!(after.len(), 1);
+    assert_ne!(after, before);
 }

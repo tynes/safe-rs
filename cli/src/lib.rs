@@ -182,7 +182,7 @@ impl RunConfig {
         }
     }
 
-    /// Holds every Safe transaction to `policy`, and refuses owner key
+    /// Checks every Safe transaction with `policy` before it leaves the machine.
     /// rotation unless it allows it.
     #[must_use]
     pub fn with_policy(mut self, policy: impl policy::SafePolicy + 'static) -> Self {
@@ -217,14 +217,7 @@ pub async fn run(command: Commands, config: RunConfig) -> Result<()> {
         #[cfg(feature = "hd-wallet")]
         Commands::Rotate(mut args) => {
             args.no_confirm |= json;
-            match console.policy().filter(|p| !p.allows_rotation()) {
-                Some(policy) => Err(SendError::PolicyRefused {
-                    policy: policy.name().to_string(),
-                    reason: "it does not allow rotating the Safe's owner".to_string(),
-                }
-                .into()),
-                None => commands::rotate::run(*args, &console).await,
-            }
+            commands::rotate::run(*args, &console).await
         }
         #[cfg(feature = "hd-wallet")]
         Commands::Wallet(args) => run_wallet(args, &console).await,

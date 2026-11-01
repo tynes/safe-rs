@@ -1,18 +1,32 @@
-//! Rules a host CLI holds every Safe transaction to, checked against the
-//! simulated result before anything is signed or sent.
+//! Rules a host CLI holds every Safe transaction to.
 //!
-//! A host whose Safes must keep a shape (for example, an app whose off-chain
-//! service only accepts a Safe still owned by the key it was created for) sets
-//! a [`SafePolicy`] on [`RunConfig`](crate::RunConfig) or
-//! [`SendContext`](crate::SendContext). Every Safe transaction then has to be
-//! simulated (`--skip-simulation` is refused), the policy sees the Safe before
-//! and after, and owner key rotation is refused unless the policy allows it.
+//! A host sets a [`SafePolicy`] on [`RunConfig`](crate::RunConfig) or
+//! [`SendContext`](crate::SendContext). Before a Safe transaction leaves the
+//! machine (broadcast, `--approve-hash`, a bundle, `--sign-only` or
+//! `--no-submit`), the CLI calls the policy's [`check`](SafePolicy::check),
+//! then its [`check_async`](SafePolicy::check_async), with everything it
+//! planned: the options, the calls, the Safe transaction, and the Safe before
+//! and (when simulated) after. If either returns `false`, the CLI stops with
+//! [`SendError::PolicyRefused`](crate::SendError::PolicyRefused).
+//!
+//! The CLI draws no conclusions of its own: what a policy allows is up to the
+//! host. Without a policy, none of this runs.
+
+use std::future::Future;
+use std::pin::Pin;
 
 use alloy::primitives::{Address, U256};
 use alloy::sol_types::SolCall;
-use safe_rs::{ForkSession, ISafe, SafeState};
+use safe_rs::{Call, ForkSession, ISafe, PreparedSafeTx, RotationPlan, SafeState};
+use url::Url;
 
-/// The parts of a Safe a policy checks.
+use crate::cli::SendOpts;
+
+/// A boxed future, for [`SafePolicy::check_async`].
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// The Safe's owners, threshold and implementation, as a policy sees them
+/// after the transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SafeSnapshot {
@@ -34,13 +48,14 @@ impl SafeSnapshot {
         }
     }
 
-    pub(crate) fn from_state(state: &SafeState) -> Self {
-        Self {
-            safe: state.address,
-            owners: state.owners.clone(),
-            threshold: state.threshold,
-            singleton: state.singleton,
-        }
+    /// The same parts of `state`.
+    pub fn of(state: &SafeState) -> Self {
+        Self::new(
+            state.address,
+            state.owners.clone(),
+            state.threshold,
+            state.singleton,
+        )
     }
 
     /// Reads the Safe from the simulated post-state.
@@ -69,95 +84,91 @@ impl SafeSnapshot {
                 slot0.len()
             )));
         }
-        Ok(Self {
+        Ok(Self::new(
             safe,
             owners,
             threshold,
-            singleton: Address::from_slice(&slot0[12..]),
-        })
+            Address::from_slice(&slot0[12..]),
+        ))
     }
 }
 
-/// What a host requires of its Safes.
+/// What the Safe transaction was planned from.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub enum Plan<'a> {
+    /// `send` (and `safe config`, which plans its calls and sends them):
+    /// the options it was run with
+    Send(&'a SendOpts),
+    /// `safe rotate` and `send --rotate`: the owner swaps appended to the
+    /// calls, and the owners the Safe must have afterwards
+    Rotation(&'a RotationPlan),
+}
+
+/// Everything the CLI planned for one Safe transaction.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct SafeTxCheck<'a> {
+    pub rpc_url: &'a Url,
+    pub chain_id: u64,
+    /// What the transaction was planned from
+    pub plan: Plan<'a>,
+    /// The calls asked for, before any the plan adds (such as owner swaps)
+    pub calls: &'a [Call],
+    /// The Safe transaction to be signed or sent
+    pub prepared: &'a PreparedSafeTx,
+    /// The Safe as the transaction was planned against
+    pub before: &'a SafeState,
+    /// The Safe after the simulated transaction. `None` with
+    /// `--skip-simulation`. For a rotation, the owners its plan must leave
+    /// (the rotation is checked against them on-chain too).
+    pub after: Option<&'a SafeSnapshot>,
+}
+
+/// What a host requires of its Safe transactions. Both checks default to
+/// allowing everything; implement either or both.
 pub trait SafePolicy: Send + Sync {
     /// A short name for error messages, such as "polymarket".
     fn name(&self) -> &str;
 
-    /// Whether `--rotate` and `safe rotate` may swap the Safe's owner key.
-    /// Default: yes.
-    fn allows_rotation(&self) -> bool {
+    /// `false` stops the transaction.
+    fn check(&self, tx: &SafeTxCheck<'_>) -> bool {
+        let _ = tx;
         true
     }
 
-    /// Checks a Safe transaction by the Safe before and after it (in
-    /// simulation). An `Err` stops the send before anything is signed or sent,
-    /// with that reason.
-    fn check(&self, before: &SafeSnapshot, after: &SafeSnapshot) -> Result<(), String>;
+    /// `false` stops the transaction. Runs after [`check`](Self::check)
+    /// passes, for a policy that needs to look something up.
+    fn check_async<'a>(&'a self, tx: &'a SafeTxCheck<'a>) -> BoxFuture<'a, bool> {
+        let _ = tx;
+        Box::pin(async { true })
+    }
 }
 
-/// Keeps every Safe's owners, threshold and implementation as they are, and
-/// refuses owner key rotation: for a host whose Safes an off-chain service
-/// ties to their current owner.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FixedOwners;
-
-impl SafePolicy for FixedOwners {
-    fn name(&self) -> &'static str {
-        "fixed owners"
+impl<P: SafePolicy + ?Sized> SafePolicy for Box<P> {
+    fn name(&self) -> &str {
+        (**self).name()
     }
 
-    fn allows_rotation(&self) -> bool {
-        false
+    fn check(&self, tx: &SafeTxCheck<'_>) -> bool {
+        (**self).check(tx)
     }
 
-    fn check(&self, before: &SafeSnapshot, after: &SafeSnapshot) -> Result<(), String> {
-        if after.owners != before.owners {
-            return Err(format!(
-                "it changes the owners from {:?} to {:?}",
-                before.owners, after.owners
-            ));
-        }
-        if after.threshold != before.threshold {
-            return Err(format!(
-                "it changes the threshold from {} to {}",
-                before.threshold, after.threshold
-            ));
-        }
-        if after.singleton != before.singleton {
-            return Err(format!(
-                "it changes the implementation from {} to {}",
-                before.singleton, after.singleton
-            ));
-        }
+    fn check_async<'a>(&'a self, tx: &'a SafeTxCheck<'a>) -> BoxFuture<'a, bool> {
+        (**self).check_async(tx)
+    }
+}
+
+/// Runs both checks of `policy`.
+pub(crate) async fn enforce(
+    policy: &dyn SafePolicy,
+    tx: &SafeTxCheck<'_>,
+) -> Result<(), crate::SendError> {
+    if policy.check(tx) && policy.check_async(tx).await {
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn snapshot(owners: &[u8], threshold: u64, singleton: u8) -> SafeSnapshot {
-        SafeSnapshot {
-            safe: Address::repeat_byte(0xAA),
-            owners: owners.iter().map(|b| Address::repeat_byte(*b)).collect(),
-            threshold: U256::from(threshold),
-            singleton: Address::repeat_byte(singleton),
-        }
-    }
-
-    #[test]
-    fn fixed_owners_refuses_owner_threshold_and_implementation_changes() {
-        let before = snapshot(&[1], 1, 9);
-        FixedOwners.check(&before, &before).unwrap();
-        for after in [
-            snapshot(&[2], 1, 9),
-            snapshot(&[1, 2], 1, 9),
-            snapshot(&[1], 2, 9),
-            snapshot(&[1], 1, 8),
-        ] {
-            assert!(FixedOwners.check(&before, &after).is_err(), "{after:?}");
-        }
-        assert!(!FixedOwners.allows_rotation());
+    } else {
+        Err(crate::SendError::PolicyRefused {
+            policy: policy.name().to_string(),
+        })
     }
 }
