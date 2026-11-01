@@ -24,6 +24,16 @@ pub struct SafeSnapshot {
 }
 
 impl SafeSnapshot {
+    /// A snapshot, for testing a policy.
+    pub fn new(safe: Address, owners: Vec<Address>, threshold: U256, singleton: Address) -> Self {
+        Self {
+            safe,
+            owners,
+            threshold,
+            singleton,
+        }
+    }
+
     pub(crate) fn from_state(state: &SafeState) -> Self {
         Self {
             safe: state.address,
