@@ -7,10 +7,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use alloy::primitives::{Address, Bytes};
-use alloy::signers::local::PrivateKeySigner;
 use safe_rs::encode_create_proxy_with_nonce;
 
 use super::{predict, CreateError};
+use crate::any_signer::AnySigner;
 pub use crate::cli::ResolvedSetup;
 pub use crate::commands::HttpProvider;
 
@@ -55,7 +55,7 @@ pub trait SafeImplementation: Send + Sync {
         &'a self,
         provider: &'a HttpProvider,
         setup: &'a ResolvedSetup,
-        owner: &'a PrivateKeySigner,
+        owner: &'a AnySigner,
     ) -> BoxFuture<'a, Result<SafeDeployment, CreateError>>;
 }
 
@@ -73,7 +73,7 @@ impl SafeImplementation for StandardSafe {
         &'a self,
         provider: &'a HttpProvider,
         setup: &'a ResolvedSetup,
-        _owner: &'a PrivateKeySigner,
+        _owner: &'a AnySigner,
     ) -> BoxFuture<'a, Result<SafeDeployment, CreateError>> {
         Box::pin(async move {
             let (safe, initializer) = predict(provider, setup).await?;

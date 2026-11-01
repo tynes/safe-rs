@@ -192,6 +192,14 @@ impl HdWallet {
         self.funding.address()
     }
 
+    /// The key at `m/44'/60'/0'/0/{index}`, whatever role it has.
+    pub fn key_at(&self, index: u32) -> Result<PrivateKeySigner> {
+        if index == 0 {
+            return Ok(self.funding.clone());
+        }
+        Self::child(&self.parent, index)
+    }
+
     /// Owner key `index`. Index 0 is the funding key and never an owner.
     pub fn owner(&self, index: u32) -> Result<PrivateKeySigner> {
         if index == 0 {

@@ -72,6 +72,7 @@
 #![allow(clippy::unwrap_used, reason = "CLI can unwrap for user-facing errors")]
 #![allow(clippy::expect_used, reason = "CLI can expect for user-facing errors")]
 
+mod any_signer;
 mod bundle;
 mod cli;
 mod commands;
@@ -99,6 +100,7 @@ use std::sync::Arc;
 use color_eyre::eyre::Result;
 
 pub use alloy::signers::local::PrivateKeySigner;
+pub use any_signer::AnySigner;
 pub use cli::{Cli, Commands};
 pub use commands::info::{info, InfoError, SafeInfo};
 pub use commands::send::{send, EoaTx, SendContext, SendOutcome, Sender};
@@ -134,7 +136,7 @@ pub mod args {
     #[allow(deprecated, reason = "the old name stays exported for one release")]
     pub use crate::cli::WalletArgs;
     pub use crate::cli::{
-        parse_block_id, parse_ether_value, parse_fee_value, CollectArgs, EvmSpec, FeeArgs,
+        parse_block_id, parse_ether_value, parse_fee_value, CollectArgs, EoaArgs, EvmSpec, FeeArgs,
         PasswordArgs, PayerArgs, RawTxArgs, RpcArgs, SafeArgs, SafeSetupArgs, SafeVersion,
         SendOpts, SignerArgs, SimArgs, SimulateArgs, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT,
     };

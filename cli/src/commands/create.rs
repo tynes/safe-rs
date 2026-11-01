@@ -13,7 +13,6 @@ use std::time::Duration;
 use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 use clap::{Args, Parser};
 use color_eyre::eyre::eyre;
 use safe_rs::{
@@ -28,6 +27,7 @@ pub use implementation::{
 use serde::Serialize;
 use url::Url;
 
+use crate::any_signer::AnySigner;
 use crate::cli::{FeeArgs, SafeSetupArgs};
 #[cfg(feature = "hd-wallet")]
 use crate::cli::{HdArgs, SweepArgs};
@@ -85,6 +85,12 @@ pub struct CreateOpts {
     )]
     pub same_as: Option<SameAs>,
 
+    /// Create a Safe whose owner key rotates: its first owner is the next
+    /// unused key of --hd-wallet or --ledger, used once and then replaced
+    #[cfg(feature = "hd-wallet")]
+    #[arg(long)]
+    pub rotate: bool,
+
     #[cfg(feature = "hd-wallet")]
     #[command(flatten)]
     pub hd: HdArgs,
@@ -118,9 +124,9 @@ impl CreateOpts {
     }
 
     /// The flag conflicts clap enforces, checked again for options built in
-    /// code, then: `--same-as`, `--no-sweep` and `--sweep-reserve` need
-    /// `--hd-wallet` or `--ledger`, and a signer with `--hd-wallet` is
-    /// refused.
+    /// code, then: `--rotate` needs `--hd-wallet` or `--ledger` and refuses a
+    /// signer, `--hd-wallet` needs `--rotate` (without a signer), and
+    /// `--same-as`, `--no-sweep` and `--sweep-reserve` need `--rotate`.
     pub fn validate(&self, has_signer: bool) -> Result<(), OptionsError> {
         #[cfg(not(feature = "hd-wallet"))]
         let _ = has_signer;
@@ -154,7 +160,13 @@ impl CreateOpts {
                     with: "--no-sweep",
                 });
             }
-            if self.hd.is_set() {
+            if !self.rotate && self.hd.is_set() && !has_signer {
+                return Err(OptionsError::CreateHdWithoutRotate);
+            }
+            if self.rotate {
+                if !self.hd.is_set() {
+                    return Err(OptionsError::RotateWithoutKeys);
+                }
                 if has_signer {
                     return Err(OptionsError::SignerWithHd);
                 }
@@ -181,10 +193,10 @@ impl CreateOpts {
         Ok(())
     }
 
-    /// Whether the owner comes from an HD wallet or Ledger.
+    /// Whether the owner comes from an HD wallet or Ledger (`--rotate`).
     pub fn uses_hd(&self) -> bool {
         #[cfg(feature = "hd-wallet")]
-        return self.hd.is_set();
+        return self.rotate;
         #[cfg(not(feature = "hd-wallet"))]
         return false;
     }
@@ -213,7 +225,7 @@ pub struct CreateContext {
     /// First owner and deployer (unless `--payer-private-key` pays). `None`
     /// with `--hd-wallet` / `--ledger`, where the owner is the wallet's next
     /// unused key.
-    pub signer: Option<PrivateKeySigner>,
+    pub signer: Option<AnySigner>,
     /// Where progress and warnings go (default: nowhere)
     pub logger: Arc<dyn Logger>,
     /// What asks for confirmation and passwords (default: the terminal)
@@ -238,8 +250,8 @@ impl CreateContext {
         }
     }
 
-    pub fn with_signer(mut self, signer: PrivateKeySigner) -> Self {
-        self.signer = Some(signer);
+    pub fn with_signer(mut self, signer: impl Into<AnySigner>) -> Self {
+        self.signer = Some(signer.into());
         self
     }
 
@@ -423,7 +435,7 @@ async fn create_with(
     let provider = http_provider(&ctx.rpc_url);
     let implementation = opts.implementation.get();
     let plan = implementation.plan(&provider, &setup, &signer).await?;
-    let payer = create_payer(&opts.payer)?.unwrap_or(signer);
+    let payer = create_payer(&opts.payer)?.map_or(signer, AnySigner::from);
     let safe = plan.safe;
     let mut details = String::from("Computing Safe address...\n");
     if !opts.implementation.is_standard() {
@@ -632,12 +644,17 @@ pub(crate) async fn run_with(
 ) -> color_eyre::Result<()> {
     // `--json` never prompts: it is the result document's only output.
     args.opts.no_confirm |= json;
+    // With --rotate, --ledger names where the rotating owner keys come from.
+    #[cfg(feature = "hd-wallet")]
+    if args.opts.rotate {
+        crate::cli::LedgerArg::take_for_rotation(&mut args.signer.ledger, &mut args.opts.hd)?;
+    }
     // Checked before any key or password prompt.
     args.opts.validate(args.signer.is_set())?;
     let signer = if args.opts.uses_hd() {
         None
     } else {
-        Some(create_signer(&args.signer, &args.opts.password, console)?)
+        Some(create_signer(&args.signer, &args.opts.password, console).await?)
     };
     let mut ctx = CreateContext::new(args.rpc.rpc_url);
     ctx.signer = signer;

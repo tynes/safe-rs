@@ -19,6 +19,7 @@ use safe_rs::{
     SignedSafeTx,
 };
 
+use crate::any_signer::AnySigner;
 use crate::bundle::{BundleCall, BundleFile};
 use crate::cli::{SendArgs, SendOpts};
 #[cfg(feature = "hd-wallet")]
@@ -80,7 +81,7 @@ pub struct SendContext {
     /// approvals collected in `--bundle` while a payer submits.
     ///
     /// For [`Sender::Eoa`], the account that sends and pays; required.
-    pub signer: Option<PrivateKeySigner>,
+    pub signer: Option<AnySigner>,
     /// Where progress and warnings go (default: nowhere)
     pub logger: Arc<dyn Logger>,
     /// What asks for confirmation and passwords (default: the terminal)
@@ -129,8 +130,8 @@ impl SendContext {
         }
     }
 
-    pub fn with_signer(mut self, signer: PrivateKeySigner) -> Self {
-        self.signer = Some(signer);
+    pub fn with_signer(mut self, signer: impl Into<AnySigner>) -> Self {
+        self.signer = Some(signer.into());
         self
     }
 
@@ -185,7 +186,7 @@ impl fmt::Debug for SendContext {
 pub struct Target {
     pub rpc_url: Url,
     pub safe: Option<Address>,
-    pub signer: Option<PrivateKeySigner>,
+    pub signer: Option<AnySigner>,
     /// The HD wallet directory, for `--rotate`
     #[cfg(feature = "hd-wallet")]
     pub home: Option<PathBuf>,
@@ -193,8 +194,17 @@ pub struct Target {
 
 /// `safe send`.
 pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
+    // With --rotate, --ledger names where the rotating owner keys come from.
+    #[cfg(feature = "hd-wallet")]
+    let args = {
+        let mut args = args;
+        if args.opts.rotate {
+            crate::cli::LedgerArg::take_for_rotation(&mut args.signer.ledger, &mut args.opts.hd)?;
+        }
+        args
+    };
     let calls = build_cli_calls(&args)?;
-    if args.send_eoa {
+    if args.eoa.send_eoa {
         return run_eoa(args, calls, console).await;
     }
     // Checked before any key or password prompt.
@@ -211,7 +221,7 @@ pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
         eyre::bail!("Target address required for single call mode");
     }
     let signer = if args.signer.is_set() {
-        Some(create_signer(&args.signer, &args.opts.password, console)?)
+        Some(create_signer(&args.signer, &args.opts.password, console).await?)
     } else {
         None
     };
@@ -245,7 +255,7 @@ async fn run_eoa(args: SendArgs, calls: Vec<Call>, console: &Console) -> eyre::R
     if !args.signer.is_set() {
         return Err(SendError::NoSigner.into());
     }
-    let signer = create_signer(&args.signer, &args.opts.password, console)?;
+    let signer = create_signer(&args.signer, &args.opts.password, console).await?;
     execute_eoa(&args.rpc.rpc_url, &signer, calls, &args.opts, console).await?;
     Ok(())
 }
@@ -292,7 +302,7 @@ pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<
 /// [`SendError::EoaBatchFailed`] naming the transactions already mined.
 async fn execute_eoa(
     rpc_url: &Url,
-    signer: &PrivateKeySigner,
+    signer: &AnySigner,
     mut calls: Vec<Call>,
     args: &SendOpts,
     console: &Console,
@@ -447,7 +457,7 @@ struct EoaTxPlan<'a> {
 /// used, as for `execTransaction`.
 async fn send_eoa_tx(
     provider: &HttpProvider,
-    signer: &PrivateKeySigner,
+    signer: &AnySigner,
     chain_id: u64,
     plan: EoaTxPlan<'_>,
     timeout: u64,
@@ -593,7 +603,7 @@ pub async fn execute(
     let signer_opt = target.signer;
     let payer_opt = create_payer(&args.payer)?;
     let payer = match (&payer_opt, &signer_opt) {
-        (Some(p), _) => p.clone(),
+        (Some(p), _) => AnySigner::from(p.clone()),
         (None, Some(s)) => s.clone(),
         (None, None) => return Err(SendError::NoSigner),
     };
@@ -689,7 +699,14 @@ pub async fn execute(
     } else {
         let safe_for_builder = Safe::new(
             provider.clone(),
-            signer_opt.clone().unwrap_or_else(|| payer.clone()),
+            // The builder only plans; any key will do where the signer is
+            // not a local one.
+            signer_opt
+                .as_ref()
+                .and_then(AnySigner::as_local)
+                .or(payer_opt.as_ref())
+                .cloned()
+                .unwrap_or_else(PrivateKeySigner::random),
             safe_address,
             config,
         );

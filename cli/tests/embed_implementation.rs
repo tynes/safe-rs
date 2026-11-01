@@ -25,7 +25,6 @@ use safe_rs_cli::create::{
 use safe_rs_cli::prompt::NoPrompt;
 #[cfg(feature = "hd-wallet")]
 use safe_rs_cli::OptionsError;
-use safe_rs_cli::PrivateKeySigner;
 
 /// A factory of the host's own: always one owner, and its own salt.
 #[derive(Clone, Default)]
@@ -45,7 +44,7 @@ impl SafeImplementation for HostFactory {
         &'a self,
         provider: &'a HttpProvider,
         setup: &'a ResolvedSetup,
-        owner: &'a PrivateKeySigner,
+        owner: &'a safe_rs_cli::AnySigner,
     ) -> BoxFuture<'a, Result<SafeDeployment, CreateError>> {
         Box::pin(async move {
             self.seen.lock().unwrap().push(owner.address());
@@ -144,6 +143,7 @@ async fn a_host_implementation_refuses_setups_it_cannot_deploy() {
 #[tokio::test]
 async fn a_host_implementation_is_refused_with_an_hd_wallet() {
     let mut opts = CreateOpts::default().with_implementation(HostFactory::default());
+    opts.rotate = true;
     opts.hd.hd_wallet = Some("demo".into());
     let ctx = CreateContext::new("http://127.0.0.1:9".parse().unwrap()).with_prompt(NoPrompt);
     let error = safe_rs_cli::create::create(ctx, opts).await.unwrap_err();

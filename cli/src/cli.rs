@@ -224,17 +224,25 @@ pub struct SendArgs {
     #[arg(long = "call", value_name = "CALL")]
     pub calls: Vec<String>,
 
-    /// Send each call from the signer's own account, one transaction per
-    /// call, instead of through a Safe. Refuses --safe (and SAFE_ADDRESS) and
-    /// the options only a Safe has, such as --bundle, --nonce and --rotate
-    #[arg(long)]
-    pub send_eoa: bool,
+    #[command(flatten)]
+    pub eoa: EoaArgs,
 
     #[command(flatten)]
     pub opts: SendOpts,
 
     #[command(flatten)]
     pub signer: SignerArgs,
+}
+
+/// `--send-eoa`: whether calls go from the signer's own account or through a
+/// Safe. A host that sends calls flattens it to offer the same choice.
+#[derive(Args, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EoaArgs {
+    /// Send each call from the signer's own account, one transaction per
+    /// call, instead of through a Safe. Refuses --safe (and SAFE_ADDRESS) and
+    /// the options only a Safe has, such as --bundle, --nonce and --rotate
+    #[arg(long)]
+    pub send_eoa: bool,
 }
 
 /// Seconds to wait for a receipt after broadcasting (`--timeout`).
@@ -783,6 +791,9 @@ pub struct RotateArgs {
     pub hd: HdArgs,
 
     #[command(flatten)]
+    pub ledger: LedgerArg,
+
+    #[command(flatten)]
     pub password: PasswordArgs,
 
     /// Private key of the Safe's current owner, to move the Safe onto the HD wallet
@@ -967,8 +978,8 @@ pub(crate) fn check_setup(owners: &[Address], threshold: u64) -> Result<(), Stri
     Ok(())
 }
 
-/// The single key that signs: `--private-key` (`PRIVATE_KEY`), `--keystore`
-/// or `--interactive`.
+/// The single key that signs: `--private-key` (`PRIVATE_KEY`), `--keystore`,
+/// `--hd-key`, `--ledger` or `--interactive`.
 #[derive(Args, Clone, Default)]
 pub struct SignerArgs {
     /// Raw private key
@@ -983,13 +994,18 @@ pub struct SignerArgs {
     #[arg(short, long)]
     pub interactive: bool,
 
-    /// A key of an HD wallet: <NAME|PATH>[:<INDEX>], where the wallet is a
-    /// name under ~/.safe-rs/wallets or the path of a mnemonic keystore, and
-    /// INDEX the key (default 0, the funding key). Signing with it is not
-    /// recorded in the wallet's rotation state
+    /// Sign with the key at m/44'/60'/0'/0/INDEX (default 0) of an HD wallet:
+    /// <NAME|PATH>[:<INDEX>], a wallet name under ~/.safe-rs/wallets or the
+    /// path of a mnemonic keystore
     #[cfg(feature = "hd-wallet")]
     #[arg(long, value_name = "WALLET[:INDEX]", value_parser = parse_hd_key)]
     pub hd_key: Option<HdKey>,
+
+    /// Sign with the key at m/44'/60'/0'/0/INDEX (default 0) of a connected
+    /// Ledger, with the Ethereum app open. With --rotate, or `safe rotate`,
+    /// the Ledger gives the Safe's rotating owner keys instead
+    #[arg(long, value_name = "INDEX", num_args = 0..=1, default_missing_value = "0")]
+    pub ledger: Option<u32>,
 }
 
 /// `--hd-key <NAME|PATH>[:<INDEX>]`: one key of an HD wallet.
@@ -998,7 +1014,7 @@ pub struct SignerArgs {
 pub struct HdKey {
     /// A wallet name under the data directory, or a keystore path
     pub wallet: String,
-    /// The key's index (0 is the funding key)
+    /// The key's index: the last step of `m/44'/60'/0'/0/INDEX`
     pub index: u32,
 }
 
@@ -1040,7 +1056,10 @@ impl SignerArgs {
         if self.hd_key.is_some() {
             return true;
         }
-        self.interactive || self.keystore.is_some() || self.private_key.is_some()
+        self.ledger.is_some()
+            || self.interactive
+            || self.keystore.is_some()
+            || self.private_key.is_some()
     }
 }
 
@@ -1066,9 +1085,48 @@ pub struct HdArgs {
     pub hd_wallet: Option<String>,
 
     /// Take the owner keys from a connected Ledger (Ethereum app open) instead
-    /// of an HD wallet file. Overrides SAFE_HD_WALLET
-    #[arg(long)]
+    /// of an HD wallet file. Overrides SAFE_HD_WALLET. Not a flag of its own:
+    /// `--ledger` sets it where the command rotates (see
+    /// [`LedgerArg::take_for_rotation`])
+    #[arg(skip)]
     pub ledger: bool,
+}
+
+/// `--ledger` on a command that only rotates (`safe rotate`, `safe wallet
+/// ...`), where the Ledger gives the rotating owner keys. Spelled like the
+/// signer's `--ledger [INDEX]`, so a host can make that flag global; the
+/// index is refused, since the wallet state picks the key.
+#[cfg(feature = "hd-wallet")]
+#[derive(Args, Clone, Debug, Default)]
+pub struct LedgerArg {
+    /// Take the owner keys from a connected Ledger (Ethereum app open) instead
+    /// of an HD wallet file. Overrides SAFE_HD_WALLET
+    #[arg(long, value_name = "INDEX", num_args = 0..=1, default_missing_value = "0")]
+    pub ledger: Option<u32>,
+}
+
+#[cfg(feature = "hd-wallet")]
+impl LedgerArg {
+    /// Moves `--ledger` into `hd`, as the source of the rotating owner keys.
+    /// Fails on an INDEX other than 0, which only a signer takes.
+    pub fn take_for_rotation(
+        ledger: &mut Option<u32>,
+        hd: &mut HdArgs,
+    ) -> Result<(), OptionsError> {
+        match ledger.take() {
+            None => Ok(()),
+            Some(0) => {
+                hd.ledger = true;
+                Ok(())
+            }
+            Some(_) => Err(OptionsError::LedgerIndexWhenRotating),
+        }
+    }
+
+    /// [`take_for_rotation`](Self::take_for_rotation) of this flag.
+    pub fn apply(&mut self, hd: &mut HdArgs) -> Result<(), OptionsError> {
+        Self::take_for_rotation(&mut self.ledger, hd)
+    }
 }
 
 #[cfg(feature = "hd-wallet")]
@@ -1099,7 +1157,7 @@ pub struct SweepArgs {
 #[derive(Args, Clone, Default)]
 pub struct PayerArgs {
     /// Private key that sends the outer transaction and pays for gas, instead
-    /// of the owner key (with --hd-wallet on create: instead of the funding key)
+    /// of the owner key (with create --rotate: instead of the HD wallet's key 0)
     #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY", hide_env_values = true)]
     pub payer_private_key: Option<String>,
 }
@@ -1125,6 +1183,7 @@ impl fmt::Debug for SignerArgs {
             .field("interactive", &self.interactive);
         #[cfg(feature = "hd-wallet")]
         let debug = debug.field("hd_key", &self.hd_key);
+        let debug = debug.field("ledger", &self.ledger);
         debug.finish()
     }
 }
@@ -1447,8 +1506,8 @@ mod tests {
             parse(&args)
         };
         let same_as = format!("10:{SAFE}");
-        assert!(with(&["--hd-wallet", "w", "--same-as", &same_as]).is_ok());
-        assert!(with(&["--ledger", "--same-as", &same_as]).is_ok());
+        assert!(with(&["--rotate", "--hd-wallet", "w", "--same-as", &same_as]).is_ok());
+        assert!(with(&["--rotate", "--ledger", "--same-as", &same_as]).is_ok());
         // Without a wallet it parses, and `create` refuses it.
         assert!(with(&["--same-as", &same_as]).is_ok());
         assert!(
@@ -1481,12 +1540,7 @@ mod tests {
     #[cfg(not(feature = "hd-wallet"))]
     #[test]
     fn rotation_flags_and_commands_are_absent_without_hd_wallet() {
-        for flag in [
-            &["--rotate"][..],
-            &["--hd-wallet", "w"],
-            &["--ledger"],
-            &["--no-sweep"],
-        ] {
+        for flag in [&["--rotate"][..], &["--hd-wallet", "w"], &["--no-sweep"]] {
             assert!(send(flag).is_err(), "{flag:?} must not parse");
         }
         assert!(parse(&["wallet", "list"]).is_err());
@@ -1494,9 +1548,38 @@ mod tests {
     }
 
     #[test]
+    fn one_ledger_flag_signs_or_gives_the_rotating_keys() {
+        let signer = |cli: Cli| match cli.command {
+            Commands::Send(args) => args.signer.ledger,
+            _ => panic!("expected send"),
+        };
+        assert_eq!(signer(send(&["--ledger"]).unwrap()), Some(0));
+        assert_eq!(signer(send(&["--ledger", "2"]).unwrap()), Some(2));
+        assert!(send(&["--ledger-key", "2"]).is_err());
+
+        #[cfg(feature = "hd-wallet")]
+        {
+            let mut hd = HdArgs::default();
+            let mut ledger = Some(0);
+            LedgerArg::take_for_rotation(&mut ledger, &mut hd).unwrap();
+            assert!(hd.ledger && ledger.is_none());
+
+            let mut hd = HdArgs::default();
+            assert_eq!(
+                LedgerArg::take_for_rotation(&mut Some(2), &mut hd),
+                Err(OptionsError::LedgerIndexWhenRotating)
+            );
+            assert!(!hd.ledger);
+
+            assert!(parse(&["rotate", SAFE, "--ledger", "--rpc-url", "http://x"]).is_ok());
+            assert!(parse(&["wallet", "status", "--ledger"]).is_ok());
+        }
+    }
+
+    #[test]
     fn send_eoa_is_a_send_flag() {
         let send_eoa = |cli: Cli| match cli.command {
-            Commands::Send(args) => args.send_eoa,
+            Commands::Send(args) => args.eoa.send_eoa,
             _ => panic!("expected send"),
         };
         assert!(send_eoa(

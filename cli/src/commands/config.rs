@@ -38,7 +38,7 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
         module_guard: args.module_guard,
     };
     let signer = if args.signer.is_set() {
-        Some(create_signer(&args.signer, &args.password, console)?)
+        Some(create_signer(&args.signer, &args.password, console).await?)
     } else {
         None
     };

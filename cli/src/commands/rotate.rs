@@ -15,7 +15,8 @@ use crate::signers::{create_payer, legacy_signer, open_wallet};
 ///
 /// With a `--from-*` option the current owner is a key outside the wallet,
 /// which is how an existing Safe is moved onto it.
-pub async fn run(args: RotateArgs, console: &Console) -> Result<()> {
+pub async fn run(mut args: RotateArgs, console: &Console) -> Result<()> {
+    args.ledger.apply(&mut args.hd)?;
     let legacy_owner = legacy_signer(
         args.from_private_key.as_deref(),
         args.from_keystore.as_deref(),
@@ -30,7 +31,7 @@ pub async fn run(args: RotateArgs, console: &Console) -> Result<()> {
         let provider = http_provider(&args.rpc.rpc_url);
         if let Some(signer) = &legacy_owner {
             let header = ParentHeader::fetch(&provider, BlockId::latest()).await?;
-            read_default_safe(&provider, signer.clone(), header.block_id())
+            read_default_safe(&provider, signer.address(), header.block_id())
                 .await?
                 .address
         } else {

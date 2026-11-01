@@ -136,7 +136,10 @@ async fn options_built_in_code_are_checked_like_flags() {
         "{error:?}"
     );
 
-    let mut opts = CreateOpts::default();
+    let mut opts = CreateOpts {
+        rotate: true,
+        ..CreateOpts::default()
+    };
     opts.hd.ledger = true;
     let with_signer = ctx().with_signer(safe_rs_cli::PrivateKeySigner::random());
     let error = safe_rs_cli::create::create(with_signer, opts)
@@ -144,6 +147,27 @@ async fn options_built_in_code_are_checked_like_flags() {
         .unwrap_err();
     assert!(
         matches!(error, CreateError::Options(OptionsError::SignerWithHd)),
+        "{error:?}"
+    );
+
+    let opts = CreateOpts {
+        rotate: true,
+        ..CreateOpts::default()
+    };
+    let error = safe_rs_cli::create::create(ctx(), opts).await.unwrap_err();
+    assert!(
+        matches!(error, CreateError::Options(OptionsError::RotateWithoutKeys)),
+        "{error:?}"
+    );
+
+    let mut opts = CreateOpts::default();
+    opts.hd.hd_wallet = Some("demo".into());
+    let error = safe_rs_cli::create::create(ctx(), opts).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            CreateError::Options(OptionsError::CreateHdWithoutRotate)
+        ),
         "{error:?}"
     );
 }

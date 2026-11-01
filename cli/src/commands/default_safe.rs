@@ -1,7 +1,6 @@
 use alloy::eips::BlockId;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 use clap::ValueEnum;
 #[cfg(feature = "hd-wallet")]
 use color_eyre::eyre::eyre;
@@ -9,10 +8,11 @@ use color_eyre::eyre::{bail, Result};
 #[cfg(feature = "hd-wallet")]
 use safe_rs::rotation::RotationState;
 use safe_rs::{
-    read_safe_state, ChainAddresses, Error, ReadSafeStateOptions, SafeState, WalletBuilder,
-    WalletConfig,
+    fetch_proxy_creation_code, predict_safe_address, read_safe_state, ChainAddresses, Error,
+    ReadSafeStateOptions, SafeState, WalletConfig,
 };
 
+use crate::any_signer::AnySigner;
 use crate::cli::SafeVersion;
 use crate::commands::HttpProvider;
 use crate::console::Console;
@@ -22,7 +22,7 @@ use crate::console::Console;
 pub(super) async fn safe_or_default(
     provider: &HttpProvider,
     safe: Option<Address>,
-    signer: Option<&PrivateKeySigner>,
+    signer: Option<&AnySigner>,
     block: BlockId,
     console: &Console,
 ) -> Result<Address> {
@@ -35,7 +35,7 @@ pub(super) async fn safe_or_default(
              or --interactive to use the signer's default Safe"
         );
     };
-    let safe = read_default_safe(provider, signer.clone(), block)
+    let safe = read_default_safe(provider, signer.address(), block)
         .await?
         .address;
     console.warn(format!(
@@ -52,12 +52,9 @@ pub(super) async fn safe_or_default(
 /// first.
 pub(super) async fn read_default_safe(
     provider: &HttpProvider,
-    signer: PrivateKeySigner,
+    signer_address: Address,
     block: BlockId,
 ) -> Result<SafeState> {
-    let signer_address = signer.address();
-    let builder = WalletBuilder::new(provider.clone(), signer);
-
     let mut candidates = Vec::new();
     for version in SafeVersion::value_variants() {
         let addresses = ChainAddresses::from(*version);
@@ -69,8 +66,17 @@ pub(super) async fn read_default_safe(
         {
             continue;
         }
-        let config = WalletConfig::new().with_addresses(addresses);
-        let safe = builder.compute_address(&config).await?;
+        let config = WalletConfig::new().with_addresses(addresses.clone());
+        let creation_code = fetch_proxy_creation_code(provider, addresses.proxy_factory).await?;
+        let (safe, _) = predict_safe_address(
+            addresses.proxy_factory,
+            addresses.safe_singleton,
+            &config.owners(signer_address),
+            config.threshold,
+            config.fallback_handler(),
+            config.salt_nonce,
+            &creation_code,
+        );
         match read_safe_state(provider, safe, block, ReadSafeStateOptions::default()).await {
             Err(Error::SafeNotDeployed(_)) => candidates.push(format!("{safe} (v{version})")),
             state => return Ok(state?),

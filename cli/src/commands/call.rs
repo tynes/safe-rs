@@ -16,9 +16,11 @@ pub async fn run(args: CallArgs, console: &Console) -> Result<()> {
     let provider = http_provider(&args.rpc.rpc_url);
     let data = encode_function_call(&args.sig, &args.args)?;
     let chain_id = provider.get_chain_id().await?;
-    let signer = (args.safe.safe.is_none() && args.signer.is_set())
-        .then(|| create_signer(&args.signer, &args.password, console))
-        .transpose()?;
+    let signer = if args.safe.safe.is_none() && args.signer.is_set() {
+        Some(create_signer(&args.signer, &args.password, console).await?)
+    } else {
+        None
+    };
     let safe = safe_or_default(
         &provider,
         args.safe.safe,

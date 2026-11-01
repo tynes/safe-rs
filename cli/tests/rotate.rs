@@ -89,6 +89,10 @@ impl Cli<'_> {
         let url = self.h.url().to_string();
         let password = self.password_file.to_str().unwrap();
         let mut all = args.to_vec();
+        // A rotating Safe is created with `create --rotate`.
+        if all.first() == Some(&"create") {
+            all.push("--rotate");
+        }
         all.extend([
             "--hd-wallet",
             "demo",
@@ -1029,7 +1033,7 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     let handler = h.addresses.fallback_handler.to_string();
     let msco = h.addresses.multi_send_call_only.to_string();
 
-    // 1. Create a 2-of-2 Safe with `safe create --hd-wallet demo --owner <co_owner> --threshold 2`
+    // 1. Create a 2-of-2 Safe with `safe create --rotate --hd-wallet demo --owner <co_owner> --threshold 2`
     let created = cli
         .wallet_command(&[
             "create",

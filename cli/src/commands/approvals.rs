@@ -39,7 +39,7 @@ pub async fn run(args: ApprovalsArgs, console: &Console) -> Result<()> {
     // The signer only picks the default Safe, so a keystore is not unlocked
     // when the Safe is already known.
     let signer = if explicit_safe.is_none() && args.signer.is_set() {
-        Some(create_signer(&args.signer, &args.password, console)?)
+        Some(create_signer(&args.signer, &args.password, console).await?)
     } else {
         None
     };

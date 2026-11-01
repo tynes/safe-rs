@@ -73,8 +73,8 @@ pub async fn run(args: InfoArgs, console: &Console) -> Result<()> {
     let provider = http_provider(&args.rpc.rpc_url);
     // Resolve the block to a hash first so every read sees the same state.
     let header = ParentHeader::fetch(&provider, args.block.unwrap_or(BlockId::latest())).await?;
-    let signer = create_signer(&args.signer, &args.password, console)?;
-    let state = read_default_safe(&provider, signer, header.block_id()).await?;
+    let signer = create_signer(&args.signer, &args.password, console).await?;
+    let state = read_default_safe(&provider, signer.address(), header.block_id()).await?;
     console.emit(&with_balance(&provider, state, &header).await?);
     Ok(())
 }

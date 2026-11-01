@@ -4989,6 +4989,8 @@ version = "0.13.0"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
+ "alloy-signer-ledger",
+ "async-trait",
  "clap",
  "color-eyre",
  "dialoguer",
