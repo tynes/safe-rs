@@ -51,7 +51,7 @@ jobs:
             fi
           done
 
-      # The CLI's default `ledger` feature builds against libusb.
+      # The CLI always builds Ledger and Trezor support, against libusb.
       - name: Install libusb and libudev
         run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
 
@@ -67,7 +67,6 @@ jobs:
           cargo check -p safe-rs --lib --locked --no-default-features --features hd-wallet
           cargo check -p safe-rs --lib --locked --no-default-features --features ledger
           cargo check -p safe-rs-cli --bins --locked --no-default-features
-          cargo check -p safe-rs-cli --bins --locked --no-default-features --features hd-wallet
 
       # The e2e tests skip themselves without ETH_RPC_URL; the local ones run
       # against Anvil.

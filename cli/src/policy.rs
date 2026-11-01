@@ -100,7 +100,7 @@ pub enum Plan<'a> {
     /// `send` (and `safe config`, which plans its calls and sends them):
     /// the options it was run with
     Send(&'a SendOpts),
-    /// `safe rotate` and `send --rotate`: the owner swaps appended to the
+    /// `send --rotate`: the owner swaps appended to the
     /// calls, and the owners the Safe must have afterwards
     Rotation(&'a RotationPlan),
 }

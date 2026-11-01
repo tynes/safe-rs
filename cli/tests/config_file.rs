@@ -33,9 +33,11 @@ fn send_eoa(home: &Path, envs: &[(&str, &str)], args: &[&str]) -> Output {
     for name in [
         "PRIVATE_KEY",
         "SAFE_ADDRESS",
-        "SAFE_PASSWORD_FILE",
-        "SAFE_HD_WALLET",
-        "SAFE_PAYER_PRIVATE_KEY",
+        "ETH_PASSWORD",
+        "ETH_KEYSTORE",
+        "ETH_KEYSTORE_ACCOUNT",
+        "ETH_FROM",
+        "GAS_PAYER_PRIVATE_KEY",
         "ETH_RPC_URL",
     ] {
         command.env_remove(name);
@@ -92,7 +94,6 @@ fn an_invalid_config_file_is_refused_by_name() {
     );
 }
 
-#[cfg(feature = "hd-wallet")]
 #[tokio::test]
 async fn every_hd_wallet_key_is_usable_as_a_signer() {
     use safe_rs_cli::args::{HdArgs, PasswordArgs};
@@ -109,25 +110,32 @@ async fn every_hd_wallet_key_is_usable_as_a_signer() {
         ..PasswordArgs::default()
     };
     let hd = HdArgs {
-        hd_wallet: Some("trader".into()),
-        ledger: false,
+        mnemonic: Some("trader".into()),
+        password: password.clone(),
+        ..HdArgs::default()
     };
 
     let funding = wallet::signer(&ctx, "trader", 0, &password).unwrap();
     assert_eq!(funding.address(), created.funding_address);
     for index in [1, 3] {
         let signer = wallet::signer(&ctx, "trader", index, &password).unwrap();
-        let expected = wallet::wallet_address(&ctx, &hd, &password, Some(index))
+        let expected = wallet::wallet_address(&ctx, &hd, Some(index))
             .await
             .unwrap();
         assert_eq!(signer.address(), expected.address, "key {index}");
     }
 
-    // The same key through the `--hd-key` flag.
-    let parsed: safe_rs_cli::args::HdKey = "trader:3".parse().unwrap();
-    assert_eq!((parsed.wallet.as_str(), parsed.index), ("trader", 3));
-    let default_index: safe_rs_cli::args::HdKey = "./keys/trader.json".parse().unwrap();
-    assert_eq!(default_index.index, 0);
+    // The same key through `--mnemonic <wallet file> --mnemonic-index 3`.
+    let wallet_file = home.path().join("wallets/trader.json");
+    let args = safe_rs_cli::args::SignerArgs {
+        mnemonic: Some(wallet_file.to_string_lossy().into_owned()),
+        mnemonic_index: 3,
+        password: password.clone(),
+        ..Default::default()
+    };
+    let signer = args.resolve(std::sync::Arc::new(NoPrompt)).await.unwrap();
+    let expected = wallet::wallet_address(&ctx, &hd, Some(3)).await.unwrap();
+    assert_eq!(signer.address(), expected.address);
 
     let wrong = PasswordArgs {
         password: Some("wrong".into()),

@@ -17,7 +17,7 @@ pub async fn run(args: CallArgs, console: &Console) -> Result<()> {
     let data = encode_function_call(&args.sig, &args.args)?;
     let chain_id = provider.get_chain_id().await?;
     let signer = if args.safe.safe.is_none() && args.signer.is_set() {
-        Some(create_signer(&args.signer, &args.password, console).await?)
+        Some(create_signer(&args.signer, console).await?)
     } else {
         None
     };

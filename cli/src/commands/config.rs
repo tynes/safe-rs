@@ -17,15 +17,6 @@ use crate::signers::create_signer;
 
 /// `safe config`.
 pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
-    #[cfg(feature = "hd-wallet")]
-    if args.hd.is_set() && !args.signer.is_set() {
-        bail!(
-            "safe config does not rotate owner keys: signing with --hd-wallet or --ledger would \
-             publish an owner key and leave it in charge of the Safe. Sign with --private-key, \
-             --keystore or --interactive"
-        );
-    }
-
     let changes = ConfigChanges {
         add_owners: args.add_owners.clone(),
         remove_owners: args.remove_owners.clone(),
@@ -38,7 +29,7 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
         module_guard: args.module_guard,
     };
     let signer = if args.signer.is_set() {
-        Some(create_signer(&args.signer, &args.password, console).await?)
+        Some(create_signer(&args.signer, console).await?)
     } else {
         None
     };
@@ -58,7 +49,6 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
             rpc_url: args.rpc.rpc_url.clone(),
             safe: args.safe.safe,
             signer,
-            #[cfg(feature = "hd-wallet")]
             home: None,
         };
         send::execute(
@@ -139,7 +129,6 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
         rpc_url: args.rpc.rpc_url.clone(),
         safe: Some(safe),
         signer,
-        #[cfg(feature = "hd-wallet")]
         home: None,
     };
     send::execute(target, send_opts(args), plan.calls(), hooks, console).await?;
@@ -194,13 +183,9 @@ fn send_opts(args: ConfigArgs) -> SendOpts {
         multi_send: None,
         multi_send_call_only: args.multi_send_call_only,
         no_confirm: args.no_confirm,
-        #[cfg(feature = "hd-wallet")]
         rotate: false,
-        #[cfg(feature = "hd-wallet")]
-        hd: args.hd,
-        #[cfg(feature = "hd-wallet")]
+        hd: crate::cli::HdArgs::default(),
         sweep: crate::cli::SweepArgs::default(),
-        password: args.password,
-        payer: args.payer,
+        gas_payer: args.gas_payer,
     }
 }

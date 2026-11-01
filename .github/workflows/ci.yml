@@ -67,7 +67,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      # The CLI's default `ledger` feature builds against libusb.
+      # The CLI always builds Ledger and Trezor support, against libusb.
       - name: Install libusb and libudev
         run: sudo apt-get update && sudo apt-get install -y libudev-dev libusb-1.0-0-dev
 
@@ -105,7 +105,6 @@ jobs:
           cargo clippy -p safe-rs --lib --locked --no-default-features --features ledger -- -D warnings
           cargo clippy -p safe-rs-cli --bins --locked -- -D warnings
           cargo clippy -p safe-rs-cli --bins --locked --no-default-features -- -D warnings
-          cargo clippy -p safe-rs-cli --bins --locked --no-default-features --features hd-wallet -- -D warnings
 
   test:
     name: Test
@@ -133,8 +132,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features --locked
 
-      # The tests for builds without HD wallets, which --all-features skips.
-      - name: Test without hd-wallet
+      # The CLI without the remote signers (AWS KMS, GCP KMS, Turnkey), and
+      # the keystore module without simulation, which --all-features skips.
+      - name: Test without default features
         run: |
           cargo clippy -p safe-rs-cli --all-targets --locked --no-default-features -- -D warnings
           cargo test -p safe-rs-cli --lib --bins --test embed --locked --no-default-features

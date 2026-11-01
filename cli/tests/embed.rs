@@ -130,10 +130,14 @@ fn defaults_match_the_flag_defaults() {
 #[test]
 fn debug_output_hides_secrets() {
     let mut opts = SendOpts::default();
-    opts.password.password = Some("hunter2".into());
-    opts.payer.payer_private_key = Some("0xdeadbeef".into());
+    opts.hd.password.password = Some("hunter2".into());
+    opts.hd.mnemonic = Some("test test test junk".into());
+    opts.gas_payer.gas_payer_private_key = Some("0xdeadbeef".into());
+    opts.gas_payer.gas_payer_password = Some("hunter3".into());
     let debug = format!("{opts:?}");
     assert!(!debug.contains("hunter2"), "{debug}");
+    assert!(!debug.contains("hunter3"), "{debug}");
+    assert!(!debug.contains("junk"), "{debug}");
     assert!(!debug.contains("deadbeef"), "{debug}");
     assert!(debug.contains("<redacted>"), "{debug}");
 }
@@ -157,10 +161,6 @@ type OptionsCase = (fn(&mut SendOpts), OptionsError, &'static str);
 
 #[tokio::test]
 async fn options_built_in_code_are_checked_like_flags() {
-    #[cfg_attr(
-        not(feature = "hd-wallet"),
-        allow(unused_mut, reason = "the rotation cases need hd-wallet")
-    )]
     let mut cases: Vec<OptionsCase> = vec![(
         |o| {
             o.simulate.simulate_only = true;
@@ -172,7 +172,6 @@ async fn options_built_in_code_are_checked_like_flags() {
         },
         "--skip-simulation cannot be used with --simulate-only",
     )];
-    #[cfg(feature = "hd-wallet")]
     cases.extend::<[OptionsCase; 3]>([
         (
             |o| {
@@ -193,7 +192,7 @@ async fn options_built_in_code_are_checked_like_flags() {
         (
             |o| o.hd.ledger = true,
             OptionsError::HdWithoutRotate,
-            "needs --rotate",
+            "need --rotate",
         ),
     ]);
     for (set, expected, message) in cases {
@@ -239,7 +238,6 @@ fn send_errors_convert_to_eyre_reports() {
     assert!(report.downcast_ref::<SendError>().is_some());
 }
 
-#[cfg(feature = "hd-wallet")]
 #[tokio::test]
 async fn rotation_takes_no_signer_from_the_host() {
     let opts = SendOpts {
@@ -269,10 +267,6 @@ fn eoa_context() -> SendContext {
 #[tokio::test]
 async fn an_eoa_send_refuses_the_options_only_a_safe_has() {
     type Case = (fn(&mut SendOpts), &'static str);
-    #[cfg_attr(
-        not(feature = "hd-wallet"),
-        allow(unused_mut, reason = "the rotation cases need hd-wallet")
-    )]
     let mut cases: Vec<Case> = vec![
         (|o| o.collect.bundle = Some("tx.json".into()), "--bundle"),
         (|o| o.collect.sign_only = true, "--sign-only"),
@@ -280,11 +274,10 @@ async fn an_eoa_send_refuses_the_options_only_a_safe_has() {
         (|o| o.nonce = Some(U256::from(1)), "--nonce"),
         (|o| o.raw.no_submit = true, "--no-submit"),
         (
-            |o| o.payer.payer_private_key = Some("0x01".into()),
-            "--payer-private-key",
+            |o| o.gas_payer.gas_payer_private_key = Some("0x01".into()),
+            "--gas-payer-*",
         ),
     ];
-    #[cfg(feature = "hd-wallet")]
     cases.extend::<[Case; 2]>([
         (|o| o.rotate = true, "--rotate"),
         (|o| o.hd.ledger = true, "--ledger"),

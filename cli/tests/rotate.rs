@@ -23,7 +23,7 @@ use alloy::primitives::{Address, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::Provider;
 use common::LocalHarness;
-use safe_rs::rotation::{binding_key, OwnerRef, RotationState, StateFile};
+use safe_rs::rotation::{binding_key, OwnerRef, StateFile};
 use safe_rs::{ChainAddresses, HdWallet};
 use serde_json::Value;
 
@@ -65,9 +65,11 @@ impl Cli<'_> {
             "PRIVATE_KEY",
             "SAFE_ADDRESS",
             "ETH_RPC_URL",
-            "SAFE_HD_WALLET",
-            "SAFE_PASSWORD_FILE",
-            "SAFE_PAYER_PRIVATE_KEY",
+            "ETH_PASSWORD",
+            "ETH_KEYSTORE",
+            "ETH_KEYSTORE_ACCOUNT",
+            "ETH_FROM",
+            "GAS_PAYER_PRIVATE_KEY",
         ] {
             command.env_remove(name);
         }
@@ -93,8 +95,16 @@ impl Cli<'_> {
         if all.first() == Some(&"create") {
             all.push("--rotate");
         }
+        // A rotation alone is `send --rotate` with no calls, and its Safe is
+        // `--safe`.
+        if all.first() == Some(&"rotate") {
+            all.splice(0..1, ["send", "--rotate"]);
+            if all.get(2).is_some_and(|arg| arg.parse::<Address>().is_ok()) {
+                all.insert(2, "--safe");
+            }
+        }
         all.extend([
-            "--hd-wallet",
+            "--mnemonic",
             "demo",
             "--password-file",
             password,
@@ -226,9 +236,11 @@ async fn rotate_discovers_only_an_unambiguous_recorded_safe() {
     let explicit = cli
         .run_with_env(
             &[
-                "rotate",
+                "send",
+                "--rotate",
+                "--safe",
                 &safe.to_string(),
-                "--hd-wallet",
+                "--mnemonic",
                 "demo",
                 "--password-file",
                 cli.password_file.to_str().unwrap(),
@@ -260,47 +272,30 @@ async fn rotate_discovers_only_an_unambiguous_recorded_safe() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rotate_and_info_share_legacy_default_discovery() {
+async fn info_discovers_the_default_safe_of_a_plain_key() {
     let h = LocalHarness::new().await;
     let dir = tempfile::tempdir().unwrap();
     let cli = discovery_wallet(&h, dir.path());
     let legacy = alloy::signers::local::PrivateKeySigner::random();
     let legacy_key = alloy::primitives::hex::encode_prefixed(legacy.to_bytes());
     h.fund(legacy.address(), eth(2)).await;
-    let wallet = HdWallet::from_phrase(PHRASE).unwrap();
-    let path = cli
-        .home
-        .join("state")
-        .join(format!("{}.json", wallet.id().to_string().to_lowercase()));
-    // Legacy discovery takes precedence even when the HD wallet tracks a Safe.
-    let unrelated = h.deploy_safe_with(&[key(1)], 1, 602).await;
-    let mut store = StateFile::open(&path, wallet.id()).unwrap();
-    store
-        .state
-        .bind(
-            &binding_key(h.chain_id, unrelated),
-            OwnerRef::Derived {
-                index: 1,
-                address: key(1),
-            },
-        )
-        .unwrap();
-    store.save().unwrap();
-    drop(store);
-    let before = std::fs::read(&path).unwrap();
-    let discover = |extra: &[&str]| {
-        let mut args = vec!["rotate", "--from-private-key", &legacy_key, "--no-sweep"];
-        args.extend_from_slice(extra);
-        cli.wallet_command(&args)
+    let info = || {
+        cli.run(&[
+            "info",
+            "--private-key",
+            &legacy_key,
+            "--rpc-url",
+            h.url().as_str(),
+            "--json",
+        ])
     };
-    let missing = discover(&[]);
+    let missing = info();
     assert!(!missing.ok);
     assert!(
         missing.stderr.contains("no known Safe proxy factory"),
         "{}",
         missing.stderr
     );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
 
     // Install canonical contracts using local fixture code. v1.5.0's singleton
     // reports that version; the fixture otherwise implements v1.4.1 behavior.
@@ -322,20 +317,12 @@ async fn rotate_and_info_share_legacy_default_discovery() {
             h.provider.anvil_set_code(target, code).await.unwrap();
         }
     }
-    let missing = discover(&[]);
+    let missing = info();
     assert!(!missing.ok);
     assert!(
         missing.stderr.contains("nothing is deployed"),
         "{}",
         missing.stderr
-    );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
-    assert_eq!(
-        h.provider
-            .get_transaction_count(legacy.address())
-            .await
-            .unwrap(),
-        0
     );
 
     let create = |version: &str| {
@@ -352,40 +339,10 @@ async fn rotate_and_info_share_legacy_default_discovery() {
         ])
         .json()
     };
-    let info = || {
-        cli.run(&[
-            "info",
-            "--private-key",
-            &legacy_key,
-            "--rpc-url",
-            h.url().as_str(),
-            "--json",
-        ])
-        .json()
-    };
     let old = address(&create("1.4.1")["safe_address"]);
-    assert_eq!(address(&info()["address"]), old);
-    let preview = discover(&["--simulate-only"]).json();
-    assert_eq!(
-        address(&preview["rotation"]["old_owner"]["address"]),
-        legacy.address()
-    );
-    let state: RotationState = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert!(state.safes.contains_key(&binding_key(h.chain_id, old)));
-    assert_eq!(h.owners(old).await, vec![legacy.address()]);
-
+    assert_eq!(address(&info().json()["address"]), old);
     let new = address(&create("1.5.0")["safe_address"]);
-    assert_eq!(address(&info()["address"]), new);
-    let moved = discover(&[]).json();
-    assert_eq!(moved["status"], "rotated");
-    assert_eq!(
-        h.owners(new).await,
-        vec![address(&moved["owner"]["address"])]
-    );
-    assert_eq!(h.owners(old).await, vec![legacy.address()]);
-    assert_eq!(h.owners(unrelated).await, vec![key(1)]);
-    let state: RotationState = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-    assert!(state.safes.contains_key(&binding_key(h.chain_id, new)));
+    assert_eq!(address(&info().json()["address"]), new);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -434,13 +391,13 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
     let listed = cli.run(&["wallet", "list", "--json"]).json();
     assert_eq!(listed["wallets"][0]["name"], "demo");
     // The funding address needs no password; an owner key does.
-    let shown = cli.run(&["wallet", "address", "--hd-wallet", "demo"]);
+    let shown = cli.run(&["wallet", "address", "--mnemonic", "demo"]);
     assert_eq!(shown.stdout.trim(), funding.to_string());
     let first = cli
         .run(&[
             "wallet",
             "address",
-            "--hd-wallet",
+            "--mnemonic",
             "demo",
             "--index",
             "1",
@@ -456,7 +413,7 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
     let refused = cli.run(&[
         "wallet",
         "address",
-        "--hd-wallet",
+        "--mnemonic",
         "demo",
         "--index",
         "1",
@@ -525,7 +482,7 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
     assert_eq!(balance(&h, Address::repeat_byte(0x42)).await, U256::from(5));
 
     let status = cli
-        .run(&["wallet", "status", "--hd-wallet", "demo", "--json"])
+        .run(&["wallet", "status", "--mnemonic", "demo", "--json"])
         .json();
     assert_eq!(status["next_index"], 3);
     assert_eq!(status["safes"][0]["owner"]["index"], 2);
@@ -595,7 +552,7 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
     assert_eq!(preview["owner"]["index"], 5);
     assert_ne!(address(&preview["safe_address"]), safe);
     let status = cli
-        .run(&["wallet", "status", "--hd-wallet", "demo", "--json"])
+        .run(&["wallet", "status", "--mnemonic", "demo", "--json"])
         .json();
     assert_eq!(status["next_index"], 5);
 
@@ -617,7 +574,7 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
     assert_eq!(synced["used"], serde_json::json!([1, 2, 3, 4]));
     assert!(synced["next_index"].as_u64().unwrap() > 5);
     let status = cli
-        .run(&["wallet", "status", "--hd-wallet", "demo", "--json"])
+        .run(&["wallet", "status", "--mnemonic", "demo", "--json"])
         .json();
     assert_eq!(status["safes"][0]["exposed"], "rebuilt");
     assert_eq!(
@@ -626,10 +583,12 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
     );
 
     // --- The flags that would defeat the scheme are refused. ---
+    // Without --rotate, --mnemonic is one key, as in cast: the funding key
+    // (index 0), which owns nothing.
     let no_rotate = cli.wallet_command(&["send", &recipient, "--value", "1", "--safe", &safe_arg]);
     assert!(!no_rotate.ok);
     assert!(
-        no_rotate.stderr.contains("needs --rotate"),
+        no_rotate.stderr.contains("is not an owner"),
         "{}",
         no_rotate.stderr
     );
@@ -642,7 +601,7 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
             "--safe",
             &safe_arg,
             "--rotate",
-            "--hd-wallet",
+            "--mnemonic",
             "demo",
             "--password-file",
             &password,
@@ -697,48 +656,71 @@ async fn an_existing_safe_moves_onto_the_wallet() {
     let safe = h.deploy_safe_with(&[legacy.address()], 1, 500).await;
     let safe_arg = safe.to_string();
     let msco = h.addresses.multi_send_call_only.to_string();
-    let onboard = |extra: &[&str]| {
-        let mut args = vec![
-            "rotate",
-            safe_arg.as_str(),
-            "--multi-send-call-only",
-            msco.as_str(),
-            "--from-private-key",
-            legacy_key.as_str(),
-        ];
-        args.extend_from_slice(extra);
-        cli.wallet_command(&args)
-    };
+    let url = h.url().to_string();
 
-    // With no prompt to show the amount, sweeping the legacy key needs a decision.
-    let undecided = onboard(&[]);
-    assert!(!undecided.ok);
-    assert!(
-        undecided.stderr.contains("--sweep-legacy"),
-        "{}",
-        undecided.stderr
-    );
-    assert_eq!(h.owners(safe).await, vec![legacy.address()]);
+    // The wallet's next key, without its password.
+    let next = cli
+        .run(&[
+            "wallet",
+            "address",
+            "--mnemonic",
+            "demo",
+            "--index",
+            "7",
+            "--password-file",
+            &password,
+            "--json",
+        ])
+        .json();
+    let next = address(&next["address"]);
+    assert_eq!(next, key(7), "--start-index is honoured");
 
-    let moved = onboard(&["--sweep-legacy"]).json();
-    assert_eq!(moved["status"], "rotated");
-    assert!(
-        moved["old_owner"].get("index").is_none(),
-        "not a wallet key"
-    );
-    assert_eq!(moved["owner"]["index"], 7, "--start-index is honoured");
+    // The old key hands the Safe to the wallet's key with `safe config`.
+    let swap = format!("{}:{next}", legacy.address());
+    let swapped = cli
+        .run(&[
+            "config",
+            "--safe",
+            &safe_arg,
+            "--swap-owner",
+            &swap,
+            "--private-key",
+            &legacy_key,
+            "--rpc-url",
+            &url,
+            "--no-confirm",
+            "--json",
+        ])
+        .json();
+    assert_eq!(swapped["success"], true, "{swapped}");
     assert_eq!(h.owners(safe).await, vec![key(7)]);
-    assert_eq!(balance(&h, legacy.address()).await, U256::ZERO);
-    assert!(balance(&h, key(7)).await > eth(1));
 
-    // Once the wallet owns the Safe, a --from-* key is a mistake.
-    let again = onboard(&["--no-sweep"]);
-    assert!(!again.ok);
-    assert!(
-        again.stderr.contains("already owned by wallet key 7"),
-        "{}",
-        again.stderr
-    );
+    // `wallet sync` records it, and the wallet rotates it from then on.
+    cli.run(&[
+        "wallet",
+        "sync",
+        "--mnemonic",
+        "demo",
+        "--password-file",
+        &password,
+        "--safe",
+        &safe_arg,
+        "--rpc-url",
+        &url,
+        "--json",
+    ])
+    .json();
+    h.fund(key(7), eth(1)).await;
+    let rotated = cli
+        .wallet_command(&["rotate", &safe_arg, "--multi-send-call-only", &msco])
+        .json();
+    assert_eq!(rotated["status"], "rotated");
+    assert_eq!(rotated["old_owner"]["index"], 7);
+    // A rebuilt record skips a margin of indices past the last one seen.
+    let owner = address(&rotated["owner"]["address"]);
+    assert!(rotated["owner"]["index"].as_u64().unwrap() > 7);
+    assert_eq!(h.owners(safe).await, vec![owner]);
+    assert!(balance(&h, owner).await > U256::ZERO);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -785,7 +767,7 @@ async fn a_signed_but_unsent_transaction_is_tracked_until_it_lands() {
             "--multi-send-call-only",
             msco.as_str(),
             "--rotate",
-            "--hd-wallet",
+            "--mnemonic",
             "demo",
             "--password-file",
             password.as_str(),
@@ -796,7 +778,7 @@ async fn a_signed_but_unsent_transaction_is_tracked_until_it_lands() {
         cli.run(&args)
     };
     let status = || {
-        cli.run(&["wallet", "status", "--hd-wallet", "demo", "--json"])
+        cli.run(&["wallet", "status", "--mnemonic", "demo", "--json"])
             .json()["safes"][0]
             .clone()
     };
@@ -1033,7 +1015,7 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     let handler = h.addresses.fallback_handler.to_string();
     let msco = h.addresses.multi_send_call_only.to_string();
 
-    // 1. Create a 2-of-2 Safe with `safe create --rotate --hd-wallet demo --owner <co_owner> --threshold 2`
+    // 1. Create a 2-of-2 Safe with `safe create --rotate --mnemonic demo --owner <co_owner> --threshold 2`
     let created = cli
         .wallet_command(&[
             "create",

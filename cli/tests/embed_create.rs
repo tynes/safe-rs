@@ -13,7 +13,6 @@ use clap::{CommandFactory, Parser, Subcommand};
 use safe_rs_cli::create::{CreateContext, CreateError, CreateOpts, SafeSetupArgs};
 use safe_rs_cli::prompt::NoPrompt;
 use safe_rs_cli::safe_rs::Address;
-#[cfg(feature = "hd-wallet")]
 use safe_rs_cli::OptionsError;
 
 #[derive(Parser)]
@@ -41,7 +40,6 @@ enum HostCommand {
     /// A command of the host's own
     Balance,
     /// The account's HD wallets
-    #[cfg(feature = "hd-wallet")]
     Wallet {
         #[command(subcommand)]
         command: safe_rs_cli::wallet::WalletCommand,
@@ -96,13 +94,12 @@ fn create_defaults_match_the_flag_defaults() {
     assert!(defaults.validate(true).is_ok());
 }
 
-#[cfg(feature = "hd-wallet")]
 #[test]
 fn wallet_commands_mount_under_the_host() {
     let host = parse(&[
         "wallet",
         "status",
-        "--hd-wallet",
+        "--mnemonic",
         "demo",
         "--safe",
         "0x1111111111111111111111111111111111111111",
@@ -120,7 +117,6 @@ fn wallet_commands_mount_under_the_host() {
 
 /// Options built in code are checked before the chain is reached: the RPC
 /// URL points at port 9 (discard).
-#[cfg(feature = "hd-wallet")]
 #[tokio::test]
 async fn options_built_in_code_are_checked_like_flags() {
     let ctx = || CreateContext::new("http://127.0.0.1:9".parse().unwrap()).with_prompt(NoPrompt);
@@ -161,7 +157,7 @@ async fn options_built_in_code_are_checked_like_flags() {
     );
 
     let mut opts = CreateOpts::default();
-    opts.hd.hd_wallet = Some("demo".into());
+    opts.hd.mnemonic = Some("demo".into());
     let error = safe_rs_cli::create::create(ctx(), opts).await.unwrap_err();
     assert!(
         matches!(

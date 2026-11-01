@@ -59,9 +59,11 @@ fn safe_cli(h: &LocalHarness, home: &Path, args: &[&str]) -> Output {
         "PRIVATE_KEY",
         "SAFE_ADDRESS",
         "ETH_RPC_URL",
-        "SAFE_HD_WALLET",
-        "SAFE_PASSWORD_FILE",
-        "SAFE_PAYER_PRIVATE_KEY",
+        "ETH_PASSWORD",
+        "ETH_KEYSTORE",
+        "ETH_KEYSTORE_ACCOUNT",
+        "ETH_FROM",
+        "GAS_PAYER_PRIVATE_KEY",
     ] {
         command.env_remove(name);
     }

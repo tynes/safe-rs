@@ -23,7 +23,7 @@ use serde::Serialize;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::cli::{parse_ether_value, HdArgs, LedgerArg, PasswordArgs, DEFAULT_TIMEOUT};
+use crate::cli::{parse_ether_value, HdArgs, PasswordArgs, DEFAULT_TIMEOUT};
 use crate::commands::default_safe::recorded_safe;
 use crate::commands::rotation::rotation_config;
 use crate::commands::{http_provider, latest_sim_spec};
@@ -97,15 +97,9 @@ pub struct WalletAddressOpts {
     #[command(flatten)]
     pub hd: HdArgs,
 
-    #[command(flatten)]
-    pub ledger: LedgerArg,
-
     /// Owner key index (default: the funding address, which needs no password)
     #[arg(long)]
     pub index: Option<u32>,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
 }
 
 /// `status` shows only the context's Safe when it has one.
@@ -113,9 +107,6 @@ pub struct WalletAddressOpts {
 pub struct WalletStatusOpts {
     #[command(flatten)]
     pub hd: HdArgs,
-
-    #[command(flatten)]
-    pub ledger: LedgerArg,
 }
 
 /// `sync` reads the context's Safe, or the wallet's sole recorded Safe on
@@ -124,9 +115,6 @@ pub struct WalletStatusOpts {
 pub struct WalletSyncOpts {
     #[command(flatten)]
     pub hd: HdArgs,
-
-    #[command(flatten)]
-    pub ledger: LedgerArg,
 
     /// How many wallet indices to derive and compare (default: 1000 for an HD
     /// wallet file, 52 for a Ledger, which answers one address at a time)
@@ -146,9 +134,6 @@ pub struct WalletSyncOpts {
     /// MultiSendCallOnly address (default: canonical v1.4.1)
     #[arg(long)]
     pub multi_send_call_only: Option<Address>,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
 }
 
 /// `sweep` reads the context's Safe, or the wallet's sole recorded Safe on
@@ -158,9 +143,6 @@ pub struct WalletSweepOpts {
     #[command(flatten)]
     pub hd: HdArgs,
 
-    #[command(flatten)]
-    pub ledger: LedgerArg,
-
     /// Wei to leave on the retired owner, or a number with a unit ("0.01ether")
     /// (default: what the chain charges outside gas)
     #[arg(long, value_name = "WEI", value_parser = parse_ether_value)]
@@ -169,9 +151,6 @@ pub struct WalletSweepOpts {
     /// Seconds to wait for the receipt after broadcasting
     #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
     pub timeout: u64,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
 }
 
 /// What a CLI that manages HD wallets resolves itself: where the wallets
@@ -531,14 +510,13 @@ impl Report for WalletAddress {
 pub async fn wallet_address(
     ctx: &WalletContext,
     hd: &HdArgs,
-    password: &PasswordArgs,
     index: Option<u32>,
 ) -> Result<WalletAddress> {
     let home = ctx.home()?;
     let (index, address) = match index {
         None | Some(0) => (0, wallet_id(hd, Some(&home)).await.map_err(classify)?),
         Some(index) => {
-            let keys = open_keys(hd, password, Some(&home), &ctx.console())
+            let keys = open_keys(hd, Some(&home), &ctx.console())
                 .await
                 .map_err(classify)?;
             (index, keys.address(index).await?)
@@ -560,12 +538,8 @@ pub fn signer(
     index: u32,
     password: &PasswordArgs,
 ) -> Result<alloy::signers::local::PrivateKeySigner> {
-    let key = crate::cli::HdKey {
-        wallet: wallet.to_string(),
-        index,
-    };
     let home = ctx.home()?;
-    hd_key_signer(&key, password, Some(&home), &ctx.console()).map_err(classify)
+    hd_key_signer(wallet, index, password, Some(&home), &ctx.console()).map_err(classify)
 }
 
 fn exposure_label(exposure: Exposure) -> &'static str {
@@ -751,7 +725,7 @@ impl Report for WalletSync {
 pub async fn sync_wallet(ctx: &WalletContext, opts: WalletSyncOpts) -> Result<WalletSync> {
     let console = ctx.console();
     let rpc_url = ctx.rpc_url()?;
-    let ring = open_wallet(&opts.hd, &opts.password, ctx.home.as_deref(), &console)
+    let ring = open_wallet(&opts.hd, ctx.home.as_deref(), &console)
         .await
         .map_err(classify)?;
     let provider = http_provider(rpc_url);
@@ -817,7 +791,7 @@ impl Report for WalletSweep {
 pub async fn sweep_wallet(ctx: &WalletContext, opts: WalletSweepOpts) -> Result<WalletSweep> {
     let console = ctx.console();
     let rpc_url = ctx.rpc_url()?;
-    let ring = open_wallet(&opts.hd, &opts.password, ctx.home.as_deref(), &console)
+    let ring = open_wallet(&opts.hd, ctx.home.as_deref(), &console)
         .await
         .map_err(classify)?;
     let provider = http_provider(rpc_url);
@@ -906,34 +880,28 @@ pub(crate) async fn run_in(
         WalletCommand::List => console.emit(&WalletListOutput {
             wallets: list_wallets(ctx)?,
         }),
-        WalletCommand::Address(mut opts) => {
-            opts.ledger.apply(&mut opts.hd)?;
-            console.emit(&wallet_address(ctx, &opts.hd, &opts.password, opts.index).await?);
+        WalletCommand::Address(opts) => {
+            console.emit(&wallet_address(ctx, &opts.hd, opts.index).await?);
         }
-        WalletCommand::Status(mut opts) => {
-            opts.ledger.apply(&mut opts.hd)?;
+        WalletCommand::Status(opts) => {
             console.emit(&wallet_status(ctx, &opts.hd).await?);
         }
-        WalletCommand::Sync(mut opts) => {
-            opts.ledger.apply(&mut opts.hd)?;
+        WalletCommand::Sync(opts) => {
             console.emit(&sync_wallet(ctx, opts).await?);
         }
-        WalletCommand::Sweep(mut opts) => {
-            opts.ledger.apply(&mut opts.hd)?;
-            match sweep_wallet(ctx, opts).await {
-                Ok(sweep) => console.emit(&sweep),
-                Err(WalletError::Sweep { swept, still_owed }) => {
-                    let owed = still_owed.len();
-                    console.emit(&WalletSweep {
-                        sweeps: swept,
-                        still_owed,
-                        warnings: Vec::new(),
-                    });
-                    return Err(eyre!("{owed} sweep(s) could not be completed"));
-                }
-                Err(e) => return Err(e.into()),
+        WalletCommand::Sweep(opts) => match sweep_wallet(ctx, opts).await {
+            Ok(sweep) => console.emit(&sweep),
+            Err(WalletError::Sweep { swept, still_owed }) => {
+                let owed = still_owed.len();
+                console.emit(&WalletSweep {
+                    sweeps: swept,
+                    still_owed,
+                    warnings: Vec::new(),
+                });
+                return Err(eyre!("{owed} sweep(s) could not be completed"));
             }
-        }
+            Err(e) => return Err(e.into()),
+        },
     }
     Ok(())
 }
@@ -1006,25 +974,22 @@ mod tests {
         assert_eq!(listed[0].funding_address, Some(imported.funding_address));
 
         let hd = HdArgs {
-            hd_wallet: Some("demo".to_string()),
-            ledger: false,
+            mnemonic: Some("demo".to_string()),
+            ..HdArgs::default()
         };
-        let funding = wallet_address(&ctx, &hd, &PasswordArgs::default(), None)
-            .await
-            .unwrap();
+        let funding = wallet_address(&ctx, &hd, None).await.unwrap();
         assert_eq!(funding.address, imported.funding_address);
         // An owner key needs the password, which NoPrompt does not give.
-        let refused = wallet_address(&ctx, &hd, &PasswordArgs::default(), Some(1))
-            .await
-            .unwrap_err();
+        let refused = wallet_address(&ctx, &hd, Some(1)).await.unwrap_err();
         assert!(refused.to_string().contains("no prompt"), "{refused}");
-        let wrong = PasswordArgs {
-            password_file: None,
-            password: Some("nope".to_string()),
+        let wrong = HdArgs {
+            password: PasswordArgs {
+                password_file: None,
+                password: Some("nope".to_string()),
+            },
+            ..hd.clone()
         };
-        let refused = wallet_address(&ctx, &hd, &wrong, Some(1))
-            .await
-            .unwrap_err();
+        let refused = wallet_address(&ctx, &wrong, Some(1)).await.unwrap_err();
         assert!(matches!(refused, WalletError::WrongPassword), "{refused}");
 
         let status = wallet_status(&ctx, &hd).await.unwrap();
@@ -1034,8 +999,8 @@ mod tests {
         );
 
         let missing = HdArgs {
-            hd_wallet: Some("missing".to_string()),
-            ledger: false,
+            mnemonic: Some("missing".to_string()),
+            ..HdArgs::default()
         };
         let error = wallet_status(&ctx, &missing).await.unwrap_err();
         assert!(matches!(error, WalletError::NotFound { .. }), "{error}");

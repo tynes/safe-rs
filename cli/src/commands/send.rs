@@ -8,7 +8,6 @@ use alloy::network::primitives::ReceiptResponse;
 use alloy::network::{AnyNetwork, Network, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre;
 use safe_rs::{
     broadcast_raw, check_eoa_calls, detect_addresses, is_gs013_revert, read_approved_owners,
@@ -22,14 +21,11 @@ use safe_rs::{
 use crate::any_signer::AnySigner;
 use crate::bundle::{BundleCall, BundleFile};
 use crate::cli::{SendArgs, SendOpts};
-#[cfg(feature = "hd-wallet")]
 use crate::commands::default_safe::recorded_safe;
 use crate::commands::default_safe::safe_or_default;
-#[cfg(feature = "hd-wallet")]
 use crate::commands::rotation::{self, RotationRun};
 use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
 use crate::console::Console;
-#[cfg(feature = "hd-wallet")]
 use crate::error::OptionsError;
 use crate::error::{BroadcastError, SendError};
 use crate::log::{Logger, NoopLogger};
@@ -41,10 +37,8 @@ pub use crate::output::{EoaTx, SendOutcome};
 use crate::policy::{self, Plan, SafePolicy, SafeSnapshot, SafeTxCheck};
 use crate::prompt::{Prompt, TerminalPrompt};
 use crate::sig_parser::{encode_function_call, parse_call_spec};
-#[cfg(feature = "hd-wallet")]
 use crate::signers::open_wallet;
 use crate::signers::{create_payer, create_signer};
-#[cfg(feature = "hd-wallet")]
 use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
@@ -76,7 +70,7 @@ pub struct SendContext {
     /// The Safe to send through, or the signer's own account
     pub sender: Sender,
     /// The owner key that signs the Safe transaction, and pays for gas unless
-    /// `--payer-private-key` is given. Leave it out with `--rotate`, where the
+    /// a `--gas-payer-*` key is given. Leave it out with `--rotate`, where the
     /// owner key comes from the HD wallet or Ledger, or to only add on-chain
     /// approvals collected in `--bundle` while a payer submits.
     ///
@@ -88,7 +82,6 @@ pub struct SendContext {
     pub prompt: Arc<dyn Prompt>,
     /// Where HD wallets and their state live, for `--rotate` (default:
     /// `$SAFE_RS_HOME` or `~/.safe-rs`)
-    #[cfg(feature = "hd-wallet")]
     pub home: Option<PathBuf>,
     /// What the Safe transaction is held to (default: nothing)
     pub policy: Option<Arc<dyn SafePolicy>>,
@@ -104,7 +97,6 @@ impl SendContext {
             signer: None,
             logger: Arc::new(NoopLogger),
             prompt: Arc::new(TerminalPrompt::new()),
-            #[cfg(feature = "hd-wallet")]
             home: None,
             policy: None,
         }
@@ -124,7 +116,6 @@ impl SendContext {
             signer: None,
             logger: Arc::new(NoopLogger),
             prompt: Arc::new(TerminalPrompt::new()),
-            #[cfg(feature = "hd-wallet")]
             home: None,
             policy: None,
         }
@@ -152,7 +143,6 @@ impl SendContext {
 
     /// Looks for HD wallets and their state under `home` instead of
     /// `$SAFE_RS_HOME` or `~/.safe-rs`.
-    #[cfg(feature = "hd-wallet")]
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.home = Some(home);
         self
@@ -188,18 +178,17 @@ pub struct Target {
     pub safe: Option<Address>,
     pub signer: Option<AnySigner>,
     /// The HD wallet directory, for `--rotate`
-    #[cfg(feature = "hd-wallet")]
     pub home: Option<PathBuf>,
 }
 
 /// `safe send`.
 pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
-    // With --rotate, --ledger names where the rotating owner keys come from.
-    #[cfg(feature = "hd-wallet")]
+    // With --rotate, --mnemonic or --ledger names where the rotating owner
+    // keys come from.
     let args = {
         let mut args = args;
         if args.opts.rotate {
-            crate::cli::LedgerArg::take_for_rotation(&mut args.signer.ledger, &mut args.opts.hd)?;
+            args.opts.hd = args.signer.take_rotation_keys()?;
         }
         args
     };
@@ -209,11 +198,12 @@ pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
     }
     // Checked before any key or password prompt.
     let checked = args.opts.validate_safe(args.signer.is_set());
-    #[cfg(feature = "hd-wallet")]
     if checked == Err(OptionsError::RotateWithSigner) {
         eyre::bail!(
-            "with --rotate the owner key comes from --hd-wallet or --ledger: remove --private-key, \
-             --keystore and --interactive, and unset PRIVATE_KEY"
+            "with --rotate the owner key comes from --mnemonic or --ledger: remove the other \
+             wallet options (--private-key, --keystore, --account, --interactive, --trezor, \
+             --aws, --gcp, --turnkey), and unset PRIVATE_KEY, ETH_KEYSTORE and \
+             ETH_KEYSTORE_ACCOUNT"
         );
     }
     checked?;
@@ -221,7 +211,7 @@ pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
         eyre::bail!("Target address required for single call mode");
     }
     let signer = if args.signer.is_set() {
-        Some(create_signer(&args.signer, &args.opts.password, console).await?)
+        Some(create_signer(&args.signer, console).await?)
     } else {
         None
     };
@@ -229,7 +219,6 @@ pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
         rpc_url: args.rpc.rpc_url,
         safe: args.safe.safe,
         signer,
-        #[cfg(feature = "hd-wallet")]
         home: None,
     };
     dispatch(target, calls, args.opts, console).await?;
@@ -255,7 +244,7 @@ async fn run_eoa(args: SendArgs, calls: Vec<Call>, console: &Console) -> eyre::R
     if !args.signer.is_set() {
         return Err(SendError::NoSigner.into());
     }
-    let signer = create_signer(&args.signer, &args.opts.password, console).await?;
+    let signer = create_signer(&args.signer, console).await?;
     execute_eoa(&args.rpc.rpc_url, &signer, calls, &args.opts, console).await?;
     Ok(())
 }
@@ -280,7 +269,6 @@ pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<
                 rpc_url: ctx.rpc_url,
                 safe: Some(safe),
                 signer: ctx.signer,
-                #[cfg(feature = "hd-wallet")]
                 home: ctx.home,
             };
             dispatch(target, calls, opts, &console).await
@@ -515,7 +503,6 @@ async fn dispatch(
     opts: SendOpts,
     console: &Console,
 ) -> Result<SendOutcome> {
-    #[cfg(feature = "hd-wallet")]
     if opts.rotate {
         return Box::pin(run_rotating(target, calls, opts, console)).await;
     }
@@ -601,9 +588,9 @@ pub async fn execute(
 
     // 2. Inspect Safe State & Resolve Signer / Payer
     let signer_opt = target.signer;
-    let payer_opt = create_payer(&args.payer)?;
+    let payer_opt = create_payer(&args.gas_payer, console).await?;
     let payer = match (&payer_opt, &signer_opt) {
-        (Some(p), _) => AnySigner::from(p.clone()),
+        (Some(p), _) => p.clone(),
         (None, Some(s)) => s.clone(),
         (None, None) => return Err(SendError::NoSigner),
     };
@@ -697,16 +684,11 @@ pub async fn execute(
         }
         existing
     } else {
+        // The builder only plans: it reads the signer's address and signs
+        // nothing, so the owner (or else the payer) serves on any backend.
         let safe_for_builder = Safe::new(
             provider.clone(),
-            // The builder only plans; any key will do where the signer is
-            // not a local one.
-            signer_opt
-                .as_ref()
-                .and_then(AnySigner::as_local)
-                .or(payer_opt.as_ref())
-                .cloned()
-                .unwrap_or_else(PrivateKeySigner::random),
+            signer_opt.clone().unwrap_or_else(|| payer.clone()),
             safe_address,
             config,
         );
@@ -1157,7 +1139,6 @@ pub async fn execute(
 
 /// `send --rotate`: the user's calls followed by a swap of the owner for the HD
 /// wallet's next unused key, then a sweep of the old key's ETH.
-#[cfg(feature = "hd-wallet")]
 async fn run_rotating(
     target: Target,
     cli_calls: Vec<Call>,
@@ -1191,11 +1172,9 @@ async fn run_rotating(
     } else {
         cli_calls
     };
-    if calls.is_empty() {
-        return Err(SendError::NoCalls);
-    }
-    let payer = create_payer(&args.payer)?;
-    let ring = open_wallet(&args.hd, &args.password, target.home.as_deref(), console).await?;
+    // No calls: the transaction only rotates the owner.
+    let payer = create_payer(&args.gas_payer, console).await?;
+    let ring = open_wallet(&args.hd, target.home.as_deref(), console).await?;
     let safe = if let Some(safe) = target.safe.or(bundle_safe) {
         safe
     } else {
@@ -1206,8 +1185,6 @@ async fn run_rotating(
         rpc_url: &target.rpc_url,
         safe,
         ring,
-        legacy_owner: None,
-        sweep_legacy: false,
         payer,
         sweep: &args.sweep,
         calls,

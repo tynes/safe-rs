@@ -1,4 +1,4 @@
-//! `safe create --hd-wallet` / `--ledger`.
+//! `safe create --rotate`, with `--mnemonic` or `--ledger`.
 
 use std::fmt::Write as _;
 use std::str::FromStr;
@@ -6,7 +6,6 @@ use std::str::FromStr;
 use alloy::primitives::utils::format_ether;
 use alloy::primitives::{Address, TxHash};
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 use safe_rs::rotation::{
     binding_key, CreationParams, Keyring, OwnerRef, Reserved, RotatingSafe, SETUP_LOOKAHEAD,
 };
@@ -17,6 +16,7 @@ use super::{
     deployment, predict, submit, CreateContext, CreateError, CreateOpts, CreateOutcome, OwnerKey,
     SweptEth,
 };
+use crate::any_signer::AnySigner;
 use crate::cli::{check_setup, ResolvedSetup};
 use crate::commands::rotation::rotation_config;
 use crate::commands::{http_provider, latest_sim_spec, HttpProvider};
@@ -61,7 +61,7 @@ pub fn parse_same_as(value: &str) -> Result<SameAs, String> {
     value.parse()
 }
 
-/// The result of `safe create --hd-wallet`.
+/// The result of `safe create --rotate`.
 #[derive(Serialize)]
 pub(super) struct HdCreateOutput {
     safe_address: Address,
@@ -245,10 +245,10 @@ fn creation_params(owner_index: u32, setup: &ResolvedSetup) -> CreationParams {
     }
 }
 
-/// `safe create --hd-wallet` / `--ledger`: a Safe whose first owner is a
+/// `safe create --rotate` with `--mnemonic` / `--ledger`: a Safe whose first owner is a
 /// wallet key that has never signed anything.
 ///
-/// The funding key (or `--payer-private-key`) sends the deployment, so the
+/// The funding key (or the `--gas-payer-*` key) sends the deployment, so the
 /// owner's public key stays unpublished; the funding key's remaining ETH then
 /// moves to the owner, which pays for the Safe's first transaction.
 ///
@@ -260,14 +260,14 @@ pub(super) async fn create(
     opts: CreateOpts,
     console: &Console,
 ) -> Result<CreateOutcome, CreateError> {
-    let explicit_payer = create_payer(&opts.payer)?;
-    let mut ring = open_wallet(&opts.hd, &opts.password, ctx.home.as_deref(), console).await?;
+    let explicit_payer = create_payer(&opts.gas_payer, console).await?;
+    let mut ring = open_wallet(&opts.hd, ctx.home.as_deref(), console).await?;
     let provider = http_provider(&ctx.rpc_url);
     let chain_id = provider.get_chain_id().await?;
     let funded_by_wallet = explicit_payer.is_none();
     let payer = explicit_payer
         .as_ref()
-        .map_or_else(|| ring.id(), PrivateKeySigner::address);
+        .map_or_else(|| ring.id(), AnySigner::address);
     let mut warnings = Vec::new();
 
     // The owner, and whether it is a new key to reserve once confirmed.

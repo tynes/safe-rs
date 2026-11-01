@@ -96,7 +96,7 @@ pub mod types;
 pub mod wallet;
 
 // Re-export main types at crate root
-pub use account::Account;
+pub use account::{Account, AccountSigner};
 pub use chain::{ChainAddresses, ChainConfig};
 #[cfg(feature = "simulation")]
 pub use config::{check_config_post_state, check_new_guards_allow_followup};

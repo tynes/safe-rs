@@ -66,9 +66,11 @@ fn send(h: &LocalHarness, home: &Path, safe: Address, args: &[&str]) -> Output {
         "PRIVATE_KEY",
         "SAFE_ADDRESS",
         "ETH_RPC_URL",
-        "SAFE_HD_WALLET",
-        "SAFE_PASSWORD_FILE",
-        "SAFE_PAYER_PRIVATE_KEY",
+        "ETH_PASSWORD",
+        "ETH_KEYSTORE",
+        "ETH_KEYSTORE_ACCOUNT",
+        "ETH_FROM",
+        "GAS_PAYER_PRIVATE_KEY",
     ] {
         command.env_remove(name);
     }
@@ -112,9 +114,11 @@ fn send_as(
         "PRIVATE_KEY",
         "SAFE_ADDRESS",
         "ETH_RPC_URL",
-        "SAFE_HD_WALLET",
-        "SAFE_PASSWORD_FILE",
-        "SAFE_PAYER_PRIVATE_KEY",
+        "ETH_PASSWORD",
+        "ETH_KEYSTORE",
+        "ETH_KEYSTORE_ACCOUNT",
+        "ETH_FROM",
+        "GAS_PAYER_PRIVATE_KEY",
     ] {
         command.env_remove(name);
     }
@@ -126,7 +130,7 @@ fn send_as(
     }
 }
 
-/// Runs `safe send --json` for `safe` with no owner wallet, only `--payer-private-key`.
+/// Runs `safe send --json` for `safe` with no owner wallet, only a `--gas-payer-private-key`.
 fn send_with_payer_only(
     h: &LocalHarness,
     home: &Path,
@@ -141,7 +145,7 @@ fn send_with_payer_only(
         .args(["--safe", &safe.to_string()])
         .args(["--rpc-url", h.url().as_str()])
         .args([
-            "--payer-private-key",
+            "--gas-payer-private-key",
             &hex::encode_prefixed(payer.to_bytes()),
         ])
         .arg("--json")
@@ -150,9 +154,11 @@ fn send_with_payer_only(
         "PRIVATE_KEY",
         "SAFE_ADDRESS",
         "ETH_RPC_URL",
-        "SAFE_HD_WALLET",
-        "SAFE_PASSWORD_FILE",
-        "SAFE_PAYER_PRIVATE_KEY",
+        "ETH_PASSWORD",
+        "ETH_KEYSTORE",
+        "ETH_KEYSTORE_ACCOUNT",
+        "ETH_FROM",
+        "GAS_PAYER_PRIVATE_KEY",
     ] {
         command.env_remove(name);
     }
@@ -453,7 +459,7 @@ async fn multi_owner_offline_parallel_signing_and_merge_bundle_with_payer() {
             "75",
             "--bundle",
             b1,
-            "--payer-private-key",
+            "--gas-payer-private-key",
             &payer_key,
         ],
     )
@@ -473,7 +479,7 @@ async fn multi_owner_offline_parallel_signing_and_merge_bundle_with_payer() {
             "--bundle",
             b2,
             "--sign-only",
-            "--payer-private-key",
+            "--gas-payer-private-key",
             &payer_key,
         ],
     )
@@ -594,9 +600,11 @@ fn safe_cli_with_env(h: &LocalHarness, home: &Path, args: &[&str], env: &[(&str,
         "PRIVATE_KEY",
         "SAFE_ADDRESS",
         "ETH_RPC_URL",
-        "SAFE_HD_WALLET",
-        "SAFE_PASSWORD_FILE",
-        "SAFE_PAYER_PRIVATE_KEY",
+        "ETH_PASSWORD",
+        "ETH_KEYSTORE",
+        "ETH_KEYSTORE_ACCOUNT",
+        "ETH_FROM",
+        "GAS_PAYER_PRIVATE_KEY",
     ] {
         command.env_remove(name);
     }

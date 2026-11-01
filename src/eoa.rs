@@ -11,9 +11,10 @@ use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::primitives::{Address, Bytes, TxHash, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer;
 use url::Url;
 
-use crate::account::Account;
+use crate::account::{Account, AccountSigner};
 use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
 #[cfg(feature = "simulation")]
@@ -61,12 +62,13 @@ impl EoaBatchResult {
     }
 }
 
-/// EOA client for executing transactions from an externally owned account
-pub struct Eoa<P> {
+/// EOA client for executing transactions from an externally owned account,
+/// signing with `S` (a local key by default; see [`AccountSigner`])
+pub struct Eoa<P, S = PrivateKeySigner> {
     /// The provider for RPC calls
     provider: P,
     /// The signer for transactions
-    signer: PrivateKeySigner,
+    signer: S,
     /// Chain configuration
     config: ChainConfig,
     /// Debug output directory for simulation failures
@@ -75,12 +77,13 @@ pub struct Eoa<P> {
     rpc_url: Url,
 }
 
-impl<P> Eoa<P>
+impl<P, S> Eoa<P, S>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
+    S: AccountSigner,
 {
     /// Creates a new EOA client with explicit chain configuration
-    pub fn new(provider: P, signer: PrivateKeySigner, config: ChainConfig, rpc_url: Url) -> Self {
+    pub fn new(provider: P, signer: S, config: ChainConfig, rpc_url: Url) -> Self {
         Self {
             provider,
             signer,
@@ -101,7 +104,7 @@ where
     }
 
     /// Creates an EOA client with auto-detected chain configuration
-    pub async fn connect(provider: P, signer: PrivateKeySigner, rpc_url: Url) -> Result<Self> {
+    pub async fn connect(provider: P, signer: S, rpc_url: Url) -> Result<Self> {
         let chain_id = provider
             .get_chain_id()
             .await
@@ -113,8 +116,8 @@ where
 }
 
 /// Builder for constructing and executing EOA transaction batches
-pub struct EoaBuilder<'a, P> {
-    eoa: &'a Eoa<P>,
+pub struct EoaBuilder<'a, P, S = PrivateKeySigner> {
+    eoa: &'a Eoa<P, S>,
     calls: Vec<Call>,
     stop_on_failure: bool,
     #[cfg(feature = "simulation")]
@@ -123,11 +126,12 @@ pub struct EoaBuilder<'a, P> {
     aggregated_result: Option<SimulationResult>,
 }
 
-impl<'a, P> EoaBuilder<'a, P>
+impl<'a, P, S> EoaBuilder<'a, P, S>
 where
     P: Provider<AnyNetwork> + Clone + 'static,
+    S: AccountSigner,
 {
-    fn new(eoa: &'a Eoa<P>) -> Self {
+    fn new(eoa: &'a Eoa<P, S>) -> Self {
         EoaBuilder {
             eoa,
             calls: Vec::new(),
@@ -468,9 +472,10 @@ where
     }
 }
 
-impl<P> CallBuilder for EoaBuilder<'_, P>
+impl<P, S> CallBuilder for EoaBuilder<'_, P, S>
 where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
+    S: AccountSigner,
 {
     fn calls_mut(&mut self) -> &mut Vec<Call> {
         &mut self.calls
@@ -500,22 +505,23 @@ where
     }
 }
 
-impl<P> crate::account::Account for Eoa<P>
+impl<P, S> crate::account::Account for Eoa<P, S>
 where
     P: Provider<AnyNetwork> + Clone + Send + Sync + 'static,
+    S: AccountSigner,
 {
     type Provider = P;
     type Builder<'a>
-        = EoaBuilder<'a, P>
+        = EoaBuilder<'a, P, S>
     where
         Self: 'a;
 
     fn address(&self) -> Address {
-        self.signer.address()
+        Signer::address(&self.signer)
     }
 
     fn signer_address(&self) -> Address {
-        self.signer.address()
+        Signer::address(&self.signer)
     }
 
     fn config(&self) -> &crate::chain::ChainConfig {
@@ -533,7 +539,7 @@ where
     async fn nonce(&self) -> crate::error::Result<U256> {
         let nonce = self
             .provider
-            .get_transaction_count(self.signer.address())
+            .get_transaction_count(Signer::address(&self.signer))
             .await
             .map_err(|e| Error::Fetch {
                 what: "nonce",
@@ -542,7 +548,7 @@ where
         Ok(U256::from(nonce))
     }
 
-    fn batch(&self) -> EoaBuilder<'_, P> {
+    fn batch(&self) -> EoaBuilder<'_, P, S> {
         EoaBuilder::new(self)
     }
 

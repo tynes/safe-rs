@@ -1,4 +1,4 @@
-//! The rotating send shared by `safe send --rotate` and `safe rotate`.
+//! The rotating send of `safe send --rotate`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,16 +9,14 @@ use alloy::network::primitives::ReceiptResponse;
 use alloy::primitives::utils::format_ether;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 use safe_rs::encoding::compute_domain_separator;
-use safe_rs::rotation::{
-    ExecOptions, Keyring, OwnerRef, RotatingSafe, RotationConfig, RotationStatus,
-};
+use safe_rs::rotation::{ExecOptions, Keyring, RotatingSafe, RotationConfig, RotationStatus};
 use safe_rs::{
     detect_addresses, read_safe_state, Call, ChainAddresses, Error, ReadSafeStateOptions, SpecId,
 };
 use url::Url;
 
+use crate::any_signer::AnySigner;
 use crate::bundle::{BundleFile, BundleRotationSwap};
 use crate::cli::{SimArgs, SweepArgs};
 use crate::commands::send::{broadcast, receipt};
@@ -41,11 +39,8 @@ pub struct RotationRun<'a> {
     pub safe: Address,
     /// The wallet's keys and their locked state
     pub ring: Keyring<CliKeys>,
-    /// Key of a current owner the wallet cannot derive (`safe rotate --from-*`)
-    pub legacy_owner: Option<PrivateKeySigner>,
-    /// `--sweep-legacy`: the legacy key's whole balance may move without a prompt
-    pub sweep_legacy: bool,
-    pub payer: Option<PrivateKeySigner>,
+    /// The gas payer (`--gas-payer-*`), if not the current owner
+    pub payer: Option<AnySigner>,
     pub sweep: &'a SweepArgs,
     /// The user's calls; empty for a rotation-only transaction
     pub calls: Vec<Call>,
@@ -108,13 +103,6 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
     // `run` sets `no_confirm` for `--json`, so this is false whenever no one
     // will be asked.
     let prompts = !run.no_confirm && !run.no_submit;
-    if run.legacy_owner.is_some() && !run.sweep.no_sweep && !run.sweep_legacy && !prompts {
-        return Err(SendError::other(
-            "moving a Safe onto the HD wallet also moves the whole ETH balance of the \
-             --from-* key to the new owner. Without a prompt to show the amount, pass \
-             --sweep-legacy to allow it or --no-sweep to leave the ETH where it is",
-        ));
-    }
     if run.sim.block.is_some() {
         return Err(SendError::other(
             "--block cannot be combined with owner rotation, which always runs at the latest block",
@@ -151,21 +139,15 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
         run.timeout,
     );
     let on_device = run.ring.keys().is_device();
-    config.payer = run.payer;
+    config.payer = run
+        .payer
+        .map(|payer| std::sync::Arc::new(payer) as safe_rs::rotation::Payer);
     config.sweep = !run.sweep.no_sweep;
     config.sweep_reserve = run.sweep.sweep_reserve;
-    let onboarding = run.legacy_owner.is_some();
-    config.legacy_owner = run.legacy_owner;
 
     let mut rotating =
         RotatingSafe::with_keyring(provider.clone(), run.safe, run.ring, config).await?;
     console.warnings(&rotating.take_warnings());
-    if let (true, OwnerRef::Derived { index, .. }) = (onboarding, rotating.binding()?.current) {
-        return Err(SendError::other(format!(
-            "Safe {} is already owned by wallet key {index}; drop the --from-* option",
-            run.safe
-        )));
-    }
 
     // ETH still owed to the current owner from an earlier rotation: move it
     // first, since it is what pays for this transaction.
@@ -276,7 +258,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
     }
 
     let sweep_enabled = !run.sweep.no_sweep;
-    let mut details = rotation_summary(&tx, &run.calls, sweep_enabled);
+    let details = rotation_summary(&tx, &run.calls, sweep_enabled);
     console.line(&details);
     console.line("");
     let have = tx.signatures_collected;
@@ -414,17 +396,6 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
         }
     }
 
-    if onboarding && sweep_enabled {
-        let balance = provider.get_balance(tx.from.address()).await?;
-        let note = format!(
-            "The --from-* key {} holds {} ETH. All of it moves to the new owner {} after the rotation.",
-            tx.from.address(),
-            format_ether(balance),
-            tx.to.address
-        );
-        console.line(&note);
-        details.push_str(&format!("\n{note}"));
-    }
     if prompts && !console.confirm("Execute transaction and rotate the owner key?", &details) {
         console.line("Aborted");
         return Ok(SendOutcome::Aborted {

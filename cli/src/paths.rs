@@ -45,7 +45,7 @@ fn is_path(wallet: &str) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
 }
 
-/// The keystore file for `--hd-wallet <NAME|PATH>`.
+/// The keystore file for `--mnemonic <NAME|PATH>`.
 pub fn wallet_file(home: &Path, wallet: &str) -> PathBuf {
     if is_path(wallet) {
         PathBuf::from(wallet)

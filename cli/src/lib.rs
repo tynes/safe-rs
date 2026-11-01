@@ -79,20 +79,14 @@ mod commands;
 pub mod config_file;
 mod console;
 mod error;
-#[cfg(feature = "hd-wallet")]
 mod keys;
 pub mod log;
 mod output;
-#[cfg_attr(
-    not(feature = "hd-wallet"),
-    allow(dead_code, reason = "the wallet paths are only used with hd-wallet")
-)]
 mod paths;
 pub mod policy;
 pub mod prompt;
 mod sig_parser;
 mod signers;
-#[cfg(feature = "hd-wallet")]
 pub mod wallet;
 
 use std::sync::Arc;
@@ -121,28 +115,28 @@ use crate::prompt::{Prompt, TerminalPrompt};
 /// [`SendOpts`](args::SendOpts) is the one a send needs. It is made of
 /// [`CollectArgs`](args::CollectArgs), [`SimulateArgs`](args::SimulateArgs),
 /// [`FeeArgs`](args::FeeArgs) and [`RawTxArgs`](args::RawTxArgs), which
-/// `safe config` and `safe rotate` share, and which a host can flatten one
-/// by one into a command of its own. `RpcArgs`,
-/// `SafeArgs` and `SignerArgs` are the `safe` CLI's own `--rpc-url`, `--safe`
-/// and signer flags, with their `ETH_RPC_URL`, `SAFE_ADDRESS` and
-/// `PRIVATE_KEY` environment variables, for a CLI that wants those too.
+/// `safe config` shares, and which a host can flatten one by one into a
+/// command of its own. `RpcArgs`, `SafeArgs` and `SignerArgs` are the `safe`
+/// CLI's own `--rpc-url`, `--safe` and signer flags, with their
+/// `ETH_RPC_URL`, `SAFE_ADDRESS` and wallet environment variables, for a CLI
+/// that wants those too.
 ///
-/// `PasswordArgs` (`SAFE_PASSWORD_FILE`), `PayerArgs`
-/// (`SAFE_PAYER_PRIVATE_KEY`) and `HdArgs` (`SAFE_HD_WALLET`) read the `safe`
-/// CLI's environment variables wherever they are flattened. A host that does
-/// not want them can drop one with
-/// `#[command(mut_arg("payer_private_key", |a| a.env(None)))]` on its command.
+/// [`SignerArgs`](args::SignerArgs) is `cast`'s wallet options, one to one
+/// (plus `PRIVATE_KEY`), and resolves to an [`AnySigner`]: any key `cast`
+/// can sign with. [`GasPayerArgs`](args::GasPayerArgs) is the same set with
+/// a `--gas-payer-` prefix and `GAS_PAYER_` environment variables. A host
+/// that does not want an environment variable can drop it with
+/// `#[command(mut_arg("private_key", |a| a.env(None)))]` on its command.
 pub mod args {
     #[allow(deprecated, reason = "the old name stays exported for one release")]
     pub use crate::cli::WalletArgs;
     pub use crate::cli::{
         parse_block_id, parse_ether_value, parse_fee_value, CollectArgs, EoaArgs, EvmSpec, FeeArgs,
-        PasswordArgs, PayerArgs, RawTxArgs, RpcArgs, SafeArgs, SafeSetupArgs, SafeVersion,
+        GasPayerArgs, PasswordArgs, RawTxArgs, RpcArgs, SafeArgs, SafeSetupArgs, SafeVersion,
         SendOpts, SignerArgs, SimArgs, SimulateArgs, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT,
     };
-    /// The HD wallet and sweep flags of `--rotate` (`hd-wallet` feature).
-    #[cfg(feature = "hd-wallet")]
-    pub use crate::cli::{parse_hd_key, HdArgs, HdKey, SweepArgs};
+    /// The HD wallet and sweep flags of `--rotate`.
+    pub use crate::cli::{HdArgs, SweepArgs};
 }
 
 /// `safe create` and [`create`](create::create) for a CLI that deploys Safes.
@@ -152,7 +146,6 @@ pub mod create {
         create, run, BoxFuture, CreateArgs, CreateContext, CreateOpts, CreateOutcome, HttpProvider,
         Implementation, ResolvedSetup, SafeDeployment, SafeImplementation, StandardSafe,
     };
-    #[cfg(feature = "hd-wallet")]
     pub use crate::commands::create::{parse_same_as, SameAs};
     pub use crate::error::CreateError;
     pub use crate::output::{OwnerKey, SweptEth};
@@ -216,12 +209,6 @@ pub async fn run(command: Commands, config: RunConfig) -> Result<()> {
             commands::config::run(*args, &console).await
         }
         Commands::Create(args) => commands::create::run_with(*args, &console, json).await,
-        #[cfg(feature = "hd-wallet")]
-        Commands::Rotate(mut args) => {
-            args.no_confirm |= json;
-            commands::rotate::run(*args, &console).await
-        }
-        #[cfg(feature = "hd-wallet")]
         Commands::Wallet(args) => run_wallet(args, &console).await,
     };
     reports.print(json);
@@ -230,7 +217,6 @@ pub async fn run(command: Commands, config: RunConfig) -> Result<()> {
 
 /// `safe wallet`, with its `--rpc-url` and `--safe`. `SAFE_ADDRESS` picks the
 /// Safe of `sync` and `sweep` only, so it does not filter `status`.
-#[cfg(feature = "hd-wallet")]
 async fn run_wallet(args: cli::WalletCliArgs, console: &Console) -> Result<()> {
     use wallet::WalletCommand;
 
