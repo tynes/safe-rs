@@ -24,10 +24,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::eips::eip1559::{BaseFeeParams, Eip1559Estimation};
 use alloy::eips::BlockId;
+use alloy::network::TxSigner;
 use alloy::network::{AnyNetwork, AnyTransactionReceipt, Network, TransactionBuilder};
+use alloy::primitives::Signature;
 use alloy::primitives::{address, Address, Bytes, B256, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
+use std::sync::Arc;
 
 use crate::chain::ChainAddresses;
 use crate::contracts::{IGasPriceOracle, ISafe};
@@ -69,6 +72,10 @@ const TRANSFER_GAS: u64 = 21_000;
 /// that were reserved or used without leaving a trace the rebuild can see.
 pub const REBUILD_MARGIN: u32 = 16;
 
+/// A gas payer: any key that signs transactions (a local key, a hardware
+/// wallet or a remote signer). It only sends the outer transaction.
+pub type Payer = Arc<dyn TxSigner<Signature> + Send + Sync>;
+
 /// How a [`RotatingSafe`] behaves.
 #[derive(Clone)]
 pub struct RotationConfig {
@@ -77,7 +84,7 @@ pub struct RotationConfig {
     /// [`detect_addresses`](crate::detect_addresses) returns the ones matching it.
     pub addresses: ChainAddresses,
     /// Sends the outer transaction and pays for gas. `None`: the current owner.
-    pub payer: Option<PrivateKeySigner>,
+    pub payer: Option<Payer>,
     /// The key of a current owner the wallet cannot derive, to move a Safe onto
     /// the wallet
     pub legacy_owner: Option<PrivateKeySigner>,
@@ -120,7 +127,7 @@ impl std::fmt::Debug for RotationConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RotationConfig")
             .field("addresses", &self.addresses)
-            .field("payer", &self.payer.as_ref().map(PrivateKeySigner::address))
+            .field("payer", &self.payer.as_ref().map(|payer| payer.address()))
             .field(
                 "legacy_owner",
                 &self.legacy_owner.as_ref().map(PrivateKeySigner::address),
@@ -283,8 +290,13 @@ fn now() -> u64 {
 /// A key that signs: one of the wallet's, or a local key from the configuration.
 #[derive(Clone)]
 enum Key {
-    Wallet { index: u32, address: Address },
+    Wallet {
+        index: u32,
+        address: Address,
+    },
     Local(PrivateKeySigner),
+    /// The configured gas payer, which signs only the outer transaction
+    Payer(Payer),
 }
 
 impl Key {
@@ -292,6 +304,7 @@ impl Key {
         match self {
             Self::Wallet { address, .. } => *address,
             Self::Local(key) => key.address(),
+            Self::Payer(key) => key.address(),
         }
     }
 }
@@ -577,6 +590,9 @@ where
         match key {
             Key::Wallet { index, address } => self.ring.sign_safe_tx(*index, *address, tx).await,
             Key::Local(key) => tx.sign(key).await,
+            Key::Payer(_) => Err(Error::Rotation(
+                "the gas payer does not sign Safe transactions".to_string(),
+            )),
         }
     }
 
@@ -586,6 +602,7 @@ where
                 self.ring.sign_outer_tx(*index, *address, params).await
             }
             Key::Local(key) => sign_outer_tx(key, params).await,
+            Key::Payer(key) => sign_outer_tx(key.as_ref(), params).await,
         }
     }
 
@@ -690,7 +707,7 @@ where
             .config
             .payer
             .clone()
-            .map_or_else(|| owner.clone(), Key::Local);
+            .map_or_else(|| owner.clone(), Key::Payer);
         if payer.address() == reserved.address {
             return Err(Error::Rotation(
                 "the payer must not be the next owner: paying would publish its key".to_string(),

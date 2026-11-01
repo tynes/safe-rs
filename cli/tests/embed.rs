@@ -130,10 +130,14 @@ fn defaults_match_the_flag_defaults() {
 #[test]
 fn debug_output_hides_secrets() {
     let mut opts = SendOpts::default();
-    opts.password.password = Some("hunter2".into());
-    opts.payer.payer_private_key = Some("0xdeadbeef".into());
+    opts.hd.password.password = Some("hunter2".into());
+    opts.hd.mnemonic = Some("test test test junk".into());
+    opts.gas_payer.gas_payer_private_key = Some("0xdeadbeef".into());
+    opts.gas_payer.gas_payer_password = Some("hunter3".into());
     let debug = format!("{opts:?}");
     assert!(!debug.contains("hunter2"), "{debug}");
+    assert!(!debug.contains("hunter3"), "{debug}");
+    assert!(!debug.contains("junk"), "{debug}");
     assert!(!debug.contains("deadbeef"), "{debug}");
     assert!(debug.contains("<redacted>"), "{debug}");
 }
@@ -188,7 +192,7 @@ async fn options_built_in_code_are_checked_like_flags() {
         (
             |o| o.hd.ledger = true,
             OptionsError::HdWithoutRotate,
-            "needs --rotate",
+            "need --rotate",
         ),
     ]);
     for (set, expected, message) in cases {
@@ -270,8 +274,8 @@ async fn an_eoa_send_refuses_the_options_only_a_safe_has() {
         (|o| o.nonce = Some(U256::from(1)), "--nonce"),
         (|o| o.raw.no_submit = true, "--no-submit"),
         (
-            |o| o.payer.payer_private_key = Some("0x01".into()),
-            "--payer-private-key",
+            |o| o.gas_payer.gas_payer_private_key = Some("0x01".into()),
+            "--gas-payer-*",
         ),
     ];
     cases.extend::<[Case; 2]>([

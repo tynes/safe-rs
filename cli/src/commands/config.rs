@@ -17,14 +17,6 @@ use crate::signers::create_signer;
 
 /// `safe config`.
 pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
-    if args.hd.is_set() && !args.signer.is_set() {
-        bail!(
-            "safe config does not rotate owner keys: signing with --hd-wallet or --ledger would \
-             publish an owner key and leave it in charge of the Safe. Sign with --private-key, \
-             --keystore or --interactive"
-        );
-    }
-
     let changes = ConfigChanges {
         add_owners: args.add_owners.clone(),
         remove_owners: args.remove_owners.clone(),
@@ -37,7 +29,7 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
         module_guard: args.module_guard,
     };
     let signer = if args.signer.is_set() {
-        Some(create_signer(&args.signer, &args.password, console).await?)
+        Some(create_signer(&args.signer, console).await?)
     } else {
         None
     };
@@ -192,9 +184,8 @@ fn send_opts(args: ConfigArgs) -> SendOpts {
         multi_send_call_only: args.multi_send_call_only,
         no_confirm: args.no_confirm,
         rotate: false,
-        hd: args.hd,
+        hd: crate::cli::HdArgs::default(),
         sweep: crate::cli::SweepArgs::default(),
-        password: args.password,
-        payer: args.payer,
+        gas_payer: args.gas_payer,
     }
 }

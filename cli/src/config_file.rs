@@ -7,15 +7,16 @@
 //! ```toml
 //! rpc_url = "https://polygon.drpc.org"   # --rpc-url, ETH_RPC_URL
 //! safe = "0x…"                           # --safe, SAFE_ADDRESS
-//! hd_wallet = "treasury"                 # --hd-wallet, SAFE_HD_WALLET
-//! password_file = "~/.safe-rs/password"  # --password-file, SAFE_PASSWORD_FILE
-//! keystore = "~/.foundry/keystores/me"   # --keystore
-//! hd_key = "treasury:3"                  # --hd-key
+//! password_file = "~/.safe-rs/password"  # --password-file, ETH_PASSWORD
+//! keystore = "~/.foundry/keystores/me"   # --keystore, ETH_KEYSTORE
+//! account = "me"                         # --account, ETH_KEYSTORE_ACCOUNT
+//! mnemonic = "treasury"                  # --mnemonic
 //! ```
 //!
-//! `keystore` and `hd_key` pick the signer only when no other signer flag
-//! (`--private-key` / `PRIVATE_KEY`, `--keystore`, `--hd-key`,
-//! `--interactive`) is given. Private keys and passwords never go here.
+//! `keystore`, `account` and `mnemonic` pick the signer (or, under
+//! `--rotate`, the HD wallet) only when no other wallet option (such as
+//! `--private-key` / `PRIVATE_KEY` or `--ledger`) is given. Private keys,
+//! phrases and passwords never go here.
 
 use std::path::{Path, PathBuf};
 
@@ -40,10 +41,11 @@ pub const FILE_NAME: &str = "config.toml";
 pub struct ConfigFile {
     pub rpc_url: Option<Url>,
     pub safe: Option<Address>,
-    pub hd_wallet: Option<String>,
     pub password_file: Option<PathBuf>,
     pub keystore: Option<PathBuf>,
-    pub hd_key: Option<String>,
+    pub account: Option<String>,
+    /// An HD wallet name or path. A phrase never goes here.
+    pub mnemonic: Option<String>,
 }
 
 /// Why `config.toml` could not be used.
@@ -67,9 +69,23 @@ pub enum ConfigError {
     },
 }
 
-/// The flag ids a setting is the default of, with the signer flags that
-/// override it (for the signer settings only).
-const SIGNER_FLAGS: [&str; 5] = ["private_key", "keystore", "hd_key", "ledger", "interactive"];
+/// The ids of the wallet options: any one given overrides a configured
+/// signer.
+const SIGNER_FLAGS: [&str; 10] = [
+    "private_key",
+    "keystore_path",
+    "keystore_account_name",
+    "mnemonic",
+    "interactive",
+    "ledger",
+    "trezor",
+    "aws",
+    "gcp",
+    "turnkey",
+];
+
+/// The wallet options that are switches, given when `true`.
+const SWITCHES: [&str; 6] = ["interactive", "ledger", "trezor", "aws", "gcp", "turnkey"];
 
 impl ConfigFile {
     /// `config.toml` in the data directory (`$SAFE_RS_HOME`, or
@@ -125,24 +141,24 @@ impl ConfigFile {
         if let Some(safe) = &self.safe {
             defaults.push(("safe", safe.to_string(), false));
         }
-        if let Some(wallet) = &self.hd_wallet {
-            defaults.push(("hd_wallet", wallet.clone(), false));
-        }
         if let Some(file) = &self.password_file {
-            defaults.push(("password_file", path(file), false));
+            defaults.push(("keystore_password_file", path(file), false));
         }
         if let Some(keystore) = &self.keystore {
-            defaults.push(("keystore", path(keystore), true));
+            defaults.push(("keystore_path", path(keystore), true));
         }
-        if let Some(key) = &self.hd_key {
-            defaults.push(("hd_key", key.clone(), true));
+        if let Some(account) = &self.account {
+            defaults.push(("keystore_account_name", account.clone(), true));
+        }
+        if let Some(wallet) = &self.mnemonic {
+            defaults.push(("mnemonic", wallet.clone(), true));
         }
         defaults
     }
 }
 
-/// Drops a configured `--keystore` or `--hd-key` from `signer` when another
-/// signer flag was given on the command line or in the environment.
+/// Drops a configured `--keystore`, `--account` or `--mnemonic` from
+/// `signer` when another wallet option was given on the command line or in the environment.
 /// [`ConfigFile::apply`] arranges this for the flags it finds, but clap does
 /// not apply it to flags a host made global, so such a host calls this on
 /// the matches it parsed `signer` from.
@@ -153,14 +169,18 @@ pub fn settle_signer(signer: &mut SignerArgs, matches: &ArgMatches) {
                 matches.value_source(id),
                 Some(ValueSource::CommandLine | ValueSource::EnvVariable)
             )
+            && (!SWITCHES.contains(&id) || matches.get_flag(id))
     };
     let configured = |id: &str| matches!(matches.value_source(id), Some(ValueSource::DefaultValue));
     let other_given = |id: &str| SIGNER_FLAGS.iter().any(|flag| *flag != id && given(flag));
-    if signer.keystore.is_some() && configured("keystore") && other_given("keystore") {
-        signer.keystore = None;
+    if configured("keystore_path") && other_given("keystore_path") {
+        signer.keystore_path = None;
     }
-    if signer.hd_key.is_some() && configured("hd_key") && other_given("hd_key") {
-        signer.hd_key = None;
+    if configured("keystore_account_name") && other_given("keystore_account_name") {
+        signer.keystore_account_name = None;
+    }
+    if configured("mnemonic") && other_given("mnemonic") {
+        signer.mnemonic = None;
     }
 }
 
@@ -196,7 +216,7 @@ fn apply_defaults(command: Command, defaults: &[(&'static str, String, bool)]) -
                 return arg;
             }
             arg.default_value_ifs(others.into_iter().map(|flag| {
-                let when = if flag == "interactive" {
+                let when = if SWITCHES.contains(&flag) {
                     ArgPredicate::Equals("true".into())
                 } else {
                     ArgPredicate::IsPresent
@@ -268,7 +288,7 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(args.rpc.rpc_url.as_str(), "http://rpc.test/");
-        assert_eq!(args.signer.keystore.as_deref(), Some("/keys/me.json"));
+        assert_eq!(args.signer.keystore_path.as_deref(), Some("/keys/me.json"));
 
         // A flag wins over the setting.
         let args = info(
@@ -294,11 +314,19 @@ mod tests {
             ..ConfigFile::default()
         };
         let args = info(parse(&config, &["info", "--private-key", "0x01"]).unwrap());
-        assert_eq!(args.signer.keystore, None);
+        assert_eq!(args.signer.keystore_path, None);
         assert_eq!(args.signer.private_key.as_deref(), Some("0x01"));
 
         let args = info(parse(&config, &["info", "--interactive"]).unwrap());
-        assert_eq!(args.signer.keystore, None);
+        assert_eq!(args.signer.keystore_path, None);
+
+        let args = info(parse(&config, &["info", "--ledger"]).unwrap());
+        assert_eq!(args.signer.keystore_path, None);
+        assert!(args.signer.ledger);
+
+        let args = info(parse(&config, &["info", "--account", "me"]).unwrap());
+        assert_eq!(args.signer.keystore_path, None);
+        assert_eq!(args.signer.keystore_account_name.as_deref(), Some("me"));
     }
 
     #[test]
@@ -314,7 +342,11 @@ mod tests {
 
     /// A host that makes the signer flags global, as `polymarket` does.
     #[derive(clap::Parser)]
-    #[command(mut_arg("private_key", |a| a.global(true)), mut_arg("keystore", |a| a.global(true)))]
+    #[command(
+        mut_arg("private_key", |a| a.global(true)),
+        mut_arg("keystore_path", |a| a.global(true)),
+        mut_arg("ledger", |a| a.global(true))
+    )]
     struct Host {
         #[command(flatten)]
         signer: SignerArgs,
@@ -336,19 +368,20 @@ mod tests {
         for args in [
             &["host", "--private-key", "0x01", "show"][..],
             &["host", "show", "--private-key", "0x01"][..],
+            &["host", "show", "--ledger", "--private-key", "0x01"][..],
         ] {
             let mut command = config.apply(Host::command());
             let matches = command.try_get_matches_from_mut(args).unwrap();
             let mut host = Host::from_arg_matches(&matches).unwrap();
             settle_signer(&mut host.signer, &matches);
-            assert_eq!(host.signer.keystore, None, "{args:?}");
+            assert_eq!(host.signer.keystore_path, None, "{args:?}");
             assert_eq!(host.signer.private_key.as_deref(), Some("0x01"));
         }
         let mut command = config.apply(Host::command());
         let matches = command.try_get_matches_from_mut(["host", "show"]).unwrap();
         let mut host = Host::from_arg_matches(&matches).unwrap();
         settle_signer(&mut host.signer, &matches);
-        assert_eq!(host.signer.keystore.as_deref(), Some("/keys/me.json"));
+        assert_eq!(host.signer.keystore_path.as_deref(), Some("/keys/me.json"));
     }
 
     #[test]
@@ -356,10 +389,10 @@ mod tests {
         let config = ConfigFile {
             rpc_url: Some("http://rpc.test".parse().unwrap()),
             safe: Some(Address::repeat_byte(0x11)),
-            hd_wallet: Some("treasury".into()),
             password_file: Some("/p".into()),
             keystore: Some("/k".into()),
-            hd_key: Some("treasury:2".into()),
+            account: Some("me".into()),
+            mnemonic: Some("treasury".into()),
         };
         config.apply(Cli::command()).debug_assert();
     }

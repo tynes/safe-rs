@@ -1,4 +1,4 @@
-//! What `--rotate`, `safe rotate`, `safe create --hd-wallet` and `safe wallet`
+//! What `--rotate`, `safe create --rotate` and `safe wallet`
 //! report.
 
 use std::fmt::Write as _;
@@ -137,7 +137,7 @@ pub fn rotation_summary(
         (None, false) => {
             let _ = write!(
                 s,
-                "\n\nSweep: off. {} stays unfunded: fund it or use --payer-private-key for the next transaction",
+                "\n\nSweep: off. {} stays unfunded: fund it or pass a --gas-payer-* key for the next transaction",
                 plan.new_owner.address
             );
         }

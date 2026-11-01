@@ -15,7 +15,6 @@ pub mod config;
 pub mod create;
 pub(crate) mod default_safe;
 pub mod info;
-pub mod rotate;
 pub mod rotation;
 pub mod send;
 

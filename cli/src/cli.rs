@@ -46,11 +46,6 @@ pub enum Commands {
     /// Deploy a new Safe deterministically (same address across chains)
     Create(Box<CreateArgs>),
 
-    /// Swap the Safe's owner for the HD wallet's next unused key, with no other
-    /// calls. Also moves an existing Safe onto the wallet (--from-*) and retires
-    /// a key after a failed transaction
-    Rotate(Box<RotateArgs>),
-
     /// Manage HD wallets: the encrypted phrase that one-time owner keys come from
     Wallet(WalletCliArgs),
 }
@@ -305,21 +300,22 @@ pub struct SendOpts {
     pub no_confirm: bool,
 
     /// Use the Safe's owner key once: append a swap of the owner for the next
-    /// unused key of --hd-wallet, then move the old key's ETH to the new one
+    /// unused key of the HD wallet (--mnemonic) or Ledger (--ledger), then
+    /// move the old key's ETH to the new one. With no calls, only rotates
     #[arg(long, conflicts_with_all = ["skip_simulation", "safe_tx_gas", "multi_send", "nonce"])]
     pub rotate: bool,
 
-    #[command(flatten)]
+    /// The HD wallet or Ledger the rotating owner keys come from. Not flags
+    /// of its own: `--mnemonic` / `--ledger` (and the password) fill it under
+    /// `--rotate`, see [`SignerArgs::take_rotation_keys`]
+    #[arg(skip)]
     pub hd: HdArgs,
 
     #[command(flatten)]
     pub sweep: SweepArgs,
 
     #[command(flatten)]
-    pub password: PasswordArgs,
-
-    #[command(flatten)]
-    pub payer: PayerArgs,
+    pub gas_payer: GasPayerArgs,
 }
 
 /// How a Safe transaction collects its signatures: `--bundle`,
@@ -502,14 +498,11 @@ impl SendOpts {
                 self.multi_send_call_only.is_some(),
                 "--multi-send-call-only",
             ),
-            (
-                self.payer.payer_private_key.is_some(),
-                "--payer-private-key",
-            ),
+            (self.gas_payer.is_set(), "--gas-payer-*"),
         ];
         let rotation = [
             (self.rotate, "--rotate"),
-            (self.hd.hd_wallet.is_some(), "--hd-wallet"),
+            (self.hd.mnemonic.is_some(), "--mnemonic"),
             (self.hd.ledger, "--ledger"),
             (self.sweep.no_sweep, "--no-sweep"),
             (self.sweep.sweep_reserve.is_some(), "--sweep-reserve"),
@@ -632,16 +625,10 @@ pub struct ConfigArgs {
     pub no_confirm: bool,
 
     #[command(flatten)]
-    pub hd: HdArgs,
-
-    #[command(flatten)]
     pub signer: SignerArgs,
 
     #[command(flatten)]
-    pub password: PasswordArgs,
-
-    #[command(flatten)]
-    pub payer: PayerArgs,
+    pub gas_payer: GasPayerArgs,
 }
 
 #[derive(Parser, Clone)]
@@ -677,9 +664,6 @@ pub struct CallArgs {
 
     #[command(flatten)]
     pub signer: SignerArgs,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
 }
 
 #[derive(Parser, Clone)]
@@ -699,9 +683,6 @@ pub struct InfoArgs {
 
     #[command(flatten)]
     pub signer: SignerArgs,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
 }
 
 /// Reads `approvedHashes(owner, safeTxHash)` for each current owner, so no
@@ -731,80 +712,6 @@ pub struct ApprovalsArgs {
 
     #[command(flatten)]
     pub signer: SignerArgs,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
-}
-
-#[derive(Parser, Clone)]
-#[command(
-    mut_arg("bundle", |a| a.help(
-        "Path to bundle JSON file (reads existing signatures/rotations; writes \
-         updated bundle when collecting offchain signatures)",
-    )),
-    mut_arg("simulate_only", |a| a.help(
-        "Only simulate, don't sign off or broadcast the transaction",
-    )),
-    group(ArgGroup::new("rotate_approve_or_simulate").args(["approve_hash", "simulate_only"])),
-    group(ArgGroup::new("rotate_sign_or_simulate").args(["sign_only", "simulate_only"])),
-)]
-pub struct RotateArgs {
-    /// Safe contract address (default: the wallet's sole recorded Safe on this
-    /// chain, or the legacy signer's default Safe with --from-*)
-    #[arg(value_name = "SAFE")]
-    pub safe: Option<Address>,
-
-    #[command(flatten)]
-    pub rpc: RpcArgs,
-
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    #[command(flatten)]
-    pub ledger: LedgerArg,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
-
-    /// Private key of the Safe's current owner, to move the Safe onto the HD wallet
-    #[arg(long, value_name = "KEY", conflicts_with_all = ["from_keystore", "from_interactive"])]
-    pub from_private_key: Option<String>,
-
-    /// Keystore of the Safe's current owner (its password is prompted for)
-    #[arg(long, value_name = "PATH", conflicts_with = "from_interactive")]
-    pub from_keystore: Option<PathBuf>,
-
-    /// Prompt for the private key of the Safe's current owner
-    #[arg(long)]
-    pub from_interactive: bool,
-
-    #[command(flatten)]
-    pub sweep: SweepArgs,
-
-    /// Move the whole ETH balance of the --from-* key to the new owner without
-    /// asking. Needed with --no-confirm or --json, where no prompt shows the amount
-    #[arg(long, conflicts_with = "no_sweep")]
-    pub sweep_legacy: bool,
-
-    #[command(flatten)]
-    pub payer: PayerArgs,
-
-    #[command(flatten)]
-    pub simulate: SimulateArgs,
-
-    #[command(flatten)]
-    pub fees: FeeArgs,
-
-    /// MultiSendCallOnly address (default: canonical for the Safe's version)
-    #[arg(long)]
-    pub multi_send_call_only: Option<Address>,
-
-    #[command(flatten)]
-    pub collect: CollectArgs,
-
-    /// Skip confirmation prompt
-    #[arg(long)]
-    pub no_confirm: bool,
 }
 
 /// The fee and receipt flags of a transaction: `--gas-limit`,
@@ -948,67 +855,108 @@ pub(crate) fn check_setup(owners: &[Address], threshold: u64) -> Result<(), Stri
     Ok(())
 }
 
-/// The single key that signs: `--private-key` (`PRIVATE_KEY`), `--keystore`,
-/// `--hd-key`, `--ledger` or `--interactive`.
+/// The key that signs: `cast`'s wallet options, one to one. The flags, short
+/// flags, aliases, value names, defaults and environment variables are those
+/// of `foundry_wallets::WalletOpts`, which `cast send` takes. The one addition
+/// is the `PRIVATE_KEY` environment variable on `--private-key`.
+///
+/// Two flags read more than `cast` does: `--mnemonic` also opens a `safe`
+/// HD wallet (a name under `~/.safe-rs/wallets` or the path of a mnemonic
+/// keystore), and `--password` / `--password-file` also unlock it.
+///
+/// Under `--rotate` (and on `safe wallet`), `--mnemonic` or `--ledger` gives
+/// the rotating owner keys instead of one signer: see
+/// [`take_rotation_keys`](Self::take_rotation_keys).
 #[derive(Args, Clone, Default)]
+#[command(next_help_heading = "Wallet options")]
 pub struct SignerArgs {
-    /// Raw private key
-    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
-    pub private_key: Option<String>,
+    /// The sender account: checked against the address of the key the other
+    /// options name
+    #[arg(long, short, value_name = "ADDRESS", env = "ETH_FROM")]
+    pub from: Option<Address>,
 
-    /// Path to a keystore file (Web3 Secret Storage v3, as written by `cast wallet import`)
-    #[arg(long)]
-    pub keystore: Option<String>,
-
-    /// Prompt for private key interactively
-    #[arg(short, long)]
+    /// Open an interactive prompt to enter your private key
+    #[arg(long, short)]
     pub interactive: bool,
 
-    /// Sign with the key at m/44'/60'/0'/0/INDEX (default 0) of an HD wallet:
-    /// <NAME|PATH>[:<INDEX>], a wallet name under ~/.safe-rs/wallets or the
-    /// path of a mnemonic keystore
-    #[arg(long, value_name = "WALLET[:INDEX]", value_parser = parse_hd_key)]
-    pub hd_key: Option<HdKey>,
+    /// Use the provided private key
+    #[arg(
+        long,
+        value_name = "RAW_PRIVATE_KEY",
+        env = "PRIVATE_KEY",
+        hide_env_values = true
+    )]
+    pub private_key: Option<String>,
 
-    /// Sign with the key at m/44'/60'/0'/0/INDEX (default 0) of a connected
-    /// Ledger, with the Ethereum app open. With --rotate, or `safe rotate`,
-    /// the Ledger gives the Safe's rotating owner keys instead
-    #[arg(long, value_name = "INDEX", num_args = 0..=1, default_missing_value = "0")]
-    pub ledger: Option<u32>,
-}
+    /// Use the mnemonic phrase or mnemonic file at the specified path. Also a
+    /// `safe` HD wallet: a name under ~/.safe-rs/wallets, or the path of a
+    /// mnemonic keystore (unlocked with --password or --password-file)
+    #[arg(long, alias = "mnemonic-path")]
+    pub mnemonic: Option<String>,
 
-/// `--hd-key <NAME|PATH>[:<INDEX>]`: one key of an HD wallet.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HdKey {
-    /// A wallet name under the data directory, or a keystore path
-    pub wallet: String,
-    /// The key's index: the last step of `m/44'/60'/0'/0/INDEX`
-    pub index: u32,
-}
+    /// Use a BIP39 passphrase for the mnemonic
+    #[arg(long, value_name = "PASSPHRASE")]
+    pub mnemonic_passphrase: Option<String>,
 
-impl std::str::FromStr for HdKey {
-    type Err = String;
+    /// The wallet derivation path. Works with both --mnemonic-path and hardware
+    /// wallets
+    #[arg(
+        long = "mnemonic-derivation-path",
+        alias = "hd-path",
+        value_name = "PATH"
+    )]
+    pub hd_path: Option<String>,
 
-    fn from_str(value: &str) -> Result<Self, String> {
-        let (wallet, index) = match value.rsplit_once(':') {
-            Some((wallet, index)) if !wallet.is_empty() && index.parse::<u32>().is_ok() => {
-                (wallet, index.parse().unwrap_or_default())
-            }
-            _ => (value, 0),
-        };
-        if wallet.is_empty() {
-            return Err("--hd-key takes <NAME|PATH>[:<INDEX>]".to_string());
-        }
-        Ok(Self {
-            wallet: wallet.to_string(),
-            index,
-        })
-    }
-}
+    /// Use the private key from the given mnemonic index. Used with
+    /// --mnemonic-path
+    #[arg(
+        long,
+        conflicts_with = "hd_path",
+        default_value_t = 0,
+        value_name = "INDEX"
+    )]
+    pub mnemonic_index: u32,
 
-/// Parses `--hd-key <NAME|PATH>[:<INDEX>]`.
-pub fn parse_hd_key(value: &str) -> Result<HdKey, String> {
-    value.parse()
+    /// Use the keystore in the given folder or file
+    #[arg(long = "keystore", value_name = "PATH", env = "ETH_KEYSTORE")]
+    pub keystore_path: Option<String>,
+
+    /// Use a keystore from the default keystores folder (~/.foundry/keystores)
+    /// by its filename
+    #[arg(
+        long = "account",
+        value_name = "ACCOUNT_NAME",
+        env = "ETH_KEYSTORE_ACCOUNT",
+        conflicts_with = "keystore_path"
+    )]
+    pub keystore_account_name: Option<String>,
+
+    #[command(flatten)]
+    pub password: PasswordArgs,
+
+    /// Use a Ledger hardware wallet
+    #[arg(long, short)]
+    pub ledger: bool,
+
+    /// Use a Trezor hardware wallet
+    #[arg(long, short)]
+    pub trezor: bool,
+
+    /// Use AWS Key Management Service. Ensure the AWS_KMS_KEY_ID environment
+    /// variable is set
+    #[arg(long, hide = !cfg!(feature = "aws-kms"))]
+    pub aws: bool,
+
+    /// Use Google Cloud Key Management Service. Ensure the following
+    /// environment variables are set: GCP_PROJECT_ID, GCP_LOCATION,
+    /// GCP_KEY_RING, GCP_KEY_NAME, GCP_KEY_VERSION
+    #[arg(long, hide = !cfg!(feature = "gcp-kms"))]
+    pub gcp: bool,
+
+    /// Use Turnkey. Ensure the following environment variables are set:
+    /// TURNKEY_API_PRIVATE_KEY, TURNKEY_ORGANIZATION_ID, TURNKEY_ADDRESS
+    #[arg(long, hide = !cfg!(feature = "turnkey"))]
+    pub turnkey: bool,
 }
 
 /// The old name of [`SignerArgs`].
@@ -1016,85 +964,258 @@ pub fn parse_hd_key(value: &str) -> Result<HdKey, String> {
 pub type WalletArgs = SignerArgs;
 
 impl SignerArgs {
-    /// Whether any wallet option was given.
+    /// Whether any option names a key. `--from` alone does not.
     pub fn is_set(&self) -> bool {
-        if self.hd_key.is_some() {
-            return true;
-        }
-        self.ledger.is_some()
-            || self.interactive
-            || self.keystore.is_some()
+        self.interactive
             || self.private_key.is_some()
+            || self.mnemonic.is_some()
+            || self.keystore_path.is_some()
+            || self.keystore_account_name.is_some()
+            || self.ledger
+            || self.trezor
+            || self.aws
+            || self.gcp
+            || self.turnkey
+    }
+
+    /// Moves `--mnemonic` or `--ledger`, with the password, into the source
+    /// of the rotating owner keys, for `--rotate`: the wallet then gives each
+    /// owner key in turn, and these flags name no signer.
+    ///
+    /// Refuses `--mnemonic-index`, `--mnemonic-derivation-path` and
+    /// `--mnemonic-passphrase` there, since the wallet's state picks the key.
+    pub fn take_rotation_keys(&mut self) -> Result<HdArgs, OptionsError> {
+        if !self.ledger && self.mnemonic.is_none() {
+            return Ok(HdArgs::default());
+        }
+        let refused = [
+            (self.mnemonic_index != 0, "--mnemonic-index"),
+            (self.hd_path.is_some(), "--mnemonic-derivation-path"),
+            (self.mnemonic_passphrase.is_some(), "--mnemonic-passphrase"),
+        ];
+        if let Some((_, flag)) = refused.iter().find(|(set, _)| *set) {
+            return Err(OptionsError::Conflict {
+                flag,
+                with: "--rotate",
+            });
+        }
+        let hd = HdArgs {
+            mnemonic: self.mnemonic.take(),
+            ledger: std::mem::take(&mut self.ledger),
+            password: std::mem::take(&mut self.password),
+        };
+        Ok(hd)
     }
 }
 
-/// How the password of a keystore or HD wallet is supplied (default: a prompt).
+/// The account that sends the outer transaction and pays for gas, instead of
+/// the owner key: the [`SignerArgs`] flags with a `--gas-payer-` prefix, and
+/// their environment variables with a `GAS_PAYER_` prefix. No short flags:
+/// those belong to the signer.
+#[derive(Args, Clone, Default)]
+#[command(next_help_heading = "Gas payer options")]
+pub struct GasPayerArgs {
+    /// The gas payer's account: checked against the address of the key the
+    /// other --gas-payer-* options name
+    #[arg(long, value_name = "ADDRESS", env = "GAS_PAYER_ETH_FROM")]
+    pub gas_payer_from: Option<Address>,
+
+    /// Open an interactive prompt to enter the gas payer's private key
+    #[arg(long)]
+    pub gas_payer_interactive: bool,
+
+    /// The gas payer's private key
+    #[arg(
+        long,
+        value_name = "RAW_PRIVATE_KEY",
+        env = "GAS_PAYER_PRIVATE_KEY",
+        hide_env_values = true
+    )]
+    pub gas_payer_private_key: Option<String>,
+
+    /// The gas payer's mnemonic phrase, mnemonic file or `safe` HD wallet
+    #[arg(long, alias = "gas-payer-mnemonic-path")]
+    pub gas_payer_mnemonic: Option<String>,
+
+    /// BIP39 passphrase for --gas-payer-mnemonic
+    #[arg(long, value_name = "PASSPHRASE")]
+    pub gas_payer_mnemonic_passphrase: Option<String>,
+
+    /// The gas payer's derivation path (mnemonic or hardware wallet)
+    #[arg(
+        long = "gas-payer-mnemonic-derivation-path",
+        alias = "gas-payer-hd-path",
+        value_name = "PATH"
+    )]
+    pub gas_payer_hd_path: Option<String>,
+
+    /// The gas payer's mnemonic index
+    #[arg(
+        long,
+        conflicts_with = "gas_payer_hd_path",
+        default_value_t = 0,
+        value_name = "INDEX"
+    )]
+    pub gas_payer_mnemonic_index: u32,
+
+    /// The gas payer's keystore file
+    #[arg(
+        long = "gas-payer-keystore",
+        value_name = "PATH",
+        env = "GAS_PAYER_ETH_KEYSTORE"
+    )]
+    pub gas_payer_keystore_path: Option<String>,
+
+    /// The gas payer's keystore in ~/.foundry/keystores, by its filename
+    #[arg(
+        long = "gas-payer-account",
+        value_name = "ACCOUNT_NAME",
+        env = "GAS_PAYER_ETH_KEYSTORE_ACCOUNT",
+        conflicts_with = "gas_payer_keystore_path"
+    )]
+    pub gas_payer_keystore_account_name: Option<String>,
+
+    /// The gas payer's keystore or HD wallet password
+    #[arg(
+        id = "gas_payer_keystore_password",
+        long = "gas-payer-password",
+        value_name = "PASSWORD"
+    )]
+    pub gas_payer_password: Option<String>,
+
+    /// File holding the gas payer's keystore or HD wallet password
+    #[arg(
+        id = "gas_payer_keystore_password_file",
+        long = "gas-payer-password-file",
+        value_name = "PASSWORD_FILE",
+        env = "GAS_PAYER_ETH_PASSWORD"
+    )]
+    pub gas_payer_password_file: Option<PathBuf>,
+
+    /// The gas payer is on a Ledger
+    #[arg(long)]
+    pub gas_payer_ledger: bool,
+
+    /// The gas payer is on a Trezor
+    #[arg(long)]
+    pub gas_payer_trezor: bool,
+
+    /// The gas payer is in AWS KMS (AWS_KMS_KEY_ID)
+    #[arg(long, hide = !cfg!(feature = "aws-kms"))]
+    pub gas_payer_aws: bool,
+
+    /// The gas payer is in Google Cloud KMS (GCP_* variables)
+    #[arg(long, hide = !cfg!(feature = "gcp-kms"))]
+    pub gas_payer_gcp: bool,
+
+    /// The gas payer is a Turnkey key (TURNKEY_* variables)
+    #[arg(long, hide = !cfg!(feature = "turnkey"))]
+    pub gas_payer_turnkey: bool,
+}
+
+impl GasPayerArgs {
+    /// Whether any option names a gas payer.
+    pub fn is_set(&self) -> bool {
+        self.as_signer().is_set()
+    }
+
+    /// The same options without the prefix, as [`SignerArgs`].
+    pub fn as_signer(&self) -> SignerArgs {
+        SignerArgs {
+            from: self.gas_payer_from,
+            interactive: self.gas_payer_interactive,
+            private_key: self.gas_payer_private_key.clone(),
+            mnemonic: self.gas_payer_mnemonic.clone(),
+            mnemonic_passphrase: self.gas_payer_mnemonic_passphrase.clone(),
+            hd_path: self.gas_payer_hd_path.clone(),
+            mnemonic_index: self.gas_payer_mnemonic_index,
+            keystore_path: self.gas_payer_keystore_path.clone(),
+            keystore_account_name: self.gas_payer_keystore_account_name.clone(),
+            password: PasswordArgs {
+                password: self.gas_payer_password.clone(),
+                password_file: self.gas_payer_password_file.clone(),
+            },
+            ledger: self.gas_payer_ledger,
+            trezor: self.gas_payer_trezor,
+            aws: self.gas_payer_aws,
+            gcp: self.gas_payer_gcp,
+            turnkey: self.gas_payer_turnkey,
+        }
+    }
+
+    /// The first option given, by its flag, for messages.
+    pub fn first_flag(&self) -> Option<&'static str> {
+        let flags = [
+            (self.gas_payer_interactive, "--gas-payer-interactive"),
+            (
+                self.gas_payer_private_key.is_some(),
+                "--gas-payer-private-key",
+            ),
+            (self.gas_payer_mnemonic.is_some(), "--gas-payer-mnemonic"),
+            (
+                self.gas_payer_keystore_path.is_some(),
+                "--gas-payer-keystore",
+            ),
+            (
+                self.gas_payer_keystore_account_name.is_some(),
+                "--gas-payer-account",
+            ),
+            (self.gas_payer_ledger, "--gas-payer-ledger"),
+            (self.gas_payer_trezor, "--gas-payer-trezor"),
+            (self.gas_payer_aws, "--gas-payer-aws"),
+            (self.gas_payer_gcp, "--gas-payer-gcp"),
+            (self.gas_payer_turnkey, "--gas-payer-turnkey"),
+        ];
+        flags
+            .into_iter()
+            .find_map(|(set, flag)| set.then_some(flag))
+    }
+}
+
+/// The password of a keystore or `safe` HD wallet: `--password-file`
+/// (`ETH_PASSWORD`), `--password`, or else a prompt.
 #[derive(Args, Clone, Default)]
 pub struct PasswordArgs {
-    /// File holding the keystore or HD wallet password
-    #[arg(long, env = "SAFE_PASSWORD_FILE", value_name = "PATH")]
-    pub password_file: Option<PathBuf>,
-
-    /// Keystore or HD wallet password. Visible in the process list and shell
-    /// history: prefer --password-file or the prompt
-    #[arg(long)]
+    /// The keystore (or HD wallet) password. Visible in the process list and
+    /// shell history: prefer --password-file or the prompt
+    #[arg(id = "keystore_password", long = "password", value_name = "PASSWORD")]
     pub password: Option<String>,
+
+    /// The keystore (or HD wallet) password file path
+    #[arg(
+        id = "keystore_password_file",
+        long = "password-file",
+        value_name = "PASSWORD_FILE",
+        env = "ETH_PASSWORD"
+    )]
+    pub password_file: Option<PathBuf>,
 }
 
-/// The HD wallet one-time owner keys are derived from.
-#[derive(Args, Clone, Debug, Default)]
+/// The HD wallet (or Ledger) the rotating owner keys come from, spelled like
+/// the signer flags: `--mnemonic <NAME|PATH>` or `--ledger`, with the
+/// wallet's password. `safe wallet` takes these flags; a command that also
+/// signs fills them from its [`SignerArgs`] with
+/// [`take_rotation_keys`](SignerArgs::take_rotation_keys).
+#[derive(Args, Clone, Default)]
 pub struct HdArgs {
-    /// HD wallet: a name under ~/.safe-rs/wallets, or the path of a mnemonic keystore
-    #[arg(long, env = "SAFE_HD_WALLET", value_name = "NAME|PATH")]
-    pub hd_wallet: Option<String>,
+    /// The HD wallet: a name under ~/.safe-rs/wallets, or the path of a
+    /// mnemonic keystore
+    #[arg(long, alias = "mnemonic-path", value_name = "NAME|PATH")]
+    pub mnemonic: Option<String>,
 
-    /// Take the owner keys from a connected Ledger (Ethereum app open) instead
-    /// of an HD wallet file. Overrides SAFE_HD_WALLET. Not a flag of its own:
-    /// `--ledger` sets it where the command rotates (see
-    /// [`LedgerArg::take_for_rotation`])
-    #[arg(skip)]
+    /// Take the owner keys from a connected Ledger (Ethereum app open)
+    /// instead of an HD wallet file
+    #[arg(long, short)]
     pub ledger: bool,
-}
 
-/// `--ledger` on a command that only rotates (`safe rotate`, `safe wallet
-/// ...`), where the Ledger gives the rotating owner keys. Spelled like the
-/// signer's `--ledger [INDEX]`, so a host can make that flag global; the
-/// index is refused, since the wallet state picks the key.
-#[derive(Args, Clone, Debug, Default)]
-pub struct LedgerArg {
-    /// Take the owner keys from a connected Ledger (Ethereum app open) instead
-    /// of an HD wallet file. Overrides SAFE_HD_WALLET
-    #[arg(long, value_name = "INDEX", num_args = 0..=1, default_missing_value = "0")]
-    pub ledger: Option<u32>,
-}
-
-impl LedgerArg {
-    /// Moves `--ledger` into `hd`, as the source of the rotating owner keys.
-    /// Fails on an INDEX other than 0, which only a signer takes.
-    pub fn take_for_rotation(
-        ledger: &mut Option<u32>,
-        hd: &mut HdArgs,
-    ) -> Result<(), OptionsError> {
-        match ledger.take() {
-            None => Ok(()),
-            Some(0) => {
-                hd.ledger = true;
-                Ok(())
-            }
-            Some(_) => Err(OptionsError::LedgerIndexWhenRotating),
-        }
-    }
-
-    /// [`take_for_rotation`](Self::take_for_rotation) of this flag.
-    pub fn apply(&mut self, hd: &mut HdArgs) -> Result<(), OptionsError> {
-        Self::take_for_rotation(&mut self.ledger, hd)
-    }
+    #[command(flatten)]
+    pub password: PasswordArgs,
 }
 
 impl HdArgs {
     /// Whether an HD wallet or a Ledger was chosen.
     pub fn is_set(&self) -> bool {
-        self.ledger || self.hd_wallet.is_some()
+        self.ledger || self.mnemonic.is_some()
     }
 }
 
@@ -1113,15 +1234,6 @@ pub struct SweepArgs {
     pub sweep_reserve: Option<U256>,
 }
 
-/// The account that sends the outer transaction and pays for gas.
-#[derive(Args, Clone, Default)]
-pub struct PayerArgs {
-    /// Private key that sends the outer transaction and pays for gas, instead
-    /// of the owner key (with create --rotate: instead of the HD wallet's key 0)
-    #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY", hide_env_values = true)]
-    pub payer_private_key: Option<String>,
-}
-
 /// Shows whether a secret was given, never its value.
 fn redacted<T>(secret: Option<&T>) -> &'static str {
     if secret.is_some() {
@@ -1133,17 +1245,54 @@ fn redacted<T>(secret: Option<&T>) -> &'static str {
 
 impl fmt::Debug for SignerArgs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut debug = f.debug_struct("SignerArgs");
-        let debug = debug
+        f.debug_struct("SignerArgs")
+            .field("from", &self.from)
+            .field("interactive", &self.interactive)
             .field(
                 "private_key",
                 &format_args!("{}", redacted(self.private_key.as_ref())),
             )
-            .field("keystore", &self.keystore)
-            .field("interactive", &self.interactive);
-        let debug = debug.field("hd_key", &self.hd_key);
-        let debug = debug.field("ledger", &self.ledger);
-        debug.finish()
+            .field(
+                "mnemonic",
+                &format_args!("{}", redacted(self.mnemonic.as_ref())),
+            )
+            .field(
+                "mnemonic_passphrase",
+                &format_args!("{}", redacted(self.mnemonic_passphrase.as_ref())),
+            )
+            .field("hd_path", &self.hd_path)
+            .field("mnemonic_index", &self.mnemonic_index)
+            .field("keystore_path", &self.keystore_path)
+            .field("keystore_account_name", &self.keystore_account_name)
+            .field("password", &self.password)
+            .field("ledger", &self.ledger)
+            .field("trezor", &self.trezor)
+            .field("aws", &self.aws)
+            .field("gcp", &self.gcp)
+            .field("turnkey", &self.turnkey)
+            .finish()
+    }
+}
+
+impl fmt::Debug for HdArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A wallet name or path, but possibly a phrase: never shown.
+        f.debug_struct("HdArgs")
+            .field(
+                "mnemonic",
+                &format_args!("{}", redacted(self.mnemonic.as_ref())),
+            )
+            .field("ledger", &self.ledger)
+            .field("password", &self.password)
+            .finish()
+    }
+}
+
+impl fmt::Debug for GasPayerArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("GasPayerArgs")
+            .field(&self.as_signer())
+            .finish()
     }
 }
 
@@ -1154,17 +1303,6 @@ impl fmt::Debug for PasswordArgs {
             .field(
                 "password",
                 &format_args!("{}", redacted(self.password.as_ref())),
-            )
-            .finish()
-    }
-}
-
-impl fmt::Debug for PayerArgs {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PayerArgs")
-            .field(
-                "payer_private_key",
-                &format_args!("{}", redacted(self.payer_private_key.as_ref())),
             )
             .finish()
     }
@@ -1362,7 +1500,7 @@ mod tests {
 
     #[test]
     fn rotate_excludes_the_options_that_would_weaken_it() {
-        assert!(send(&["--rotate", "--hd-wallet", "w"]).is_ok());
+        assert!(send(&["--rotate", "--mnemonic", "w"]).is_ok());
         // The batch target stays configurable; it must be the call-only one.
         assert!(send(&["--rotate", "--multi-send-call-only", TO]).is_ok());
         for conflicting in [
@@ -1383,62 +1521,16 @@ mod tests {
         );
     }
 
-    fn rotate(extra: &[&str]) -> Result<Cli, clap::Error> {
-        let mut args = vec![
-            "rotate",
-            SAFE,
-            "--rpc-url",
-            "http://localhost:8545",
-            "--hd-wallet",
-            "w",
-        ];
-        args.extend_from_slice(extra);
-        parse(&args)
-    }
-
-    #[test]
-    fn rotate_takes_the_safe_as_an_optional_positional() {
-        let base = [
-            "rotate",
-            "--rpc-url",
-            "http://localhost:8545",
-            "--hd-wallet",
-            "w",
-        ];
-        let Commands::Rotate(args) = parse(&base).unwrap().command else {
-            unreachable!()
-        };
-        assert_eq!(args.safe, None);
-        let Commands::Rotate(args) = rotate(&[]).unwrap().command else {
-            unreachable!()
-        };
-        assert_eq!(args.safe, Some(SAFE.parse().unwrap()));
-        let mut flagged = base.to_vec();
-        flagged.extend(["--safe", SAFE]);
-        assert!(parse(&flagged).is_err());
-    }
-
-    #[test]
-    fn rotate_takes_one_legacy_key_source_and_one_sweep_choice() {
-        assert!(rotate(&[]).is_ok());
-        assert!(rotate(&["--from-private-key", "0x01"]).is_ok());
-        assert!(rotate(&["--from-interactive", "--sweep-legacy"]).is_ok());
-        assert!(rotate(&["--from-private-key", "0x01", "--from-interactive"]).is_err());
-        assert!(rotate(&["--from-private-key", "0x01", "--from-keystore", "k.json"]).is_err());
-        assert!(rotate(&["--from-keystore", "k.json", "--from-interactive"]).is_err());
-        assert!(rotate(&["--sweep-legacy", "--no-sweep"]).is_err());
-    }
-
     #[test]
     fn wallet_and_create_options_parse() {
         assert!(parse(&["wallet", "new", "treasury"]).is_ok());
         assert!(parse(&["wallet", "import", "treasury", "--start-index", "5"]).is_ok());
         assert!(parse(&["wallet", "list"]).is_ok());
-        assert!(parse(&["wallet", "status", "--hd-wallet", "w"]).is_ok());
+        assert!(parse(&["wallet", "status", "--mnemonic", "w"]).is_ok());
         let sync = [
             "wallet",
             "sync",
-            "--hd-wallet",
+            "--mnemonic",
             "w",
             "--safe",
             SAFE,
@@ -1459,13 +1551,13 @@ mod tests {
             parse(&args)
         };
         let same_as = format!("10:{SAFE}");
-        assert!(with(&["--rotate", "--hd-wallet", "w", "--same-as", &same_as]).is_ok());
+        assert!(with(&["--rotate", "--mnemonic", "w", "--same-as", &same_as]).is_ok());
         assert!(with(&["--rotate", "--ledger", "--same-as", &same_as]).is_ok());
         // Without a wallet it parses, and `create` refuses it.
         assert!(with(&["--same-as", &same_as]).is_ok());
         assert!(
             with(&[
-                "--hd-wallet",
+                "--mnemonic",
                 "w",
                 "--same-as",
                 &same_as,
@@ -1477,7 +1569,7 @@ mod tests {
         );
         assert!(
             with(&[
-                "--hd-wallet",
+                "--mnemonic",
                 "w",
                 "--same-as",
                 &same_as,
@@ -1487,35 +1579,60 @@ mod tests {
             .is_err(),
             "so do the version and contracts"
         );
-        assert!(with(&["--hd-wallet", "w", "--safe-version", "1.4.1"]).is_ok());
+        assert!(with(&["--mnemonic", "w", "--safe-version", "1.4.1"]).is_ok());
     }
 
     #[test]
     fn one_ledger_flag_signs_or_gives_the_rotating_keys() {
         let signer = |cli: Cli| match cli.command {
-            Commands::Send(args) => args.signer.ledger,
+            Commands::Send(args) => args.signer,
             _ => panic!("expected send"),
         };
-        assert_eq!(signer(send(&["--ledger"]).unwrap()), Some(0));
-        assert_eq!(signer(send(&["--ledger", "2"]).unwrap()), Some(2));
-        assert!(send(&["--ledger-key", "2"]).is_err());
+        let ledger = signer(send(&["--ledger"]).unwrap());
+        assert!(ledger.ledger && ledger.mnemonic_index == 0);
+        let indexed = signer(send(&["-l", "--mnemonic-index", "2"]).unwrap());
+        assert!(indexed.ledger && indexed.mnemonic_index == 2);
 
-        {
-            let mut hd = HdArgs::default();
-            let mut ledger = Some(0);
-            LedgerArg::take_for_rotation(&mut ledger, &mut hd).unwrap();
-            assert!(hd.ledger && ledger.is_none());
+        let mut rotating = ledger.clone();
+        let hd = rotating.take_rotation_keys().unwrap();
+        assert!(hd.ledger && !rotating.ledger && !rotating.is_set());
 
-            let mut hd = HdArgs::default();
-            assert_eq!(
-                LedgerArg::take_for_rotation(&mut Some(2), &mut hd),
-                Err(OptionsError::LedgerIndexWhenRotating)
-            );
-            assert!(!hd.ledger);
+        let mut rotating = indexed.clone();
+        assert_eq!(
+            rotating.take_rotation_keys().unwrap_err(),
+            OptionsError::Conflict {
+                flag: "--mnemonic-index",
+                with: "--rotate"
+            }
+        );
 
-            assert!(parse(&["rotate", SAFE, "--ledger", "--rpc-url", "http://x"]).is_ok());
-            assert!(parse(&["wallet", "status", "--ledger"]).is_ok());
-        }
+        let mut phrase = signer(send(&["--mnemonic", "w", "--password-file", "/pw"]).unwrap());
+        let hd = phrase.take_rotation_keys().unwrap();
+        assert_eq!(hd.mnemonic.as_deref(), Some("w"));
+        assert!(hd.password.password_file.is_some());
+        assert!(!phrase.is_set() && phrase.password.password_file.is_none());
+
+        assert!(parse(&["wallet", "status", "--ledger"]).is_ok());
+        assert!(parse(&["wallet", "status", "--mnemonic", "w"]).is_ok());
+    }
+
+    /// The gas payer takes every wallet option, prefixed.
+    #[test]
+    fn the_gas_payer_takes_the_wallet_options_prefixed() {
+        let payer = |cli: Cli| match cli.command {
+            Commands::Send(args) => args.opts.gas_payer,
+            _ => panic!("expected send"),
+        };
+        let given = payer(send(&["--gas-payer-private-key", "0x01"]).unwrap());
+        assert_eq!(given.as_signer().private_key.as_deref(), Some("0x01"));
+        assert_eq!(given.first_flag(), Some("--gas-payer-private-key"));
+        let ledger =
+            payer(send(&["--gas-payer-ledger", "--gas-payer-mnemonic-index", "3"]).unwrap());
+        assert!(ledger.as_signer().ledger);
+        assert_eq!(ledger.as_signer().mnemonic_index, 3);
+        assert!(payer(send(&["--gas-payer-account", "a"]).unwrap()).is_set());
+        assert!(!payer(send(&[]).unwrap()).is_set());
+        assert!(send(&["--gas-payer-keystore", "k", "--gas-payer-account", "a"]).is_err());
     }
 
     #[test]

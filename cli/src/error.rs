@@ -27,17 +27,18 @@ pub enum OptionsError {
     /// `--rotate` with a signer from the host: the owner key comes from the HD
     /// wallet or Ledger
     #[error(
-        "with --rotate the owner key comes from the HD wallet or Ledger (--hd-wallet or \
+        "with --rotate the owner key comes from the HD wallet or Ledger (--mnemonic or \
          --ledger): send without a signer"
     )]
     RotateWithSigner,
     /// `--no-sweep` or `--sweep-reserve` without `--rotate`
     #[error("--no-sweep and --sweep-reserve only apply with --rotate")]
     SweepWithoutRotate,
-    /// `--hd-wallet` or `--ledger` without `--rotate`, which would publish an
-    /// owner key and leave it in charge of the Safe
+    /// Rotating owner keys ([`SendOpts::hd`](crate::args::SendOpts::hd))
+    /// without `--rotate`, which would publish an owner key and leave it in
+    /// charge of the Safe
     #[error(
-        "--hd-wallet or --ledger needs --rotate: sending without rotating would publish \
+        "the rotating owner keys need --rotate: sending without rotating would publish \
          an owner key and leave it in charge of the Safe"
     )]
     HdWithoutRotate,
@@ -49,28 +50,24 @@ pub enum OptionsError {
     /// one transaction
     #[error("--gas-limit applies to one transaction, but an EOA sends each of the {calls} calls as its own")]
     GasLimitForBatch { calls: usize },
-    /// A signer with `create --hd-wallet` / `--ledger`, where the owner key
-    /// comes from the wallet
+    /// A signer with `create --rotate`, where the owner key comes from the
+    /// wallet
     #[error(
-        "the owner key comes from the HD wallet or Ledger: remove --private-key, --keystore \
-         and --interactive, and unset PRIVATE_KEY"
+        "with --rotate the owner key comes from the HD wallet or Ledger (--mnemonic or \
+         --ledger): remove the other wallet options, and unset PRIVATE_KEY, ETH_KEYSTORE \
+         and ETH_KEYSTORE_ACCOUNT"
     )]
     SignerWithHd,
-    /// `--ledger INDEX` where the Ledger gives the rotating owner keys, whose
-    /// index the wallet state picks
+    /// Rotating owner keys for `create` without `--rotate`
     #[error(
-        "with --rotate (or `safe rotate` and `safe wallet`) the Ledger gives the rotating owner \
-         keys and the wallet state picks which: pass --ledger without an INDEX"
+        "the rotating owner keys need --rotate: `create --rotate` makes a Safe whose owner \
+         key rotates"
     )]
-    LedgerIndexWhenRotating,
-    /// `create --hd-wallet` without `--rotate`
-    #[error("--hd-wallet needs --rotate: `create --rotate` makes a Safe whose owner key rotates")]
     CreateHdWithoutRotate,
     /// `create --rotate` with no HD wallet or Ledger to take the owner keys from
-    #[error("--rotate needs --hd-wallet or --ledger to take the owner keys from")]
+    #[error("--rotate needs --mnemonic or --ledger to take the owner keys from")]
     RotateWithoutKeys,
-    /// An option of `create` that only applies with `--hd-wallet` or
-    /// `--ledger`
+    /// An option of `create` that only applies with `--rotate`
     #[error("{flag} needs --rotate")]
     HdOnly { flag: &'static str },
 }
@@ -157,7 +154,7 @@ pub enum SendError {
     /// confirmed. Its signature is public, so the old owner key counts as used.
     #[error(
         "transaction {tx_hash} is not confirmed: {reason}\nIts signature is public, so {} \
-         counts as used. Run `safe rotate` (or any rotating command) to pick up where this \
+         counts as used. Run `safe send --rotate` (or any rotating command) to pick up where this \
          left off.",
         owner_label(*old_owner, *old_owner_index)
     )]
@@ -187,12 +184,12 @@ pub enum SendError {
     )]
     RotatedElsewhere { tx_hash: B256 },
     /// The rotating transaction reverted and the owner was not rotated. Its
-    /// signature is public: run `safe rotate` to retire the old key.
+    /// signature is public: run `safe send --rotate` to retire the old key.
     #[error(
         "the transaction reverted and the owner was NOT rotated. Its signature is public and \
-         the signed calls stay executable until the Safe nonce is used: run `safe rotate` now \
-         to retire {}. If its ETH was swept with this transaction (see the warnings), fund it \
-         first or pass --payer-private-key",
+         the signed calls stay executable until the Safe nonce is used: run \
+         `safe send --rotate` now to retire {}. If its ETH was swept with this transaction \
+         (see the warnings), fund it first or pass a --gas-payer-* key",
         owner_label(*old_owner, *old_owner_index)
     )]
     NotRotated {
@@ -264,8 +261,11 @@ pub enum CreateError {
     /// The options conflict; nothing was signed or sent
     #[error(transparent)]
     Options(#[from] OptionsError),
-    /// No signer, and no `--hd-wallet` or `--ledger` to take the owner from
-    #[error("No wallet specified. Use --private-key, --keystore or --interactive, or --hd-wallet or --ledger")]
+    /// No signer, and no `--rotate` keys to take the owner from
+    #[error(
+        "No wallet specified. Use --private-key, --keystore, --account, --mnemonic, --ledger, \
+         --trezor, --aws, --gcp, --turnkey or --interactive"
+    )]
     NoSigner,
     /// A zero-address owner, or a threshold outside 1..=owners
     #[error("{0}")]

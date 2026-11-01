@@ -5,7 +5,7 @@ use safe_rs::rotation::KeySource;
 use safe_rs::LedgerKeys;
 use safe_rs::{HdWallet, OuterTxParams, PreparedSafeTx, SignedOuterTx, SignedSafeTx};
 
-/// Owner keys from `--hd-wallet` or `--ledger`.
+/// Owner keys from `--mnemonic` or `--ledger` under `--rotate`.
 pub enum CliKeys {
     /// A phrase decrypted from its keystore
     Phrase(Box<HdWallet>),

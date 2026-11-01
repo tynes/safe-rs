@@ -99,7 +99,7 @@ fn wallet_commands_mount_under_the_host() {
     let host = parse(&[
         "wallet",
         "status",
-        "--hd-wallet",
+        "--mnemonic",
         "demo",
         "--safe",
         "0x1111111111111111111111111111111111111111",
@@ -157,7 +157,7 @@ async fn options_built_in_code_are_checked_like_flags() {
     );
 
     let mut opts = CreateOpts::default();
-    opts.hd.hd_wallet = Some("demo".into());
+    opts.hd.mnemonic = Some("demo".into());
     let error = safe_rs_cli::create::create(ctx(), opts).await.unwrap_err();
     assert!(
         matches!(

@@ -533,7 +533,7 @@ async fn a_separate_payer_keeps_owner_keys_off_chain() {
     let payer = alloy::signers::local::PrivateKeySigner::random();
     h.fund(payer.address(), eth(1)).await;
     let mut paid = config(&h);
-    paid.payer = Some(payer.clone());
+    paid.payer = Some(std::sync::Arc::new(payer.clone()));
 
     let mut rotating = open_with(&h, safe, &state, paid).await;
     for round in 1..=2u32 {
@@ -887,7 +887,7 @@ async fn keys_that_never_paid_gas_are_only_found_in_the_logs() {
     let payer = alloy::signers::local::PrivateKeySigner::random();
     h.fund(payer.address(), eth(1)).await;
     let mut paid = config(&h);
-    paid.payer = Some(payer);
+    paid.payer = Some(std::sync::Arc::new(payer));
 
     let mut rotating = open_with(&h, safe, &state, paid.clone()).await;
     rotating.rotate().await.unwrap();
@@ -913,7 +913,7 @@ async fn the_payer_may_not_be_the_next_owner() {
 
     // Paying with key 2 would publish it before it ever owns the Safe.
     let mut paid = config(&h);
-    paid.payer = Some(wallet().owner(2).unwrap());
+    paid.payer = Some(std::sync::Arc::new(wallet().owner(2).unwrap()));
     let mut rotating = open_with(&h, safe, &state, paid).await;
     let refused = rotating.prepare(&[], ExecOptions::default()).await;
     let Err(Error::Rotation(message)) = refused else {

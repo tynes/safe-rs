@@ -28,8 +28,8 @@ use url::Url;
 
 use crate::any_signer::AnySigner;
 use crate::cli::{FeeArgs, SafeSetupArgs};
+use crate::cli::{GasPayerArgs, RpcArgs, SignerArgs};
 use crate::cli::{HdArgs, SweepArgs};
-use crate::cli::{PasswordArgs, PayerArgs, RpcArgs, SignerArgs};
 use crate::commands::{http_provider, outer_fees};
 use crate::console::{Console, Reports};
 pub use crate::error::CreateError;
@@ -81,25 +81,25 @@ pub struct CreateOpts {
     pub same_as: Option<SameAs>,
 
     /// Create a Safe whose owner key rotates: its first owner is the next
-    /// unused key of --hd-wallet or --ledger, used once and then replaced
+    /// unused key of --mnemonic or --ledger, used once and then replaced
     #[arg(long)]
     pub rotate: bool,
 
-    #[command(flatten)]
+    /// The HD wallet or Ledger the rotating owner keys come from. Not flags
+    /// of its own: `--mnemonic` / `--ledger` (and the password) fill it under
+    /// `--rotate`, see [`SignerArgs::take_rotation_keys`]
+    #[arg(skip)]
     pub hd: HdArgs,
 
     #[command(flatten)]
     pub sweep: SweepArgs,
 
     #[command(flatten)]
-    pub password: PasswordArgs,
-
-    #[command(flatten)]
-    pub payer: PayerArgs,
+    pub gas_payer: GasPayerArgs,
 
     /// How the Safe is deployed (default: the standard Safe proxy factory).
     /// Not a flag: a CLI whose Safes come from another factory sets it in
-    /// code. Not supported with `--hd-wallet` or `--ledger`.
+    /// code. Not supported with `--rotate`.
     #[arg(skip)]
     pub implementation: Implementation,
 }
@@ -116,8 +116,8 @@ impl CreateOpts {
     }
 
     /// The flag conflicts clap enforces, checked again for options built in
-    /// code, then: `--rotate` needs `--hd-wallet` or `--ledger` and refuses a
-    /// signer, `--hd-wallet` needs `--rotate` (without a signer), and
+    /// code, then: `--rotate` needs `--mnemonic` or `--ledger` and refuses a
+    /// signer, the rotating keys need `--rotate` (without a signer), and
     /// `--same-as`, `--no-sweep` and `--sweep-reserve` need `--rotate`.
     pub fn validate(&self, has_signer: bool) -> Result<(), OptionsError> {
         {
@@ -162,11 +162,7 @@ impl CreateOpts {
                 if !self.implementation.is_standard() {
                     return Err(OptionsError::Conflict {
                         flag: "a custom Safe implementation",
-                        with: if self.hd.ledger {
-                            "--ledger"
-                        } else {
-                            "--hd-wallet"
-                        },
+                        with: "--rotate",
                     });
                 }
             } else if self.same_as.is_some() {
@@ -208,8 +204,8 @@ pub struct CreateArgs {
 pub struct CreateContext {
     /// RPC endpoint of the chain to deploy on
     pub rpc_url: Url,
-    /// First owner and deployer (unless `--payer-private-key` pays). `None`
-    /// with `--hd-wallet` / `--ledger`, where the owner is the wallet's next
+    /// First owner and deployer (unless a `--gas-payer-*` key pays). `None`
+    /// with `--rotate`, where the owner is the wallet's next
     /// unused key.
     pub signer: Option<AnySigner>,
     /// Where progress and warnings go (default: nowhere)
@@ -285,7 +281,7 @@ pub enum CreateOutcome {
         deployed: bool,
         /// The HD wallet key that would own the Safe
         owner_key: Option<OwnerKey>,
-        /// The account that would pay, with `--hd-wallet` / `--ledger`
+        /// The account that would pay, with `--rotate`
         payer: Option<Address>,
     },
     /// A Safe with this setup already exists, so no deployment was sent. With
@@ -296,7 +292,7 @@ pub enum CreateOutcome {
         owners: Vec<Address>,
         threshold: u64,
         owner_key: Option<OwnerKey>,
-        /// The account that would have paid, with `--hd-wallet` / `--ledger`
+        /// The account that would have paid, with `--rotate`
         payer: Option<Address>,
         sweep: Option<SweptEth>,
         warnings: Vec<String>,
@@ -386,7 +382,7 @@ fn document(outcome: &CreateOutcome) -> Option<Document> {
 /// Deploys a Safe as `safe create` does, with every option in `opts`.
 ///
 /// The address is computed from the first owner (the signer, or with
-/// `--hd-wallet` / `--ledger` the wallet's next unused key), the `--owner`s,
+/// `--rotate` the wallet's next unused key), the `--owner`s,
 /// the threshold, the salt and the contracts, so the same options give the
 /// same Safe on every chain. Options built in code are checked for the same
 /// conflicts clap enforces on the flags.
@@ -414,7 +410,10 @@ async fn create_with(
     let provider = http_provider(&ctx.rpc_url);
     let implementation = opts.implementation.get();
     let plan = implementation.plan(&provider, &setup, &signer).await?;
-    let payer = create_payer(&opts.payer)?.map_or(signer, AnySigner::from);
+    let payer = create_payer(&opts.gas_payer, console)
+        .await
+        .map_err(CreateError::Other)?
+        .unwrap_or(signer);
     let safe = plan.safe;
     let mut details = String::from("Computing Safe address...\n");
     if !opts.implementation.is_standard() {
@@ -622,16 +621,17 @@ pub(crate) async fn run_with(
 ) -> color_eyre::Result<()> {
     // `--json` never prompts: it is the result document's only output.
     args.opts.no_confirm |= json;
-    // With --rotate, --ledger names where the rotating owner keys come from.
+    // With --rotate, --mnemonic or --ledger names where the rotating owner
+    // keys come from.
     if args.opts.rotate {
-        crate::cli::LedgerArg::take_for_rotation(&mut args.signer.ledger, &mut args.opts.hd)?;
+        args.opts.hd = args.signer.take_rotation_keys()?;
     }
     // Checked before any key or password prompt.
     args.opts.validate(args.signer.is_set())?;
     let signer = if args.opts.uses_hd() {
         None
     } else {
-        Some(create_signer(&args.signer, &args.opts.password, console).await?)
+        Some(create_signer(&args.signer, console).await?)
     };
     let mut ctx = CreateContext::new(args.rpc.rpc_url);
     ctx.signer = signer;

@@ -142,14 +142,14 @@ async fn a_host_implementation_refuses_setups_it_cannot_deploy() {
 async fn a_host_implementation_is_refused_with_an_hd_wallet() {
     let mut opts = CreateOpts::default().with_implementation(HostFactory::default());
     opts.rotate = true;
-    opts.hd.hd_wallet = Some("demo".into());
+    opts.hd.mnemonic = Some("demo".into());
     let ctx = CreateContext::new("http://127.0.0.1:9".parse().unwrap()).with_prompt(NoPrompt);
     let error = safe_rs_cli::create::create(ctx, opts).await.unwrap_err();
     assert!(
         matches!(
             error,
             CreateError::Options(OptionsError::Conflict {
-                with: "--hd-wallet",
+                with: "--rotate",
                 ..
             })
         ),
@@ -346,10 +346,10 @@ async fn a_policy_sees_a_rotation_plan() {
             rotate: true,
             ..SendOpts::default()
         };
-        opts.hd.hd_wallet = Some("demo".into());
+        opts.hd.mnemonic = Some("demo".into());
         // The harness deploys MultiSendCallOnly at its own address.
         opts.multi_send_call_only = Some(h.addresses.multi_send_call_only);
-        opts.password = PasswordArgs {
+        opts.hd.password = PasswordArgs {
             password: Some("pw".into()),
             ..PasswordArgs::default()
         };

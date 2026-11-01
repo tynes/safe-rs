@@ -70,7 +70,7 @@ pub struct SendContext {
     /// The Safe to send through, or the signer's own account
     pub sender: Sender,
     /// The owner key that signs the Safe transaction, and pays for gas unless
-    /// `--payer-private-key` is given. Leave it out with `--rotate`, where the
+    /// a `--gas-payer-*` key is given. Leave it out with `--rotate`, where the
     /// owner key comes from the HD wallet or Ledger, or to only add on-chain
     /// approvals collected in `--bundle` while a payer submits.
     ///
@@ -183,11 +183,12 @@ pub struct Target {
 
 /// `safe send`.
 pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
-    // With --rotate, --ledger names where the rotating owner keys come from.
+    // With --rotate, --mnemonic or --ledger names where the rotating owner
+    // keys come from.
     let args = {
         let mut args = args;
         if args.opts.rotate {
-            crate::cli::LedgerArg::take_for_rotation(&mut args.signer.ledger, &mut args.opts.hd)?;
+            args.opts.hd = args.signer.take_rotation_keys()?;
         }
         args
     };
@@ -199,8 +200,10 @@ pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
     let checked = args.opts.validate_safe(args.signer.is_set());
     if checked == Err(OptionsError::RotateWithSigner) {
         eyre::bail!(
-            "with --rotate the owner key comes from --hd-wallet or --ledger: remove --private-key, \
-             --keystore and --interactive, and unset PRIVATE_KEY"
+            "with --rotate the owner key comes from --mnemonic or --ledger: remove the other \
+             wallet options (--private-key, --keystore, --account, --interactive, --trezor, \
+             --aws, --gcp, --turnkey), and unset PRIVATE_KEY, ETH_KEYSTORE and \
+             ETH_KEYSTORE_ACCOUNT"
         );
     }
     checked?;
@@ -208,7 +211,7 @@ pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
         eyre::bail!("Target address required for single call mode");
     }
     let signer = if args.signer.is_set() {
-        Some(create_signer(&args.signer, &args.opts.password, console).await?)
+        Some(create_signer(&args.signer, console).await?)
     } else {
         None
     };
@@ -241,7 +244,7 @@ async fn run_eoa(args: SendArgs, calls: Vec<Call>, console: &Console) -> eyre::R
     if !args.signer.is_set() {
         return Err(SendError::NoSigner.into());
     }
-    let signer = create_signer(&args.signer, &args.opts.password, console).await?;
+    let signer = create_signer(&args.signer, console).await?;
     execute_eoa(&args.rpc.rpc_url, &signer, calls, &args.opts, console).await?;
     Ok(())
 }
@@ -585,9 +588,9 @@ pub async fn execute(
 
     // 2. Inspect Safe State & Resolve Signer / Payer
     let signer_opt = target.signer;
-    let payer_opt = create_payer(&args.payer)?;
+    let payer_opt = create_payer(&args.gas_payer, console).await?;
     let payer = match (&payer_opt, &signer_opt) {
-        (Some(p), _) => AnySigner::from(p.clone()),
+        (Some(p), _) => p.clone(),
         (None, Some(s)) => s.clone(),
         (None, None) => return Err(SendError::NoSigner),
     };
@@ -1169,11 +1172,9 @@ async fn run_rotating(
     } else {
         cli_calls
     };
-    if calls.is_empty() {
-        return Err(SendError::NoCalls);
-    }
-    let payer = create_payer(&args.payer)?;
-    let ring = open_wallet(&args.hd, &args.password, target.home.as_deref(), console).await?;
+    // No calls: the transaction only rotates the owner.
+    let payer = create_payer(&args.gas_payer, console).await?;
+    let ring = open_wallet(&args.hd, target.home.as_deref(), console).await?;
     let safe = if let Some(safe) = target.safe.or(bundle_safe) {
         safe
     } else {
@@ -1184,8 +1185,6 @@ async fn run_rotating(
         rpc_url: &target.rpc_url,
         safe,
         ring,
-        legacy_owner: None,
-        sweep_legacy: false,
         payer,
         sweep: &args.sweep,
         calls,

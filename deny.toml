@@ -43,6 +43,12 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
+# option-ext comes from dirs, which foundry-wallets uses to find
+# ~/.foundry/keystores. MPL-2.0 is file-level copyleft: using it unmodified
+# puts no terms on this crate.
+exceptions = [
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
 
 [sources]
 unknown-registry = "deny"
