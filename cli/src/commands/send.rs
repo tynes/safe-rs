@@ -139,6 +139,9 @@ pub struct Target {
 
 pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
     let calls = build_cli_calls(&args)?;
+    if args.send_eoa {
+        return run_eoa(args, calls, json).await;
+    }
     // Checked before any key or password prompt.
     let checked = args.opts.validate_safe(args.wallet.is_set());
     #[cfg(feature = "hd-wallet")]
@@ -163,6 +166,33 @@ pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
         signer,
     };
     dispatch(target, calls, args.opts, Output::from_json(json)).await?;
+    Ok(())
+}
+
+/// `safe send --send-eoa`: the calls go from the signer's own account, one
+/// transaction each, through the same path as [`SendContext::eoa`].
+async fn run_eoa(args: SendArgs, calls: Vec<Call>, json: bool) -> eyre::Result<()> {
+    // `--safe` and SAFE_ADDRESS look the same here; refuse both rather than
+    // send from the EOA when a Safe was asked for.
+    if args.safe.safe.is_some() {
+        eyre::bail!(
+            "--send-eoa sends from the signer's own account, not a Safe: remove --safe and \
+             unset SAFE_ADDRESS"
+        );
+    }
+    // Checked before any key or password prompt.
+    args.opts.validate_eoa(calls.len())?;
+    if calls.is_empty() {
+        eyre::bail!("nothing to send: pass a target address or --call");
+    }
+    if !args.wallet.is_set() {
+        return Err(SendError::NoSigner.into());
+    }
+    let signer = create_signer(&args.wallet, &args.opts.password)?;
+    let ctx = SendContext::eoa(args.rpc.rpc_url)
+        .with_signer(signer)
+        .with_output(Output::from_json(json));
+    send(ctx, calls, args.opts).await?;
     Ok(())
 }
 

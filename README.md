@@ -154,6 +154,12 @@ safe send <to> <signature> [args...] --safe <address> --rpc-url <url>
 safe send 0xRecipient --value 0.5ether --rpc-url $ETH_RPC_URL --private-key $PRIVATE_KEY
 ```
 
+**From your own account:** `--send-eoa` sends the calls from the signer's own address instead of a Safe, one transaction per call. They are simulated together in order first, and nothing is sent unless all of them pass; after one confirmation they are broadcast one at a time, each after the one before it is mined. Simulation, the fee flags, `--timeout`, `--trace`, `--block`, `--spec` and `--no-confirm` work as for a Safe, and `--gas-limit` works with a single call. `--safe` (or `SAFE_ADDRESS`) and the options only a Safe has, such as `--bundle`, `--nonce`, `--no-submit`, `--rotate` and `--payer-private-key`, are refused. A send of several calls is not atomic: if one fails after others were mined, the error lists the ones on chain.
+
+```bash
+safe send 0xRecipient --value 0.5ether --send-eoa --rpc-url $ETH_RPC_URL --private-key $PRIVATE_KEY
+```
+
 **Multiple calls:**
 ```bash
 safe send \
@@ -180,6 +186,7 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 **Options:**
 | Flag | Description |
 |------|-------------|
+| `--send-eoa` | Send each call from the signer's own account instead of a Safe (see above) |
 | `--simulate-only` | Simulate without signing or broadcasting |
 | `--skip-simulation` | Skip simulation (outer gas from `eth_estimateGas`) |
 | `--call-only` | Use MultiSendCallOnly (no delegatecall) |

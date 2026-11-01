@@ -203,6 +203,12 @@ pub struct SendArgs {
     #[arg(long = "call", value_name = "CALL")]
     pub calls: Vec<String>,
 
+    /// Send each call from the signer's own account, one transaction per
+    /// call, instead of through a Safe. Refuses --safe (and SAFE_ADDRESS) and
+    /// the options only a Safe has, such as --bundle, --nonce and --rotate
+    #[arg(long)]
+    pub send_eoa: bool,
+
     #[command(flatten)]
     pub opts: SendOpts,
 
@@ -1545,6 +1551,18 @@ mod tests {
         }
         assert!(parse(&["wallet", "list"]).is_err());
         assert!(parse(&["rotate", SAFE, "--rpc-url", "http://localhost:8545"]).is_err());
+    }
+
+    #[test]
+    fn send_eoa_is_a_send_flag() {
+        let send_eoa = |cli: Cli| match cli.command {
+            Commands::Send(args) => args.send_eoa,
+            _ => panic!("expected send"),
+        };
+        assert!(send_eoa(
+            parse(&["send", TO, "--send-eoa", "--rpc-url", "http://x"]).unwrap()
+        ));
+        assert!(!send_eoa(send(&[]).unwrap()));
     }
 
     #[test]
