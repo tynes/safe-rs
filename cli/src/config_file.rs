@@ -21,10 +21,12 @@ use std::path::{Path, PathBuf};
 
 use alloy::primitives::Address;
 use clap::builder::ArgPredicate;
-use clap::Command;
+use clap::parser::ValueSource;
+use clap::{ArgMatches, Command};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::cli::SignerArgs;
 use crate::paths;
 
 /// The file name under the data directory.
@@ -136,6 +138,30 @@ impl ConfigFile {
             defaults.push(("hd_key", key.clone(), true));
         }
         defaults
+    }
+}
+
+/// Drops a configured `--keystore` or `--hd-key` from `signer` when another
+/// signer flag was given on the command line or in the environment.
+/// [`ConfigFile::apply`] arranges this for the flags it finds, but clap does
+/// not apply it to flags a host made global, so such a host calls this on
+/// the matches it parsed `signer` from.
+pub fn settle_signer(signer: &mut SignerArgs, matches: &ArgMatches) {
+    let given = |id: &str| {
+        matches.ids().any(|i| i == id)
+            && matches!(
+                matches.value_source(id),
+                Some(ValueSource::CommandLine | ValueSource::EnvVariable)
+            )
+    };
+    let configured = |id: &str| matches!(matches.value_source(id), Some(ValueSource::DefaultValue));
+    let other_given = |id: &str| SIGNER_FLAGS.iter().any(|flag| *flag != id && given(flag));
+    if signer.keystore.is_some() && configured("keystore") && other_given("keystore") {
+        signer.keystore = None;
+    }
+    #[cfg(feature = "hd-wallet")]
+    if signer.hd_key.is_some() && configured("hd_key") && other_given("hd_key") {
+        signer.hd_key = None;
     }
 }
 
@@ -285,6 +311,45 @@ mod tests {
         };
         let args = info(parse(&config, &["info"]).unwrap());
         assert_eq!(args.safe, None);
+    }
+
+    /// A host that makes the signer flags global, as `polymarket` does.
+    #[derive(clap::Parser)]
+    #[command(mut_arg("private_key", |a| a.global(true)), mut_arg("keystore", |a| a.global(true)))]
+    struct Host {
+        #[command(flatten)]
+        signer: SignerArgs,
+        #[command(subcommand)]
+        command: HostCommand,
+    }
+
+    #[derive(clap::Subcommand)]
+    enum HostCommand {
+        Show,
+    }
+
+    #[test]
+    fn settle_signer_drops_the_configured_signer_of_a_host_with_global_flags() {
+        let config = ConfigFile {
+            keystore: Some("/keys/me.json".into()),
+            ..ConfigFile::default()
+        };
+        for args in [
+            &["host", "--private-key", "0x01", "show"][..],
+            &["host", "show", "--private-key", "0x01"][..],
+        ] {
+            let mut command = config.apply(Host::command());
+            let matches = command.try_get_matches_from_mut(args).unwrap();
+            let mut host = Host::from_arg_matches(&matches).unwrap();
+            settle_signer(&mut host.signer, &matches);
+            assert_eq!(host.signer.keystore, None, "{args:?}");
+            assert_eq!(host.signer.private_key.as_deref(), Some("0x01"));
+        }
+        let mut command = config.apply(Host::command());
+        let matches = command.try_get_matches_from_mut(["host", "show"]).unwrap();
+        let mut host = Host::from_arg_matches(&matches).unwrap();
+        settle_signer(&mut host.signer, &matches);
+        assert_eq!(host.signer.keystore.as_deref(), Some("/keys/me.json"));
     }
 
     #[test]
