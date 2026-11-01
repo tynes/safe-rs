@@ -285,7 +285,7 @@ Output:
 Safe: 0xYourSafe
 Block: 21000000 (0x...)
 Version: 1.4.1
-Singleton: 0x41675C099F32341bf84BFc5382aF534df5C7461a
+Implementation (singleton): 0x41675C099F32341bf84BFc5382aF534df5C7461a
 Balance: 1.250000000000000000 ETH
 Nonce: 42
 Threshold: 1
@@ -468,6 +468,7 @@ Commands that sign with a single key, and `safe info` and `safe call` when they 
 | `--private-key <key>` | Private key (hex) |
 | `--keystore <path>` | Keystore file (Web3 Secret Storage v3, as written by `cast wallet import`) |
 | `-i, --interactive` | Prompt for private key securely |
+| `--hd-key <wallet>[:<index>]` | Key `index` of an HD wallet (default 0, the funding key); the wallet is a name under `~/.safe-rs/wallets` or a keystore path. Not recorded in the wallet's rotation state |
 | `PRIVATE_KEY` env var | Environment variable |
 
 A keystore or HD wallet password is read from `--password-file <path>`, then `--password <text>` (visible in the process list; avoid it), then a prompt.
@@ -566,6 +567,20 @@ Under `~/.safe-rs` (or `$SAFE_RS_HOME`), all readable by you only:
 |------|----------|
 | `wallets/<name>.json` | The phrase, encrypted with your password |
 | `state/<funding address>.json` | Addresses and key indices: which key owns which Safe, and the addresses of the next keys. No secrets |
+| `config.toml` | Defaults for flags, optional (below) |
+
+`config.toml` holds defaults that `safe` and any CLI embedding it read. A flag or its environment variable always wins, and `keystore` / `hd_key` are used only when no other signer is given. Unknown keys are an error. Private keys and passwords never go here.
+
+```toml
+rpc_url = "https://polygon.drpc.org"   # --rpc-url, ETH_RPC_URL
+safe = "0x…"                           # --safe, SAFE_ADDRESS
+hd_wallet = "treasury"                 # --hd-wallet, SAFE_HD_WALLET
+password_file = "/home/me/.safe-rs/pw" # --password-file, SAFE_PASSWORD_FILE
+keystore = "/home/me/.foundry/keystores/me"   # --keystore
+hd_key = "treasury:3"                  # --hd-key
+```
+
+A CLI that embeds the commands applies it to its own command tree before parsing: `ConfigFile::load()?.apply(command)`.
 
 The keystore is Web3 Secret Storage v3, the format geth and Foundry use, with the `x-ethers` field ethers.js defines for a phrase. Foundry and geth open it as an ordinary keystore for the funding key (`cast wallet address --keystore ~/.safe-rs/wallets/<name>.json`); ethers.js and safe-rs also recover the phrase.
 
@@ -928,6 +943,17 @@ Everything else, such as a bundle file that does not parse, is `Other`. The enum
   - `--password`, `--password-file`, `--payer-private-key`
 - `SendOpts` also reads three environment variables: `SAFE_HD_WALLET`, `SAFE_PASSWORD_FILE` and `SAFE_PAYER_PRIVATE_KEY`.
 - To catch a flag-name clash, parse a sample command line in a test. `Command::debug_assert()` alone misses a clash between a global flag and one of these, and clap panics at parse time instead.
+
+**Checking Safe transactions with a host policy.** A host sets a `policy::SafePolicy` with `SendContext::with_policy` or `RunConfig::with_policy`. Before a Safe transaction leaves the machine, whether by broadcast, `--approve-hash`, a bundle, `--sign-only` or `--no-submit`, the CLI calls the policy's `check` and then its `check_async`. `--simulate-only` runs them too. If either returns `false`, the CLI stops with `SendError::PolicyRefused`. Both checks default to `true`, so implement only the ones you need.
+
+Each check gets a `policy::SafeTxCheck` with everything that was planned:
+- `plan`: `Plan::Send(&SendOpts)` for `send` and `safe config`, or `Plan::Rotation(&RotationPlan)` for `safe rotate` and `send --rotate`
+- `calls`: the calls asked for
+- `prepared`: the Safe transaction
+- `before`: the Safe's `SafeState`
+- `after`: its owners, threshold and implementation after the simulated transaction, or the owners a rotation must leave. This is `None` with `--skip-simulation`.
+
+The CLI decides nothing itself, and without a policy none of this runs.
 
 ## Reusing `safe create` and `safe wallet` in your own CLI
 

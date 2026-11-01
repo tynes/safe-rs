@@ -972,7 +972,7 @@ pub(crate) fn check_setup(owners: &[Address], threshold: u64) -> Result<(), Stri
 #[derive(Args, Clone, Default)]
 pub struct SignerArgs {
     /// Raw private key
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     pub private_key: Option<String>,
 
     /// Path to a keystore file (Web3 Secret Storage v3, as written by `cast wallet import`)
@@ -982,6 +982,51 @@ pub struct SignerArgs {
     /// Prompt for private key interactively
     #[arg(short, long)]
     pub interactive: bool,
+
+    /// A key of an HD wallet: <NAME|PATH>[:<INDEX>], where the wallet is a
+    /// name under ~/.safe-rs/wallets or the path of a mnemonic keystore, and
+    /// INDEX the key (default 0, the funding key). Signing with it is not
+    /// recorded in the wallet's rotation state
+    #[cfg(feature = "hd-wallet")]
+    #[arg(long, value_name = "WALLET[:INDEX]", value_parser = parse_hd_key)]
+    pub hd_key: Option<HdKey>,
+}
+
+/// `--hd-key <NAME|PATH>[:<INDEX>]`: one key of an HD wallet.
+#[cfg(feature = "hd-wallet")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HdKey {
+    /// A wallet name under the data directory, or a keystore path
+    pub wallet: String,
+    /// The key's index (0 is the funding key)
+    pub index: u32,
+}
+
+#[cfg(feature = "hd-wallet")]
+impl std::str::FromStr for HdKey {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        let (wallet, index) = match value.rsplit_once(':') {
+            Some((wallet, index)) if !wallet.is_empty() && index.parse::<u32>().is_ok() => {
+                (wallet, index.parse().unwrap_or_default())
+            }
+            _ => (value, 0),
+        };
+        if wallet.is_empty() {
+            return Err("--hd-key takes <NAME|PATH>[:<INDEX>]".to_string());
+        }
+        Ok(Self {
+            wallet: wallet.to_string(),
+            index,
+        })
+    }
+}
+
+/// Parses `--hd-key <NAME|PATH>[:<INDEX>]`.
+#[cfg(feature = "hd-wallet")]
+pub fn parse_hd_key(value: &str) -> Result<HdKey, String> {
+    value.parse()
 }
 
 /// The old name of [`SignerArgs`].
@@ -991,6 +1036,10 @@ pub type WalletArgs = SignerArgs;
 impl SignerArgs {
     /// Whether any wallet option was given.
     pub fn is_set(&self) -> bool {
+        #[cfg(feature = "hd-wallet")]
+        if self.hd_key.is_some() {
+            return true;
+        }
         self.interactive || self.keystore.is_some() || self.private_key.is_some()
     }
 }
@@ -1051,7 +1100,7 @@ pub struct SweepArgs {
 pub struct PayerArgs {
     /// Private key that sends the outer transaction and pays for gas, instead
     /// of the owner key (with --hd-wallet on create: instead of the funding key)
-    #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY")]
+    #[arg(long, env = "SAFE_PAYER_PRIVATE_KEY", hide_env_values = true)]
     pub payer_private_key: Option<String>,
 }
 
@@ -1066,14 +1115,17 @@ fn redacted<T>(secret: Option<&T>) -> &'static str {
 
 impl fmt::Debug for SignerArgs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SignerArgs")
+        let mut debug = f.debug_struct("SignerArgs");
+        let debug = debug
             .field(
                 "private_key",
                 &format_args!("{}", redacted(self.private_key.as_ref())),
             )
             .field("keystore", &self.keystore)
-            .field("interactive", &self.interactive)
-            .finish()
+            .field("interactive", &self.interactive);
+        #[cfg(feature = "hd-wallet")]
+        let debug = debug.field("hd_key", &self.hd_key);
+        debug.finish()
     }
 }
 

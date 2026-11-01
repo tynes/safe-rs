@@ -147,7 +147,7 @@ impl Report for EoaExecutionOutput {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SafeInfoOutput {
     pub address: Address,
     /// Native balance in wei
@@ -155,6 +155,7 @@ pub struct SafeInfoOutput {
     pub nonce: U256,
     pub threshold: u64,
     pub owners: Vec<Address>,
+    /// The implementation (singleton) the proxy delegates to
     pub singleton: Address,
     pub version: Option<String>,
     pub code_hash: B256,
@@ -202,7 +203,7 @@ impl Report for SafeInfoOutput {
             "Version: {}",
             self.version.as_deref().unwrap_or("unknown")
         );
-        let _ = writeln!(s, "Singleton: {}", self.singleton);
+        let _ = writeln!(s, "Implementation (singleton): {}", self.singleton);
         let _ = writeln!(s, "Balance: {} ETH", format_ether(self.balance));
         let _ = writeln!(s, "Nonce: {}", self.nonce);
         let _ = writeln!(s, "Threshold: {}", self.threshold);

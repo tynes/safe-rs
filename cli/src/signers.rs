@@ -17,20 +17,56 @@ pub fn create_signer(
     password: &PasswordArgs,
     console: &Console,
 ) -> Result<PrivateKeySigner> {
-    // Priority: interactive > keystore > private_key
+    // Priority: interactive > keystore > HD key > private_key
     if args.interactive {
         let key = console.secret("Enter private key: ")?;
         parse_private_key(&key)
     } else if let Some(keystore) = &args.keystore {
         let password = read_password(password, "Keystore password: ", console)?;
         keystore_signer(Path::new(keystore), password.as_bytes())
+    } else if let Some(key) = hd_key(args) {
+        hd_key_signer(key, password, None, console)
     } else if let Some(private_key) = &args.private_key {
         parse_private_key(private_key)
     } else {
         Err(eyre!(
-            "No wallet specified. Use --private-key, --keystore or --interactive"
+            "No wallet specified. Use --private-key, --keystore, --hd-key or --interactive"
         ))
     }
+}
+
+impl SignerArgs {
+    /// The signer these flags name, as the `safe` commands resolve it:
+    /// `--interactive` asks `prompt` for the key, `--keystore` reads the
+    /// password from `password` or asks `prompt`.
+    pub fn resolve(
+        &self,
+        password: &PasswordArgs,
+        prompt: std::sync::Arc<dyn crate::prompt::Prompt>,
+    ) -> Result<PrivateKeySigner> {
+        let console = Console::new(std::sync::Arc::new(crate::log::NoopLogger), prompt);
+        create_signer(self, password, &console)
+    }
+}
+
+#[cfg(feature = "hd-wallet")]
+fn hd_key(args: &SignerArgs) -> Option<&crate::cli::HdKey> {
+    args.hd_key.as_ref()
+}
+
+#[cfg(not(feature = "hd-wallet"))]
+fn hd_key(_: &SignerArgs) -> Option<&std::convert::Infallible> {
+    None
+}
+
+#[cfg(not(feature = "hd-wallet"))]
+fn hd_key_signer(
+    key: &std::convert::Infallible,
+    _: &PasswordArgs,
+    _: Option<&Path>,
+    _: &Console,
+) -> Result<PrivateKeySigner> {
+    match *key {}
 }
 
 /// The separate gas payer, if one was given.
@@ -235,6 +271,22 @@ mod hd {
         }
     }
 
+    /// Key `key.index` of the HD wallet `key.wallet` (under `home`, default the
+    /// data directory), decrypting the wallet with `password` or the prompt.
+    pub fn hd_key_signer(
+        key: &crate::cli::HdKey,
+        password: &PasswordArgs,
+        home: Option<&Path>,
+        console: &Console,
+    ) -> Result<PrivateKeySigner> {
+        let path = paths::wallet_file(&paths::home_or(home)?, &key.wallet);
+        let wallet = load_phrase(&path, password, console)?;
+        if key.index == 0 {
+            return Ok(wallet.funding().clone());
+        }
+        Ok(wallet.owner(key.index)?)
+    }
+
     /// The wallet's funding address, which identifies it: read from the keystore
     /// without its password, or asked of the Ledger.
     pub async fn wallet_id(hd: &HdArgs, home: Option<&Path>) -> Result<Address> {
@@ -331,11 +383,7 @@ mod tests {
 
     #[test]
     fn single_key_options_are_detected() {
-        let none = SignerArgs {
-            private_key: None,
-            keystore: None,
-            interactive: false,
-        };
+        let none = SignerArgs::default();
         assert!(!none.is_set());
         let env_key = SignerArgs {
             private_key: Some("0x01".to_string()),

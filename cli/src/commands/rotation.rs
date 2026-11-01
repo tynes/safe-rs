@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use alloy::eips::BlockId;
 use alloy::network::primitives::ReceiptResponse;
 use alloy::primitives::utils::format_ether;
 use alloy::primitives::Address;
@@ -13,7 +14,9 @@ use safe_rs::encoding::compute_domain_separator;
 use safe_rs::rotation::{
     ExecOptions, Keyring, OwnerRef, RotatingSafe, RotationConfig, RotationStatus,
 };
-use safe_rs::{detect_addresses, Call, ChainAddresses, Error, SpecId};
+use safe_rs::{
+    detect_addresses, read_safe_state, Call, ChainAddresses, Error, ReadSafeStateOptions, SpecId,
+};
 use url::Url;
 
 use crate::bundle::{BundleFile, BundleRotationSwap};
@@ -27,6 +30,7 @@ use crate::output::{
     rotation_summary, ApproveHashOutput, BundleSavedOutput, Report, RotationOutput,
     RotationPlanOutput, SendOutcome, SignedTxOutput, SimulationOutput,
 };
+use crate::policy::{self, Plan, SafeSnapshot, SafeTxCheck};
 
 /// How often to poll for a receipt after broadcasting.
 const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -244,6 +248,32 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
         Err(e) => return Err(e.into()),
     };
     console.warnings(&rotating.take_warnings());
+
+    if let Some(policy) = console.policy() {
+        let before = read_safe_state(
+            &provider,
+            run.safe,
+            BlockId::latest(),
+            ReadSafeStateOptions::default(),
+        )
+        .await?;
+        let after = SafeSnapshot::new(
+            run.safe,
+            tx.plan.expected_owners.clone(),
+            tx.plan.threshold,
+            before.singleton,
+        );
+        let check = SafeTxCheck {
+            rpc_url: run.rpc_url,
+            chain_id,
+            plan: Plan::Rotation(&tx.plan),
+            calls: &run.calls,
+            prepared: &tx.plan.prepared,
+            before: &before,
+            after: Some(&after),
+        };
+        policy::enforce(policy.as_ref(), &check).await?;
+    }
 
     let sweep_enabled = !run.sweep.no_sweep;
     let mut details = rotation_summary(&tx, &run.calls, sweep_enabled);

@@ -55,6 +55,11 @@
 //! # }
 //! ```
 //!
+//! A CLI whose Safes come from a factory of its own sets
+//! [`CreateOpts::implementation`](create::CreateOpts) (see
+//! [`create::SafeImplementation`]); [`create::create`] then deploys through it,
+//! and [`info`] shows the implementation (singleton) the Safe uses.
+//!
 //! [`SendContext::eoa`] sends the same calls from the signer's own account,
 //! one transaction per call, for an app that also supports accounts without a
 //! Safe.
@@ -70,14 +75,19 @@
 mod bundle;
 mod cli;
 mod commands;
+pub mod config_file;
 mod console;
 mod error;
 #[cfg(feature = "hd-wallet")]
 mod keys;
 pub mod log;
 mod output;
-#[cfg(feature = "hd-wallet")]
+#[cfg_attr(
+    not(feature = "hd-wallet"),
+    allow(dead_code, reason = "the wallet paths are only used with hd-wallet")
+)]
 mod paths;
+pub mod policy;
 pub mod prompt;
 mod sig_parser;
 mod signers;
@@ -90,9 +100,11 @@ use color_eyre::eyre::Result;
 
 pub use alloy::signers::local::PrivateKeySigner;
 pub use cli::{Cli, Commands};
+pub use commands::info::{info, InfoError, SafeInfo};
 pub use commands::send::{send, EoaTx, SendContext, SendOutcome, Sender};
 pub use error::{BroadcastError, CreateError, OptionsError, SendError};
 pub use output::Report;
+pub use paths::{home, HOME_ENV};
 /// The library the calls are built with, at the version this crate uses.
 pub use safe_rs;
 pub use url::Url;
@@ -128,14 +140,15 @@ pub mod args {
     };
     /// The HD wallet and sweep flags of `--rotate` (`hd-wallet` feature).
     #[cfg(feature = "hd-wallet")]
-    pub use crate::cli::{HdArgs, SweepArgs};
+    pub use crate::cli::{parse_hd_key, HdArgs, HdKey, SweepArgs};
 }
 
 /// `safe create` and [`create`](create::create) for a CLI that deploys Safes.
 pub mod create {
     pub use crate::cli::{FeeArgs, SafeSetupArgs, SafeVersion};
     pub use crate::commands::create::{
-        create, run, CreateArgs, CreateContext, CreateOpts, CreateOutcome,
+        create, run, BoxFuture, CreateArgs, CreateContext, CreateOpts, CreateOutcome, HttpProvider,
+        Implementation, ResolvedSetup, SafeDeployment, SafeImplementation, StandardSafe,
     };
     #[cfg(feature = "hd-wallet")]
     pub use crate::commands::create::{parse_same_as, SameAs};
@@ -151,6 +164,8 @@ pub struct RunConfig {
     /// Print the result as JSON instead of text. Never asks for
     /// confirmation, as `--no-confirm`.
     pub json: bool,
+    /// What every Safe transaction is held to (default: nothing)
+    pub policy: Option<Arc<dyn policy::SafePolicy>>,
 }
 
 impl RunConfig {
@@ -163,11 +178,20 @@ impl RunConfig {
             // The logger already showed what a confirmation is about.
             prompt: Arc::new(TerminalPrompt::new().hide_details()),
             json,
+            policy: None,
         }
     }
 
+    /// Checks every Safe transaction with `policy` before it leaves the machine.
+    /// rotation unless it allows it.
+    #[must_use]
+    pub fn with_policy(mut self, policy: impl policy::SafePolicy + 'static) -> Self {
+        self.policy = Some(Arc::new(policy));
+        self
+    }
+
     pub(crate) fn console(&self) -> Console {
-        Console::new(self.logger.clone(), self.prompt.clone())
+        Console::new(self.logger.clone(), self.prompt.clone()).with_policy(self.policy.clone())
     }
 }
 
