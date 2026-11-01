@@ -832,15 +832,26 @@ pub async fn execute(
         if let (Some(check), Some(post)) = (hooks.post_check, simulated.post.as_mut()) {
             check(post)?;
         }
-        if let (Some(policy), Some(post)) = (console.policy(), simulated.post.as_mut()) {
-            let before = SafeSnapshot::from_state(&state);
-            let after = SafeSnapshot::read(post, safe_address)?;
-            policy
-                .check(&before, &after)
-                .map_err(|reason| SendError::PolicyRefused {
-                    policy: policy.name().to_string(),
-                    reason,
-                })?;
+        if let Some(policy) = console.policy() {
+            let refused = |reason| SendError::PolicyRefused {
+                policy: policy.name().to_string(),
+                reason,
+            };
+            match simulated.post.as_mut() {
+                Some(post) => {
+                    let before = SafeSnapshot::from_state(&state);
+                    let after = SafeSnapshot::read(post, safe_address)?;
+                    policy.check(&before, &after).map_err(refused)?;
+                }
+                // A failed simulation is refused below; a passing one without
+                // its post-state cannot be checked, so it is not sent.
+                None if simulated.result.success => {
+                    return Err(refused(
+                        "the simulation kept no post-state to check".to_string(),
+                    ));
+                }
+                None => {}
+            }
         }
         let result = &simulated.result;
         let report = SimulationOutput {
