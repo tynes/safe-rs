@@ -29,7 +29,8 @@ hex = "0.4"
 rpassword = "7"
 url = "2"
 rand = { version = "0.8", optional = true }
-zeroize = "1"
+tracing = { version = "0.1", optional = true }
+zeroize = { version = "1", features = ["serde"] }
 
 [features]
 default = ["ledger"]
@@ -39,6 +40,8 @@ hd-wallet = ["safe-rs/hd-wallet", "dep:rand"]
 # Owner keys on a Ledger (`--ledger`; implies hd-wallet). Builds libusb from
 # source on Linux when the system has none.
 ledger = ["hd-wallet", "safe-rs/ledger"]
+# `log::TracingLogger`, for a host that already has a `tracing` subscriber.
+tracing = ["dep:tracing"]
 
 [dev-dependencies]
 alloy = { version = "2.5", features = ["full", "signer-local", "node-bindings"] }

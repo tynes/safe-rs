@@ -8,7 +8,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use safe_rs::{ChainAddresses, SpecId};
 use url::Url;
 
+pub use crate::commands::create::CreateArgs;
 use crate::error::OptionsError;
+#[cfg(feature = "hd-wallet")]
+pub use crate::wallet::WalletCommand;
 
 #[derive(Parser)]
 #[command(name = "safe")]
@@ -42,7 +45,7 @@ pub enum Commands {
     Config(Box<ConfigArgs>),
 
     /// Deploy a new Safe deterministically (same address across chains)
-    Create(CreateArgs),
+    Create(Box<CreateArgs>),
 
     /// Swap the Safe's owner for the HD wallet's next unused key, with no other
     /// calls. Also moves an existing Safe onto the wallet (--from-*) and retires
@@ -52,8 +55,26 @@ pub enum Commands {
 
     /// Manage HD wallets: the encrypted phrase that one-time owner keys come from
     #[cfg(feature = "hd-wallet")]
+    Wallet(WalletCliArgs),
+}
+
+/// `safe wallet`: the subcommands, and the RPC and Safe that `sync` and
+/// `sweep` read. A CLI that embeds [`WalletCommand`] resolves those itself
+/// into a [`WalletContext`](crate::signers::WalletContext).
+#[cfg(feature = "hd-wallet")]
+#[derive(Args, Clone)]
+pub struct WalletCliArgs {
+    /// RPC endpoint URL (sync and sweep)
+    #[arg(long, env = "ETH_RPC_URL", global = true)]
+    pub rpc_url: Option<Url>,
+
+    /// Safe contract address (sync and sweep: default, the wallet's sole
+    /// recorded Safe on this chain; status: only show this Safe)
+    #[arg(long, global = true)]
+    pub safe: Option<Address>,
+
     #[command(subcommand)]
-    Wallet(WalletCommand),
+    pub command: WalletCommand,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -109,7 +130,7 @@ pub enum EvmSpec {
 }
 
 /// Safe versions `safe create` can deploy, newest first.
-#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SafeVersion {
     #[default]
     #[value(name = "1.5.0")]
@@ -213,7 +234,7 @@ pub struct SendArgs {
     pub opts: SendOpts,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 }
 
 /// Seconds to wait for a receipt after broadcasting (`--timeout`).
@@ -685,7 +706,7 @@ pub struct ConfigArgs {
     pub hd: HdArgs,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 
     #[command(flatten)]
     pub password: PasswordArgs,
@@ -726,7 +747,7 @@ pub struct CallArgs {
     pub sim: SimArgs,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 
     #[command(flatten)]
     pub password: PasswordArgs,
@@ -748,7 +769,7 @@ pub struct InfoArgs {
     pub block: Option<BlockId>,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 
     #[command(flatten)]
     pub password: PasswordArgs,
@@ -780,76 +801,10 @@ pub struct ApprovalsArgs {
     pub block: Option<BlockId>,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 
     #[command(flatten)]
     pub password: PasswordArgs,
-}
-
-#[derive(Parser, Clone)]
-pub struct CreateArgs {
-    #[command(flatten)]
-    pub rpc: RpcArgs,
-
-    /// Salt nonce for CREATE2 (default: 0)
-    #[arg(long, default_value = "0")]
-    pub salt_nonce: U256,
-
-    /// Additional owner address (repeatable, signer is always included)
-    #[arg(long = "owner", value_name = "ADDR")]
-    pub owners: Vec<Address>,
-
-    /// Signature threshold (default: 1)
-    #[arg(long, default_value = "1")]
-    pub threshold: u64,
-
-    /// Only compute and display the address, don't deploy
-    #[arg(long)]
-    pub compute_only: bool,
-
-    /// Custom fallback handler address
-    #[arg(long)]
-    pub fallback_handler: Option<Address>,
-
-    /// Safe singleton address (default: based on --safe-version)
-    #[arg(long)]
-    pub singleton: Option<Address>,
-
-    /// Safe proxy factory address (default: based on --safe-version)
-    #[arg(long)]
-    pub factory: Option<Address>,
-
-    /// Safe version to use
-    #[arg(long, value_enum, default_value_t)]
-    pub safe_version: SafeVersion,
-
-    /// Skip confirmation prompt
-    #[arg(long)]
-    pub no_confirm: bool,
-
-    /// Deploy the same Safe an HD wallet created on another chain, given as
-    /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
-    /// must be rotated right away
-    #[cfg(feature = "hd-wallet")]
-    #[arg(long, value_name = "CHAIN_ID:SAFE", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
-    pub same_as: Option<String>,
-
-    #[cfg(feature = "hd-wallet")]
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    #[cfg(feature = "hd-wallet")]
-    #[command(flatten)]
-    pub sweep: SweepArgs,
-
-    #[command(flatten)]
-    pub wallet: WalletArgs,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
-
-    #[command(flatten)]
-    pub payer: PayerArgs,
 }
 
 #[cfg(feature = "hd-wallet")]
@@ -946,147 +901,151 @@ pub struct RotateArgs {
     pub no_confirm: bool,
 }
 
-#[cfg(feature = "hd-wallet")]
-#[derive(Subcommand, Clone)]
-pub enum WalletCommand {
-    /// Create an HD wallet from a new 24-word phrase and encrypt it to disk
-    New(WalletNewArgs),
-
-    /// Encrypt an existing BIP-39 phrase to disk as an HD wallet
-    Import(WalletImportArgs),
-
-    /// List the HD wallets on disk
-    List,
-
-    /// Print the wallet's funding address, or the address of one owner key
-    Address(WalletAddressArgs),
-
-    /// Show which keys own which Safe, and where to send gas money
-    Status(WalletStatusArgs),
-
-    /// Rebuild the record of used keys for a Safe from the chain
-    Sync(WalletSyncArgs),
-
-    /// Move the ETH left on a Safe's retired owner keys to its current owner
-    Sweep(WalletSweepArgs),
-}
-
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletNewArgs {
-    /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
-    pub name: String,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
-}
-
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletImportArgs {
-    /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
-    pub name: String,
-
-    /// File holding the phrase (default: prompt, without echo)
-    #[arg(long, value_name = "PATH")]
-    pub phrase_file: Option<PathBuf>,
-
-    /// First index to use for owner keys, for a phrase whose lower indices
-    /// were already used by another wallet
-    #[arg(long, value_name = "INDEX")]
-    pub start_index: Option<u32>,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
-}
-
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletAddressArgs {
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    /// Owner key index (default: the funding address, which needs no password)
+/// The fee and receipt flags of a transaction: `--gas-limit`,
+/// `--max-fee-per-gas`, `--max-priority-fee-per-gas` and `--timeout`.
+#[derive(Args, Clone, Debug, PartialEq, Eq)]
+pub struct FeeArgs {
+    /// Gas limit of the outer transaction (default: simulated or estimated gas + 20%)
     #[arg(long)]
-    pub index: Option<u32>,
+    pub gas_limit: Option<u64>,
 
-    #[command(flatten)]
-    pub password: PasswordArgs,
-}
+    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
+    /// ("30gwei") (default: node estimate)
+    #[arg(long, value_parser = parse_fee_value)]
+    pub max_fee_per_gas: Option<u128>,
 
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletStatusArgs {
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    /// Only show this Safe
-    #[arg(long)]
-    pub safe: Option<Address>,
-}
-
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletSyncArgs {
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    #[command(flatten)]
-    pub safe: SafeArgs,
-
-    #[command(flatten)]
-    pub rpc: RpcArgs,
-
-    /// How many wallet indices to derive and compare (default: 1000 for an HD
-    /// wallet file, 52 for a Ledger, which answers one address at a time)
-    #[arg(long)]
-    pub scan_limit: Option<u32>,
-
-    /// Also read the Safe's owner events from this block on, to restore its
-    /// history and find keys that never paid for gas. Use the Safe's
-    /// deployment block or earlier
-    #[arg(long, value_name = "BLOCK")]
-    pub from_block: Option<u64>,
-
-    /// Blocks per eth_getLogs request
-    #[arg(long, default_value_t = 10_000, requires = "from_block")]
-    pub chunk: u64,
-
-    /// MultiSendCallOnly address (default: canonical v1.4.1)
-    #[arg(long)]
-    pub multi_send_call_only: Option<Address>,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
-}
-
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletSweepArgs {
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    #[command(flatten)]
-    pub safe: SafeArgs,
-
-    #[command(flatten)]
-    pub rpc: RpcArgs,
-
-    /// Wei to leave on the retired owner, or a number with a unit ("0.01ether")
-    /// (default: what the chain charges outside gas)
-    #[arg(long, value_name = "WEI", value_parser = parse_ether_value)]
-    pub sweep_reserve: Option<U256>,
+    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
+    /// unit ("1gwei") (default: node estimate)
+    #[arg(long, value_parser = parse_fee_value)]
+    pub max_priority_fee_per_gas: Option<u128>,
 
     /// Seconds to wait for the receipt after broadcasting
     #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
     pub timeout: u64,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
 }
 
+impl Default for FeeArgs {
+    fn default() -> Self {
+        Self {
+            gas_limit: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            timeout: DEFAULT_TIMEOUT,
+        }
+    }
+}
+
+/// The Safe `safe create` deploys: owners, threshold, salt and contracts.
+#[derive(Args, Clone, Debug, PartialEq, Eq)]
+pub struct SafeSetupArgs {
+    /// Additional owner address (repeatable, the first owner is always included)
+    #[arg(long = "owner", value_name = "ADDR")]
+    pub owners: Vec<Address>,
+
+    /// Signature threshold (default: 1)
+    #[arg(long, default_value = "1")]
+    pub threshold: u64,
+
+    /// Salt nonce for CREATE2 (default: 0)
+    #[arg(long, default_value = "0")]
+    pub salt_nonce: U256,
+
+    /// Custom fallback handler address
+    #[arg(long)]
+    pub fallback_handler: Option<Address>,
+
+    /// Safe version to use
+    #[arg(long, value_enum, default_value_t)]
+    pub safe_version: SafeVersion,
+
+    /// Safe singleton address (default: based on --safe-version)
+    #[arg(long)]
+    pub singleton: Option<Address>,
+
+    /// Safe proxy factory address (default: based on --safe-version)
+    #[arg(long)]
+    pub factory: Option<Address>,
+}
+
+impl Default for SafeSetupArgs {
+    fn default() -> Self {
+        Self {
+            owners: Vec::new(),
+            threshold: 1,
+            salt_nonce: U256::ZERO,
+            fallback_handler: None,
+            safe_version: SafeVersion::default(),
+            singleton: None,
+            factory: None,
+        }
+    }
+}
+
+/// A Safe setup with every default filled in: what the address is computed
+/// from and the deployment sends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSetup {
+    /// The first owner, then the `--owner`s in order, without duplicates
+    pub owners: Vec<Address>,
+    pub threshold: u64,
+    pub salt_nonce: U256,
+    pub singleton: Address,
+    pub factory: Address,
+    pub fallback_handler: Address,
+}
+
+impl SafeSetupArgs {
+    /// `first` followed by the `--owner`s, without duplicates: the order the
+    /// address is computed with.
+    pub fn owners(&self, first: Address) -> Vec<Address> {
+        let mut owners = vec![first];
+        for &owner in &self.owners {
+            if !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+        owners
+    }
+
+    /// Refuses a zero-address owner and a threshold outside 1..=owners.
+    /// Needs the first owner, so it runs once the key is known.
+    pub fn validate(&self, first: Address) -> Result<(), String> {
+        check_setup(&self.owners(first), self.threshold)
+    }
+
+    /// The setup with the version's contracts filled in, after
+    /// [`validate`](Self::validate).
+    pub fn resolve(&self, first: Address) -> ResolvedSetup {
+        let defaults = safe_rs::ChainAddresses::from(self.safe_version);
+        ResolvedSetup {
+            owners: self.owners(first),
+            threshold: self.threshold,
+            salt_nonce: self.salt_nonce,
+            singleton: self.singleton.unwrap_or(defaults.safe_singleton),
+            factory: self.factory.unwrap_or(defaults.proxy_factory),
+            fallback_handler: self.fallback_handler.unwrap_or(defaults.fallback_handler),
+        }
+    }
+}
+
+/// Refuses a zero-address owner and a threshold outside 1..=owners.
+pub(crate) fn check_setup(owners: &[Address], threshold: u64) -> Result<(), String> {
+    if owners.contains(&Address::ZERO) {
+        return Err("Zero address cannot be an owner".to_string());
+    }
+    if threshold == 0 || usize::try_from(threshold).map_or(true, |t| t > owners.len()) {
+        return Err(format!(
+            "Invalid threshold: {threshold} (must be 1-{})",
+            owners.len()
+        ));
+    }
+    Ok(())
+}
+
+/// The single key that signs: `--private-key` (`PRIVATE_KEY`), `--keystore`
+/// or `--interactive`.
 #[derive(Args, Clone, Default)]
-pub struct WalletArgs {
+pub struct SignerArgs {
     /// Raw private key
     #[arg(long, env = "PRIVATE_KEY")]
     pub private_key: Option<String>,
@@ -1100,7 +1059,11 @@ pub struct WalletArgs {
     pub interactive: bool,
 }
 
-impl WalletArgs {
+/// The old name of [`SignerArgs`].
+#[deprecated(since = "0.14.0", note = "renamed to SignerArgs")]
+pub type WalletArgs = SignerArgs;
+
+impl SignerArgs {
     /// Whether any wallet option was given.
     pub fn is_set(&self) -> bool {
         self.interactive || self.keystore.is_some() || self.private_key.is_some()
@@ -1176,9 +1139,9 @@ fn redacted<T>(secret: Option<&T>) -> &'static str {
     }
 }
 
-impl fmt::Debug for WalletArgs {
+impl fmt::Debug for SignerArgs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WalletArgs")
+        f.debug_struct("SignerArgs")
             .field(
                 "private_key",
                 &format_args!("{}", redacted(self.private_key.as_ref())),

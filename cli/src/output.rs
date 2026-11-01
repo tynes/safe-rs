@@ -1,4 +1,4 @@
-use std::fmt::{Display, Write as _};
+use std::fmt::{self, Display, Write as _};
 
 use alloy::primitives::utils::format_ether;
 use alloy::primitives::{Address, Bytes, TxHash, B256, U256};
@@ -12,37 +12,51 @@ mod rotation;
 #[cfg(feature = "hd-wallet")]
 pub use rotation::*;
 
-/// A command result that prints either as JSON or as human-readable text.
+/// A command result that `safe` prints either as JSON or as text.
+///
+/// Every outcome a library function returns renders the way `safe` prints
+/// it, so a host can show the same text.
 pub trait Report: Serialize {
     /// Human-readable rendering (may span several lines).
     fn human(&self) -> String;
+}
 
-    fn print(&self, json: bool) {
-        if json {
-            println!("{}", serde_json::to_string_pretty(self).unwrap());
-        } else {
-            println!("{}", self.human());
+/// An owner key: a wallet key index, or an address the wallet cannot derive.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnerKey {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    pub address: Address,
+}
+
+impl Display for OwnerKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.index {
+            Some(index) => write!(f, "key {index} ({})", self.address),
+            None => write!(f, "{} (not a wallet key)", self.address),
         }
     }
 }
 
-/// Destination for human-readable progress text.
-///
-/// Progress is suppressed in `--json` mode and goes to stderr when stdout
-/// carries a JSON document (for example `--raw-out -`).
-#[derive(Clone, Copy)]
-pub struct Console {
-    quiet: bool,
-    stderr: bool,
+/// ETH moved from a retired owner key (or the funding key) to the next owner.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SweptEth {
+    pub tx_hash: TxHash,
+    /// Wei moved
+    pub amount: U256,
+    pub from: Address,
+    pub to: Address,
 }
 
-/// Prints a command result: as JSON on stdout, as text through the console,
-/// or not at all in [`Output::Quiet`].
-pub fn emit(report: &impl Report, output: Output, console: Console) {
-    match output {
-        Output::Json => report.print(true),
-        Output::Human => console.line(report.human()),
-        Output::Quiet => {}
+impl Report for SweptEth {
+    fn human(&self) -> String {
+        format!(
+            "Swept {} ETH from {} to {}\n  Tx Hash: {}",
+            format_ether(self.amount),
+            self.from,
+            self.to,
+            self.tx_hash
+        )
     }
 }
 
@@ -130,64 +144,6 @@ impl Report for EoaExecutionOutput {
             );
         }
         s
-    }
-}
-
-/// What a send prints.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Output {
-    /// Progress, the confirmation prompt and the result as text, as `safe send`
-    #[default]
-    Human,
-    /// The result as one JSON document on stdout, and nothing else; never
-    /// prompts (`safe send --json`)
-    Json,
-    /// Progress and the confirmation prompt as text on stderr, and no result:
-    /// for a CLI that prints its own from the returned
-    /// [`SendOutcome`](crate::SendOutcome). Stdout stays untouched unless
-    /// `--raw-out -` asks for it.
-    Quiet,
-}
-
-impl Output {
-    pub fn from_json(json: bool) -> Self {
-        if json {
-            Self::Json
-        } else {
-            Self::Human
-        }
-    }
-
-    /// Whether the confirmation prompt may be shown.
-    pub fn prompts(self) -> bool {
-        self != Self::Json
-    }
-}
-
-impl Console {
-    pub fn new(json: bool, stdout_is_data: bool) -> Self {
-        Self {
-            quiet: json,
-            stderr: stdout_is_data,
-        }
-    }
-
-    pub fn for_output(output: Output, stdout_is_data: bool) -> Self {
-        Self {
-            quiet: output == Output::Json,
-            stderr: stdout_is_data || output == Output::Quiet,
-        }
-    }
-
-    pub fn line(&self, text: impl Display) {
-        if self.quiet {
-            return;
-        }
-        if self.stderr {
-            eprintln!("{text}");
-        } else {
-            println!("{text}");
-        }
     }
 }
 
@@ -652,7 +608,13 @@ impl SignedTxOutput {
     pub fn write_to(&self, dest: &str) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         if dest == "-" {
-            println!("{json}");
+            #[allow(
+                clippy::print_stdout,
+                reason = "`--raw-out -` asks for the signed transaction on stdout"
+            )]
+            {
+                println!("{json}");
+            }
             Ok(())
         } else {
             std::fs::write(dest, json + "\n")
@@ -747,16 +709,6 @@ pub fn calls_summary(calls: &[safe_rs::Call]) -> String {
         let _ = write!(s, "\n     Data: {} bytes", call.data.len());
     }
     s
-}
-
-pub fn confirm_prompt(message: &str) -> bool {
-    use dialoguer::Confirm;
-
-    Confirm::new()
-        .with_prompt(message)
-        .default(false)
-        .interact()
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

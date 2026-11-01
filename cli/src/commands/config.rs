@@ -12,12 +12,13 @@ use crate::cli::{ConfigArgs, SendOpts};
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::http_provider;
 use crate::commands::send::{self, ExecHooks, Target};
-use crate::output::{Console, Output};
-use crate::wallet::create_signer;
+use crate::console::Console;
+use crate::signers::create_signer;
 
-pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
+/// `safe config`.
+pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
     #[cfg(feature = "hd-wallet")]
-    if args.hd.is_set() && !args.wallet.is_set() {
+    if args.hd.is_set() && !args.signer.is_set() {
         bail!(
             "safe config does not rotate owner keys: signing with --hd-wallet or --ledger would \
              publish an owner key and leave it in charge of the Safe. Sign with --private-key, \
@@ -36,8 +37,8 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
         fallback_handler: args.fallback_handler,
         module_guard: args.module_guard,
     };
-    let signer = if args.wallet.is_set() {
-        Some(create_signer(&args.wallet, &args.password)?)
+    let signer = if args.signer.is_set() {
+        Some(create_signer(&args.signer, &args.password, console)?)
     } else {
         None
     };
@@ -57,21 +58,19 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
             rpc_url: args.rpc.rpc_url.clone(),
             safe: args.safe.safe,
             signer,
+            #[cfg(feature = "hd-wallet")]
+            home: None,
         };
         send::execute(
             target,
             send_opts(args),
             Vec::new(),
             ExecHooks::default(),
-            Output::from_json(json),
+            console,
         )
         .await?;
         return Ok(());
     }
-
-    let raw_to_stdout =
-        args.raw_out.as_deref() == Some("-") || (args.no_submit && args.raw_out.is_none());
-    let console = Console::new(json, raw_to_stdout);
 
     let provider = http_provider(&args.rpc.rpc_url);
     let safe = safe_or_default(
@@ -79,6 +78,7 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
         args.safe.safe,
         signer.as_ref(),
         BlockId::latest(),
+        console,
     )
     .await?;
     let state = read_safe_state(
@@ -94,8 +94,8 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
         let leaving = plan.before.owners.contains(&signer.address())
             && !plan.after.owners.contains(&signer.address());
         if leaving {
-            console.line(format!(
-                "WARNING: this removes the signer {} as an owner",
+            console.warn(format!(
+                "this removes the signer {} as an owner",
                 signer.address()
             ));
         }
@@ -106,8 +106,8 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
         _ => false,
     });
     if new_guard && args.allow_unchecked_guard {
-        console.line(
-            "WARNING: --allow-unchecked-guard: a new guard that rejects every transaction \
+        console.warn(
+            "--allow-unchecked-guard: a new guard that rejects every transaction \
              would lock the Safe for good",
         );
     } else if new_guard && args.skip_simulation {
@@ -139,13 +139,15 @@ pub async fn run(args: ConfigArgs, json: bool) -> Result<()> {
         rpc_url: args.rpc.rpc_url.clone(),
         safe: Some(safe),
         signer,
+        #[cfg(feature = "hd-wallet")]
+        home: None,
     };
     send::execute(
         target,
         send_opts(args),
         plan.calls(),
         hooks,
-        Output::from_json(json),
+        console,
     )
     .await?;
     Ok(())

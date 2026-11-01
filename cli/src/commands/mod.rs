@@ -13,15 +13,13 @@ pub mod approvals;
 pub mod call;
 pub mod config;
 pub mod create;
-mod default_safe;
+pub(crate) mod default_safe;
 pub mod info;
 #[cfg(feature = "hd-wallet")]
 pub mod rotate;
 #[cfg(feature = "hd-wallet")]
 pub mod rotation;
 pub mod send;
-#[cfg(feature = "hd-wallet")]
-pub mod wallet;
 
 /// Read-only provider used by every command.
 pub type HttpProvider = DynProvider<AnyNetwork>;

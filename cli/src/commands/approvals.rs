@@ -9,10 +9,11 @@ use crate::bundle::BundleFile;
 use crate::cli::ApprovalsArgs;
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::http_provider;
-use crate::output::{Report, SafeApprovalsOutput};
-use crate::wallet::create_signer;
+use crate::output::SafeApprovalsOutput;
+use crate::console::Console;
+use crate::signers::create_signer;
 
-pub async fn run(args: ApprovalsArgs, json: bool) -> Result<()> {
+pub async fn run(args: ApprovalsArgs, console: &Console) -> Result<()> {
     let bundle = args.bundle.as_deref().map(BundleFile::load).transpose()?;
     let tx = bundle
         .as_ref()
@@ -37,8 +38,8 @@ pub async fn run(args: ApprovalsArgs, json: bool) -> Result<()> {
     let explicit_safe = args.safe.safe.or(tx.as_ref().map(|tx| tx.safe));
     // The signer only picks the default Safe, so a keystore is not unlocked
     // when the Safe is already known.
-    let signer = if explicit_safe.is_none() && args.wallet.is_set() {
-        Some(create_signer(&args.wallet, &args.password)?)
+    let signer = if explicit_safe.is_none() && args.signer.is_set() {
+        Some(create_signer(&args.signer, &args.password, console)?)
     } else {
         None
     };
@@ -46,7 +47,7 @@ pub async fn run(args: ApprovalsArgs, json: bool) -> Result<()> {
     // Resolve the block to a hash first so every read sees the same state.
     let header = ParentHeader::fetch(&provider, args.block.unwrap_or(BlockId::latest())).await?;
     let block = header.block_id();
-    let safe = safe_or_default(&provider, explicit_safe, signer.as_ref(), block).await?;
+    let safe = safe_or_default(&provider, explicit_safe, signer.as_ref(), block, console).await?;
     if let Some(tx) = &tx {
         if tx.safe != safe {
             bail!("Bundle was prepared for Safe {}, not {safe}", tx.safe);
@@ -79,7 +80,7 @@ pub async fn run(args: ApprovalsArgs, json: bool) -> Result<()> {
         .map(|(&owner, _)| owner)
         .collect();
 
-    SafeApprovalsOutput::new(
+    console.emit(&SafeApprovalsOutput::new(
         &state,
         safe_tx_hash,
         approved_onchain,
@@ -87,7 +88,6 @@ pub async fn run(args: ApprovalsArgs, json: bool) -> Result<()> {
         tx.map(|tx| tx.nonce),
         header.number,
         header.hash,
-    )
-    .print(json);
+    ));
     Ok(())
 }
