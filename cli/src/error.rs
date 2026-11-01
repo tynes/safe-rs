@@ -39,6 +39,14 @@ pub enum OptionsError {
          an owner key and leave it in charge of the Safe"
     )]
     HdWithoutRotate,
+    /// An option that only applies to a send through a Safe, given for an EOA
+    /// send
+    #[error("{flag} only applies to a send through a Safe, not from an EOA")]
+    SafeOnly { flag: &'static str },
+    /// `--gas-limit` for an EOA send of more than one call, which is more than
+    /// one transaction
+    #[error("--gas-limit applies to one transaction, but an EOA sends each of the {calls} calls as its own")]
+    GasLimitForBatch { calls: usize },
 }
 
 /// Why a send failed.
@@ -132,6 +140,22 @@ pub enum SendError {
         /// Its HD wallet index, when the wallet derives it
         old_owner_index: Option<u32>,
     },
+    /// An EOA transaction was mined and reverted
+    #[error("transaction {tx_hash} (call {index}) reverted")]
+    EoaTxReverted { tx_hash: B256, index: usize },
+    /// An EOA send stopped part way: the transactions in `mined` are on chain,
+    /// the one at `failed_index` failed and the rest were not sent
+    #[error(
+        "the EOA send stopped at call {failed_index} after {} transaction(s) were mined ({}): {source}",
+        mined.len(),
+        tx_list(mined)
+    )]
+    EoaBatchFailed {
+        mined: Vec<B256>,
+        failed_index: usize,
+        #[source]
+        source: Box<SendError>,
+    },
     /// An error from the Safe library, such as the signer not being an owner
     /// or a nonce mismatch
     #[error(transparent)]
@@ -149,6 +173,9 @@ impl SendError {
     /// Whether a transaction may have been broadcast and still be mined, so a
     /// retry could send it twice.
     pub fn may_be_pending(&self) -> bool {
+        if let Self::EoaBatchFailed { source, .. } = self {
+            return source.may_be_pending();
+        }
         matches!(
             self,
             Self::BroadcastAmbiguous { .. }
@@ -162,6 +189,15 @@ impl SendError {
     pub(crate) fn other(message: impl fmt::Display) -> Self {
         Self::Other(message.to_string().into())
     }
+}
+
+/// Transaction hashes, comma separated.
+fn tx_list(hashes: &[B256]) -> String {
+    hashes
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// An owner key as the rotation output names it.
@@ -205,6 +241,14 @@ mod tests {
                 tx_hash,
                 reason: "no receipt".into(),
             }),
+            SendError::EoaBatchFailed {
+                mined: vec![B256::repeat_byte(2)],
+                failed_index: 1,
+                source: Box::new(SendError::ReceiptTimeout {
+                    tx_hash,
+                    timeout_secs: 60,
+                }),
+            },
         ];
         for error in pending {
             assert!(error.may_be_pending(), "{error:?}");
@@ -221,6 +265,11 @@ mod tests {
                 class: RejectClass::NonceTooLow,
             },
             SendError::Safe(safe_rs::Error::NoCalls),
+            SendError::EoaBatchFailed {
+                mined: vec![B256::repeat_byte(2)],
+                failed_index: 1,
+                source: Box::new(SendError::EoaTxReverted { tx_hash, index: 1 }),
+            },
         ];
         for error in settled {
             assert!(!error.may_be_pending(), "{error:?}");

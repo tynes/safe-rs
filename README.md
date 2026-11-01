@@ -859,6 +859,9 @@ async fn main() -> color_eyre::Result<()> {
 | `HashApproved` | `--approve-hash` |
 | `NotSubmitted` | `--no-submit`. Carries the raw signed transaction |
 | `Aborted` | The user declined the confirmation prompt |
+| `EoaExecuted` | Every call of an EOA send was mined and succeeded. Carries each transaction's `tx_hash`, `gas_used` and `block` |
+| `EoaSimulated` | `--simulate-only` for an EOA send |
+| `EoaAborted` | The user declined the confirmation prompt of an EOA send |
 
 The enum derives `Serialize` (tagged by `outcome`), so it can go into your own JSON output.
 
@@ -873,6 +876,8 @@ The enum derives `Serialize` (tagged by `outcome`), so it can go into your own J
 | `Rejected` | The node refused the signed transaction. Carries the node's reason and its `RejectClass` |
 | `BroadcastAmbiguous`, `ReceiptTimeout`, `RotationUnconfirmed` | The transaction may still be mined. `SendError::may_be_pending()` is true for these |
 | `ApproveHashReverted`, `SafeTxFailed`, `NotRotated` | The transaction was mined and did not succeed |
+| `EoaTxReverted` | A transaction of an EOA send was mined and reverted |
+| `EoaBatchFailed` | An EOA send stopped part way. Carries the hashes already mined, the index of the call that failed and its error |
 | `Safe` | An error from safe-rs, such as `NotOwner` or `NonceMismatch` |
 | `Rpc` | An RPC request failed |
 
@@ -883,11 +888,13 @@ Everything else, such as a bundle file that does not parse, is `Other`. The enum
 - `Output::Json` prints `safe send --json`'s document on stdout and never prompts.
 - `Output::Quiet` sends progress and the confirmation prompt to stderr, prints no result, and leaves stdout to your CLI.
 
+**Sending from an EOA.** `SendContext::eoa(rpc_url).with_signer(key)` sends the calls from the key's own account instead of a Safe, so an app can offer both with one code path. Each call becomes its own transaction. They are simulated together in order first, and nothing is sent unless all of them pass. After one confirmation they are broadcast one at a time, each after the one before it is mined. Simulation, `--trace`, `--block`, `--spec`, the fee flags, `--timeout` and `--no-confirm` work as for a Safe. `--gas-limit` works when there is a single call. Options only a Safe has, such as `--bundle`, `--nonce`, `--no-submit`, `--rotate` and `--payer-private-key`, fail with `OptionsError::SafeOnly`. An EOA send is not atomic: if one transaction fails after others were mined, `SendError::EoaBatchFailed` lists the ones on chain.
+
 **Building `SendOpts` in code.** `SendOpts::default()` matches the flag defaults. `send` checks options built in code for the same conflicts clap enforces on the flags, such as `--rotate` with `--nonce`.
 
 **Other notes:**
 - Use `safe_rs_cli::safe_rs` to build the calls, and `safe_rs_cli::PrivateKeySigner` and `safe_rs_cli::Url` for the context. They come from the same versions the CLI uses.
-- Always name the Safe. Without `--safe`, `safe send` falls back to the signer's default Safe, which is wrong for a Safe from another factory, so `SendContext` requires one.
+- Always name the Safe for a Safe send. Without `--safe`, `safe send` falls back to the signer's default Safe, which is wrong for a Safe from another factory, so `SendContext` requires one.
 - With `--rotate`, the owner key comes from `--hd-wallet` or `--ledger`, so the context carries no signer.
 - The `safe` CLI's own `--rpc-url`, `--safe` and wallet flags are in `safe_rs_cli::args` as `RpcArgs`, `SafeArgs` and `WalletArgs`, for a CLI that wants those too. `safe_rs_cli::Commands` with `safe_rs_cli::run(command, json)` embeds the whole `safe` command tree as a subcommand.
 - `SendOpts` takes these flag names, so your command can't define them too:

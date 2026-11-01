@@ -113,7 +113,9 @@ pub use envelope::{
     batch_params, decode_exec_calldata, recover_signer, BatchTarget, DecodedExecTransaction,
     PreparedSafeTx, SafeTxGasPolicy, SignedSafeTx,
 };
-pub use eoa::{Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
+pub use eoa::{check_eoa_calls, Eoa, EoaBatchResult, EoaBuilder, EoaTxResult};
+#[cfg(feature = "simulation")]
+pub use eoa::{simulate_eoa_calls, EoaTxSimulation};
 pub use error::{Error, Result};
 #[cfg(feature = "simulation")]
 pub use exec::{
