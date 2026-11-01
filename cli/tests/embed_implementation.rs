@@ -158,3 +158,103 @@ async fn a_host_implementation_is_refused_with_an_hd_wallet() {
         "{error:?}"
     );
 }
+
+/// A host policy sees every Safe transaction's result before it is signed:
+/// `FixedOwners` lets a plain call through and stops an owner change.
+#[tokio::test]
+async fn a_policy_refuses_owner_changes_found_in_simulation() {
+    use alloy::sol_types::SolCall as _;
+    use safe_rs_cli::args::SendOpts;
+    use safe_rs_cli::policy::FixedOwners;
+    use safe_rs_cli::safe_rs::{Bytes, Call, ISafe};
+    use safe_rs_cli::{SendContext, SendError, SendOutcome};
+
+    let h = LocalHarness::new().await;
+    let safe = h.deploy_safe(77).await;
+    let ctx = || {
+        SendContext::new(h.url(), safe)
+            .with_signer(h.owner.clone())
+            .with_prompt(NoPrompt)
+            .with_policy(FixedOwners)
+    };
+    let opts = || {
+        let mut opts = SendOpts::default();
+        opts.simulate.simulate_only = true;
+        opts
+    };
+
+    let plain = vec![Call::new(
+        Address::repeat_byte(0x42),
+        U256::ZERO,
+        Bytes::new(),
+    )];
+    let outcome = safe_rs_cli::send(ctx(), plain, opts()).await.unwrap();
+    assert!(
+        matches!(outcome, SendOutcome::Simulated { .. }),
+        "{outcome:?}"
+    );
+
+    let add_owner = ISafe::addOwnerWithThresholdCall {
+        owner: Address::repeat_byte(0x43),
+        _threshold: U256::from(1),
+    };
+    let calls = vec![Call::new(
+        safe,
+        U256::ZERO,
+        Bytes::from(add_owner.abi_encode()),
+    )];
+    let error = safe_rs_cli::send(ctx(), calls, opts()).await.unwrap_err();
+    assert!(
+        matches!(&error, SendError::PolicyRefused { reason, .. } if reason.contains("owners")),
+        "{error:?}"
+    );
+
+    let mut unchecked = opts();
+    unchecked.simulate.simulate_only = false;
+    unchecked.skip_simulation = true;
+    unchecked.no_confirm = true;
+    let plain = vec![Call::new(
+        Address::repeat_byte(0x42),
+        U256::ZERO,
+        Bytes::new(),
+    )];
+    let error = safe_rs_cli::send(ctx(), plain, unchecked)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, SendError::PolicyRefused { .. }),
+        "{error:?}"
+    );
+}
+
+/// `--rotate` is refused by a policy that keeps the owner, before any request.
+#[cfg(feature = "hd-wallet")]
+#[tokio::test]
+async fn a_policy_that_keeps_the_owner_refuses_rotation() {
+    use safe_rs_cli::args::SendOpts;
+    use safe_rs_cli::policy::FixedOwners;
+    use safe_rs_cli::safe_rs::{Bytes, Call};
+    use safe_rs_cli::{SendContext, SendError};
+
+    let ctx = SendContext::new(
+        "http://127.0.0.1:9".parse().unwrap(),
+        Address::repeat_byte(0x11),
+    )
+    .with_prompt(NoPrompt)
+    .with_policy(FixedOwners);
+    let mut opts = SendOpts {
+        rotate: true,
+        ..SendOpts::default()
+    };
+    opts.hd.hd_wallet = Some("demo".into());
+    let calls = vec![Call::new(
+        Address::repeat_byte(0x42),
+        U256::ZERO,
+        Bytes::new(),
+    )];
+    let error = safe_rs_cli::send(ctx, calls, opts).await.unwrap_err();
+    assert!(
+        matches!(&error, SendError::PolicyRefused { reason, .. } if reason.contains("--rotate")),
+        "{error:?}"
+    );
+}

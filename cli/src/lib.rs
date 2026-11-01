@@ -87,6 +87,7 @@ mod output;
     allow(dead_code, reason = "the wallet paths are only used with hd-wallet")
 )]
 mod paths;
+pub mod policy;
 pub mod prompt;
 mod sig_parser;
 mod signers;
@@ -163,6 +164,8 @@ pub struct RunConfig {
     /// Print the result as JSON instead of text. Never asks for
     /// confirmation, as `--no-confirm`.
     pub json: bool,
+    /// What every Safe transaction is held to (default: nothing)
+    pub policy: Option<Arc<dyn policy::SafePolicy>>,
 }
 
 impl RunConfig {
@@ -175,11 +178,20 @@ impl RunConfig {
             // The logger already showed what a confirmation is about.
             prompt: Arc::new(TerminalPrompt::new().hide_details()),
             json,
+            policy: None,
         }
     }
 
+    /// Holds every Safe transaction to `policy`, and refuses owner key
+    /// rotation unless it allows it.
+    #[must_use]
+    pub fn with_policy(mut self, policy: impl policy::SafePolicy + 'static) -> Self {
+        self.policy = Some(Arc::new(policy));
+        self
+    }
+
     pub(crate) fn console(&self) -> Console {
-        Console::new(self.logger.clone(), self.prompt.clone())
+        Console::new(self.logger.clone(), self.prompt.clone()).with_policy(self.policy.clone())
     }
 }
 
@@ -205,7 +217,14 @@ pub async fn run(command: Commands, config: RunConfig) -> Result<()> {
         #[cfg(feature = "hd-wallet")]
         Commands::Rotate(mut args) => {
             args.no_confirm |= json;
-            commands::rotate::run(*args, &console).await
+            match console.policy().filter(|p| !p.allows_rotation()) {
+                Some(policy) => Err(SendError::PolicyRefused {
+                    policy: policy.name().to_string(),
+                    reason: "it does not allow rotating the Safe's owner".to_string(),
+                }
+                .into()),
+                None => commands::rotate::run(*args, &console).await,
+            }
         }
         #[cfg(feature = "hd-wallet")]
         Commands::Wallet(args) => run_wallet(args, &console).await,

@@ -10,6 +10,7 @@ use zeroize::Zeroizing;
 
 use crate::log::{Level, Logger, NoopLogger};
 use crate::output::Report;
+use crate::policy::SafePolicy;
 use crate::prompt::{Prompt, TerminalPrompt};
 
 /// What a command logs to, asks, and (under [`run`](crate::run)) reports to.
@@ -18,6 +19,7 @@ pub(crate) struct Console {
     logger: Arc<dyn Logger>,
     prompt: Arc<dyn Prompt>,
     reports: Option<Arc<Reports>>,
+    policy: Option<Arc<dyn SafePolicy>>,
 }
 
 impl Default for Console {
@@ -32,7 +34,18 @@ impl Console {
             logger,
             prompt,
             reports: None,
+            policy: None,
         }
+    }
+
+    /// Holds every Safe transaction to `policy`.
+    pub fn with_policy(mut self, policy: Option<Arc<dyn SafePolicy>>) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn policy(&self) -> Option<&Arc<dyn SafePolicy>> {
+        self.policy.as_ref()
     }
 
     /// Collects result documents for [`Reports::print`].

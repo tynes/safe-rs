@@ -37,6 +37,7 @@ use crate::output::{
     Report, SignedTxOutput, SimulationOutput,
 };
 pub use crate::output::{EoaTx, SendOutcome};
+use crate::policy::{SafePolicy, SafeSnapshot};
 use crate::prompt::{Prompt, TerminalPrompt};
 use crate::sig_parser::{encode_function_call, parse_call_spec};
 #[cfg(feature = "hd-wallet")]
@@ -88,6 +89,8 @@ pub struct SendContext {
     /// `$SAFE_RS_HOME` or `~/.safe-rs`)
     #[cfg(feature = "hd-wallet")]
     pub home: Option<PathBuf>,
+    /// What the Safe transaction is held to (default: nothing)
+    pub policy: Option<Arc<dyn SafePolicy>>,
 }
 
 impl SendContext {
@@ -102,6 +105,7 @@ impl SendContext {
             prompt: Arc::new(TerminalPrompt::new()),
             #[cfg(feature = "hd-wallet")]
             home: None,
+            policy: None,
         }
     }
 
@@ -121,6 +125,7 @@ impl SendContext {
             prompt: Arc::new(TerminalPrompt::new()),
             #[cfg(feature = "hd-wallet")]
             home: None,
+            policy: None,
         }
     }
 
@@ -152,8 +157,16 @@ impl SendContext {
         self
     }
 
+    /// Holds the Safe transaction to `policy`: it must be simulated, the
+    /// policy checks the Safe before and after, and `--rotate` is refused
+    /// unless the policy allows it.
+    pub fn with_policy(mut self, policy: impl SafePolicy + 'static) -> Self {
+        self.policy = Some(Arc::new(policy));
+        self
+    }
+
     fn console(&self) -> Console {
-        Console::new(self.logger.clone(), self.prompt.clone())
+        Console::new(self.logger.clone(), self.prompt.clone()).with_policy(self.policy.clone())
     }
 }
 
@@ -495,6 +508,12 @@ async fn dispatch(
 ) -> Result<SendOutcome> {
     #[cfg(feature = "hd-wallet")]
     if opts.rotate {
+        if let Some(policy) = console.policy().filter(|p| !p.allows_rotation()) {
+            return Err(SendError::PolicyRefused {
+                policy: policy.name().to_string(),
+                reason: "it does not allow --rotate, which swaps the Safe's owner".to_string(),
+            });
+        }
         return Box::pin(run_rotating(target, calls, opts, console)).await;
     }
     execute(target, opts, calls, ExecHooks::default(), console).await
@@ -521,6 +540,13 @@ pub async fn execute(
     hooks: ExecHooks<'_>,
     console: &Console,
 ) -> Result<SendOutcome> {
+    if let (Some(policy), true) = (console.policy(), args.skip_simulation) {
+        return Err(SendError::PolicyRefused {
+            policy: policy.name().to_string(),
+            reason: "--skip-simulation: the policy checks the simulated result".to_string(),
+        });
+    }
+
     // 1. Load/Build Calls & Existing Bundle State
     let bundle_existed = args.collect.bundle.as_ref().is_some_and(|p| p.exists());
     let mut bundle = if let Some(bundle_path) = &args.collect.bundle {
@@ -805,6 +831,16 @@ pub async fn execute(
         .await?;
         if let (Some(check), Some(post)) = (hooks.post_check, simulated.post.as_mut()) {
             check(post)?;
+        }
+        if let (Some(policy), Some(post)) = (console.policy(), simulated.post.as_mut()) {
+            let before = SafeSnapshot::from_state(&state);
+            let after = SafeSnapshot::read(post, safe_address)?;
+            policy
+                .check(&before, &after)
+                .map_err(|reason| SendError::PolicyRefused {
+                    policy: policy.name().to_string(),
+                    reason,
+                })?;
         }
         let result = &simulated.result;
         let report = SimulationOutput {

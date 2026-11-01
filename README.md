@@ -944,6 +944,13 @@ Everything else, such as a bundle file that does not parse, is `Other`. The enum
 - `SendOpts` also reads three environment variables: `SAFE_HD_WALLET`, `SAFE_PASSWORD_FILE` and `SAFE_PAYER_PRIVATE_KEY`.
 - To catch a flag-name clash, parse a sample command line in a test. `Command::debug_assert()` alone misses a clash between a global flag and one of these, and clap panics at parse time instead.
 
+**Holding Safes to a shape.** A host whose Safes must stay as they are (for example, because an off-chain service only accepts a Safe still owned by the key it was created for) sets a `policy::SafePolicy` with `SendContext::with_policy` or `RunConfig::with_policy`. With a policy set:
+- every Safe transaction is simulated, and `--skip-simulation` fails with `SendError::PolicyRefused`;
+- the policy's `check` sees the Safe's owners, threshold and implementation before and after the simulated transaction, and an `Err` stops the send before anything is signed;
+- `--rotate` and `safe rotate` fail unless `allows_rotation()` is true.
+
+`policy::FixedOwners` refuses any change to the owners, the threshold or the implementation, and refuses rotation.
+
 ## Reusing `safe create` and `safe wallet` in your own CLI
 
 The same pattern covers deploying Safes and managing HD wallets:
