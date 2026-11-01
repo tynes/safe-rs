@@ -1,5 +1,6 @@
-//! Errors of the library API: [`send`](crate::send) and
-//! [`SendOpts::validate`](crate::args::SendOpts::validate).
+//! Errors of the library API: [`send`](crate::send) and the checks on
+//! [`SendOpts`](crate::args::SendOpts) (`validate`, `validate_safe` and
+//! `validate_eoa`).
 //!
 //! The `safe` binary and its other commands report errors with `eyre`; a
 //! [`SendError`] converts into an `eyre::Report` with `?`.

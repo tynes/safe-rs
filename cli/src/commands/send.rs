@@ -27,7 +27,9 @@ use crate::commands::default_safe::safe_or_default;
 #[cfg(feature = "hd-wallet")]
 use crate::commands::rotation::{self, RotationRun};
 use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
-use crate::error::{OptionsError, SendError};
+#[cfg(feature = "hd-wallet")]
+use crate::error::OptionsError;
+use crate::error::SendError;
 use crate::output::{
     calls_summary, confirm_prompt, emit, ApproveHashOutput, BundleSavedOutput, Console,
     EoaExecutionOutput, ExecutionOutput, Report, SignedTxOutput, SimulationOutput,
@@ -137,16 +139,17 @@ pub struct Target {
 
 pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
     let calls = build_cli_calls(&args)?;
+    // Checked before any key or password prompt.
+    let checked = args.opts.validate_safe(args.wallet.is_set());
     #[cfg(feature = "hd-wallet")]
-    if args.opts.rotate && args.wallet.is_set() {
+    if checked == Err(OptionsError::RotateWithSigner) {
         eyre::bail!(
             "with --rotate the owner key comes from --hd-wallet or --ledger: remove --private-key, \
              --keystore and --interactive, and unset PRIVATE_KEY"
         );
     }
-    // Checked before any key or password prompt.
-    check(&args.opts, args.wallet.is_set())?;
-    if calls.is_empty() && args.opts.bundle.is_none() && !rotating(&args.opts) {
+    checked?;
+    if calls.is_empty() && args.opts.bundle.is_none() && !args.opts.rotates() {
         eyre::bail!("Target address required for single call mode");
     }
     let signer = if args.wallet.is_set() {
@@ -177,11 +180,7 @@ pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
 pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<SendOutcome> {
     match ctx.sender {
         Sender::Safe(safe) => {
-            #[cfg(feature = "hd-wallet")]
-            if opts.rotate && ctx.signer.is_some() {
-                return Err(OptionsError::RotateWithSigner.into());
-            }
-            check(&opts, ctx.signer.is_some())?;
+            opts.validate_safe(ctx.signer.is_some())?;
             let target = Target {
                 rpc_url: ctx.rpc_url,
                 safe: Some(safe),
@@ -190,54 +189,11 @@ pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<
             dispatch(target, calls, opts, ctx.output).await
         }
         Sender::Eoa => {
-            check_eoa(&opts, calls.len())?;
+            opts.validate_eoa(calls.len())?;
             let signer = ctx.signer.ok_or(SendError::NoSigner)?;
             execute_eoa(&ctx.rpc_url, &signer, calls, &opts, ctx.output).await
         }
     }
-}
-
-/// The checks a send from an EOA runs before it touches a key or the chain:
-/// the options that only make sense for a Safe are refused.
-fn check_eoa(opts: &SendOpts, calls: usize) -> Result<(), OptionsError> {
-    opts.validate()?;
-    let safe_only = [
-        (opts.bundle.is_some(), "--bundle"),
-        (!opts.merge_bundle.is_empty(), "--merge-bundle"),
-        (opts.approve_hash, "--approve-hash"),
-        (opts.sign_only, "--sign-only"),
-        (opts.call_only, "--call-only"),
-        (opts.safe_tx_gas.is_some(), "--safe-tx-gas"),
-        (opts.nonce.is_some(), "--nonce"),
-        (opts.raw_out.is_some(), "--raw-out"),
-        (opts.no_submit, "--no-submit"),
-        (opts.multi_send.is_some(), "--multi-send"),
-        (
-            opts.multi_send_call_only.is_some(),
-            "--multi-send-call-only",
-        ),
-        (
-            opts.payer.payer_private_key.is_some(),
-            "--payer-private-key",
-        ),
-    ];
-    #[cfg(feature = "hd-wallet")]
-    let rotation = [
-        (opts.rotate, "--rotate"),
-        (opts.hd.hd_wallet.is_some(), "--hd-wallet"),
-        (opts.hd.ledger, "--ledger"),
-        (opts.sweep.no_sweep, "--no-sweep"),
-        (opts.sweep.sweep_reserve.is_some(), "--sweep-reserve"),
-    ];
-    #[cfg(not(feature = "hd-wallet"))]
-    let rotation: [(bool, &str); 0] = [];
-    if let Some((_, flag)) = safe_only.into_iter().chain(rotation).find(|(set, _)| *set) {
-        return Err(OptionsError::SafeOnly { flag });
-    }
-    if opts.gas_limit.is_some() && calls > 1 {
-        return Err(OptionsError::GasLimitForBatch { calls });
-    }
-    Ok(())
 }
 
 /// Sends `calls` from `signer`'s own account, one transaction per call.
@@ -460,39 +416,6 @@ async fn send_eoa_tx(
         gas_used: receipt.gas_used,
         block: receipt.block_number(),
     })
-}
-
-/// Whether `--rotate` was given; never without the `hd-wallet` feature.
-#[cfg(feature = "hd-wallet")]
-fn rotating(opts: &SendOpts) -> bool {
-    opts.rotate
-}
-
-#[cfg(not(feature = "hd-wallet"))]
-fn rotating(_opts: &SendOpts) -> bool {
-    false
-}
-
-/// The checks every send runs before it touches a key or the chain.
-#[cfg_attr(
-    not(feature = "hd-wallet"),
-    allow(unused_variables, reason = "only the rotation checks need the signer")
-)]
-fn check(opts: &SendOpts, has_signer: bool) -> Result<(), OptionsError> {
-    opts.validate()?;
-    #[cfg(feature = "hd-wallet")]
-    if opts.rotate {
-        return Ok(());
-    }
-    #[cfg(feature = "hd-wallet")]
-    if opts.sweep.no_sweep || opts.sweep.sweep_reserve.is_some() {
-        return Err(OptionsError::SweepWithoutRotate);
-    }
-    #[cfg(feature = "hd-wallet")]
-    if opts.hd.is_set() && !has_signer {
-        return Err(OptionsError::HdWithoutRotate);
-    }
-    Ok(())
 }
 
 async fn dispatch(

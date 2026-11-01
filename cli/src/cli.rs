@@ -436,6 +436,103 @@ impl SendOpts {
             None => Ok(()),
         }
     }
+
+    /// Checks the options of a send through a Safe before any key or the
+    /// chain is touched: the conflicts of [`validate`](Self::validate), then
+    /// the rotation rules.
+    ///
+    /// `has_signer` is whether the caller brings the owner key (a host's
+    /// signer, or `--private-key`, `--keystore` or `--interactive`). With
+    /// `--rotate` the key comes from the HD wallet or Ledger instead.
+    #[cfg_attr(
+        not(feature = "hd-wallet"),
+        allow(unused_variables, reason = "only the rotation rules need the signer")
+    )]
+    pub fn validate_safe(&self, has_signer: bool) -> Result<(), OptionsError> {
+        self.validate()?;
+        #[cfg(feature = "hd-wallet")]
+        if self.rotate {
+            return if has_signer {
+                Err(OptionsError::RotateWithSigner)
+            } else {
+                Ok(())
+            };
+        }
+        #[cfg(feature = "hd-wallet")]
+        if self.sweep.no_sweep || self.sweep.sweep_reserve.is_some() {
+            return Err(OptionsError::SweepWithoutRotate);
+        }
+        #[cfg(feature = "hd-wallet")]
+        if self.hd.is_set() && !has_signer {
+            return Err(OptionsError::HdWithoutRotate);
+        }
+        Ok(())
+    }
+
+    /// Checks the options of a send of `calls` calls from an EOA before any
+    /// key or the chain is touched: the conflicts of
+    /// [`validate`](Self::validate), then the options only a Safe has.
+    pub fn validate_eoa(&self, calls: usize) -> Result<(), OptionsError> {
+        self.validate()?;
+        if let Some(flag) = self.safe_only_flag() {
+            return Err(OptionsError::SafeOnly { flag });
+        }
+        if self.gas_limit.is_some() && calls > 1 {
+            return Err(OptionsError::GasLimitForBatch { calls });
+        }
+        Ok(())
+    }
+
+    /// The first option given that only a send through a Safe uses.
+    fn safe_only_flag(&self) -> Option<&'static str> {
+        let safe_only = [
+            (self.bundle.is_some(), "--bundle"),
+            (!self.merge_bundle.is_empty(), "--merge-bundle"),
+            (self.approve_hash, "--approve-hash"),
+            (self.sign_only, "--sign-only"),
+            (self.call_only, "--call-only"),
+            (self.safe_tx_gas.is_some(), "--safe-tx-gas"),
+            (self.nonce.is_some(), "--nonce"),
+            (self.raw_out.is_some(), "--raw-out"),
+            (self.no_submit, "--no-submit"),
+            (self.multi_send.is_some(), "--multi-send"),
+            (
+                self.multi_send_call_only.is_some(),
+                "--multi-send-call-only",
+            ),
+            (
+                self.payer.payer_private_key.is_some(),
+                "--payer-private-key",
+            ),
+        ];
+        #[cfg(feature = "hd-wallet")]
+        let rotation = [
+            (self.rotate, "--rotate"),
+            (self.hd.hd_wallet.is_some(), "--hd-wallet"),
+            (self.hd.ledger, "--ledger"),
+            (self.sweep.no_sweep, "--no-sweep"),
+            (self.sweep.sweep_reserve.is_some(), "--sweep-reserve"),
+        ];
+        #[cfg(not(feature = "hd-wallet"))]
+        let rotation: [(bool, &str); 0] = [];
+        safe_only
+            .into_iter()
+            .chain(rotation)
+            .find_map(|(set, flag)| set.then_some(flag))
+    }
+
+    /// Whether the send rotates the owner key (`--rotate`).
+    #[cfg(feature = "hd-wallet")]
+    pub fn rotates(&self) -> bool {
+        self.rotate
+    }
+
+    /// Whether the send rotates the owner key: never without the
+    /// `hd-wallet` feature.
+    #[cfg(not(feature = "hd-wallet"))]
+    pub fn rotates(&self) -> bool {
+        false
+    }
 }
 
 /// Parses an owner swap, `OLD:NEW`.
@@ -1448,5 +1545,76 @@ mod tests {
         }
         assert!(parse(&["wallet", "list"]).is_err());
         assert!(parse(&["rotate", SAFE, "--rpc-url", "http://localhost:8545"]).is_err());
+    }
+
+    #[test]
+    fn an_eoa_send_refuses_what_only_a_safe_does() {
+        let opts = SendOpts::default();
+        assert_eq!(opts.validate_eoa(3), Ok(()));
+        let with_nonce = SendOpts {
+            nonce: Some(U256::from(1)),
+            ..SendOpts::default()
+        };
+        assert_eq!(
+            with_nonce.validate_eoa(1),
+            Err(OptionsError::SafeOnly { flag: "--nonce" })
+        );
+        assert_eq!(with_nonce.validate_safe(true), Ok(()));
+        let gas = SendOpts {
+            gas_limit: Some(21_000),
+            ..SendOpts::default()
+        };
+        assert_eq!(gas.validate_eoa(1), Ok(()));
+        assert_eq!(
+            gas.validate_eoa(2),
+            Err(OptionsError::GasLimitForBatch { calls: 2 })
+        );
+        // The flag conflicts come first, for either kind of send.
+        let conflicting = SendOpts {
+            simulate_only: true,
+            skip_simulation: true,
+            bundle: Some("tx.json".into()),
+            ..SendOpts::default()
+        };
+        let conflict = Err(OptionsError::Conflict {
+            flag: "--skip-simulation",
+            with: "--simulate-only",
+        });
+        assert_eq!(conflicting.validate_eoa(1), conflict);
+        assert_eq!(conflicting.validate_safe(true), conflict);
+    }
+
+    #[cfg(feature = "hd-wallet")]
+    #[test]
+    fn a_safe_send_applies_the_rotation_rules() {
+        let rotate = SendOpts {
+            rotate: true,
+            ..SendOpts::default()
+        };
+        assert!(rotate.rotates());
+        assert_eq!(rotate.validate_safe(false), Ok(()));
+        assert_eq!(
+            rotate.validate_safe(true),
+            Err(OptionsError::RotateWithSigner)
+        );
+        assert_eq!(
+            rotate.validate_eoa(1),
+            Err(OptionsError::SafeOnly { flag: "--rotate" })
+        );
+
+        let mut ledger = SendOpts::default();
+        ledger.hd.ledger = true;
+        assert!(!ledger.rotates());
+        assert_eq!(
+            ledger.validate_safe(false),
+            Err(OptionsError::HdWithoutRotate)
+        );
+
+        let mut no_sweep = SendOpts::default();
+        no_sweep.sweep.no_sweep = true;
+        assert_eq!(
+            no_sweep.validate_safe(true),
+            Err(OptionsError::SweepWithoutRotate)
+        );
     }
 }
