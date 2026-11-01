@@ -20,11 +20,12 @@ use crate::bundle::{BundleFile, BundleRotationSwap};
 use crate::cli::{SimArgs, SweepArgs};
 use crate::commands::send::{broadcast, receipt};
 use crate::commands::{http_provider, latest_sim_spec, outer_fees};
+use crate::console::Console;
 use crate::error::SendError;
 use crate::keys::CliKeys;
 use crate::output::{
-    confirm_prompt, emit, rotation_summary, ApproveHashOutput, BundleSavedOutput, Console, Output,
-    Report, RotationOutput, RotationPlanOutput, SendOutcome, SignedTxOutput, SimulationOutput,
+    rotation_summary, ApproveHashOutput, BundleSavedOutput, Report, RotationOutput,
+    RotationPlanOutput, SendOutcome, SignedTxOutput, SimulationOutput,
 };
 
 /// How often to poll for a receipt after broadcasting.
@@ -59,7 +60,7 @@ pub struct RotationRun<'a> {
     pub merge_bundle: Vec<PathBuf>,
     pub approve_hash: bool,
     pub sign_only: bool,
-    pub output: Output,
+    pub console: &'a Console,
 }
 
 /// The configuration shared by every command that opens a rotating Safe.
@@ -83,13 +84,6 @@ pub fn rotation_config(
     }
 }
 
-/// Prints warnings the library collected (to stderr, so JSON output stays clean).
-pub fn print_warnings(warnings: &[String]) {
-    for warning in warnings {
-        eprintln!("warning: {warning}");
-    }
-}
-
 /// The `--simulate-only` report: the simulation plus the owner swap it
 /// includes, so JSON consumers see everything the transaction would do.
 #[derive(serde::Serialize)]
@@ -106,9 +100,10 @@ impl Report for RotationSimulation {
 }
 
 pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
-    let output = run.output;
-    let json = output == Output::Json;
-    let prompts = !run.no_confirm && output.prompts() && !run.no_submit;
+    let console = run.console;
+    // `run` sets `no_confirm` for `--json`, so this is false whenever no one
+    // will be asked.
+    let prompts = !run.no_confirm && !run.no_submit;
     if run.legacy_owner.is_some() && !run.sweep.no_sweep && !run.sweep_legacy && !prompts {
         return Err(SendError::other(
             "moving a Safe onto the HD wallet also moves the whole ETH balance of the \
@@ -127,8 +122,10 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
     let raw_out = run
         .raw_out
         .clone()
-        .or_else(|| (run.no_submit && output != Output::Quiet).then(|| "-".to_string()));
-    let console = Console::for_output(output, raw_out.as_deref() == Some("-"));
+        .or_else(|| (run.no_submit && console.prints_results()).then(|| "-".to_string()));
+    if raw_out.as_deref() == Some("-") {
+        console.stdout_carries_data();
+    }
 
     let provider = http_provider(run.rpc_url);
     // Unless overridden, batches go through the MultiSendCallOnly of the
@@ -158,7 +155,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
 
     let mut rotating =
         RotatingSafe::with_keyring(provider.clone(), run.safe, run.ring, config).await?;
-    print_warnings(&rotating.take_warnings());
+    console.warnings(&rotating.take_warnings());
     if let (true, OwnerRef::Derived { index, .. }) = (onboarding, rotating.binding()?.current) {
         return Err(SendError::other(format!(
             "Safe {} is already owned by wallet key {index}; drop the --from-* option",
@@ -181,7 +178,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
             ));
         }
         for (from, error) in &report.failed {
-            eprintln!("warning: a sweep from {from} is still owed: {error}");
+            console.warn(format!("a sweep from {from} is still owed: {error}"));
         }
     }
 
@@ -226,7 +223,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
     let tx = match rotating.prepare(&run.calls, options).await {
         Ok(tx) => tx,
         Err(Error::SimulationReverted { reason }) => {
-            print_warnings(&rotating.take_warnings());
+            console.warnings(&rotating.take_warnings());
             let report = SimulationOutput {
                 success: false,
                 gas_used: 0,
@@ -235,21 +232,22 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
                 traces: None,
                 ..Default::default()
             };
-            emit(&report, output, console);
+            console.emit(&report);
             return Err(SendError::SimulationFailed { reason });
         }
         Err(e @ Error::MultiSendNotDeployed(_)) => {
-            print_warnings(&rotating.take_warnings());
+            console.warnings(&rotating.take_warnings());
             return Err(SendError::other(format!(
                 "{e}; pass the address it has on this chain with --multi-send-call-only"
             )));
         }
         Err(e) => return Err(e.into()),
     };
-    print_warnings(&rotating.take_warnings());
+    console.warnings(&rotating.take_warnings());
 
     let sweep_enabled = !run.sweep.no_sweep;
-    console.line(rotation_summary(&tx, &run.calls, sweep_enabled));
+    let mut details = rotation_summary(&tx, &run.calls, sweep_enabled);
+    console.line(&details);
     console.line("");
     let have = tx.signatures_collected;
     let need = tx.threshold;
@@ -268,7 +266,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
             simulation,
             rotation: RotationPlanOutput::new(&tx),
         };
-        emit(&report, output, console);
+        console.emit(&report);
         return Ok(SendOutcome::Simulated {
             safe_tx_hash: tx.plan.prepared.safe_tx_hash,
             gas_used: tx.simulation.gas_used,
@@ -304,7 +302,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
         };
         let prompt =
             format!("Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?");
-        if prompts && !confirm_prompt(&prompt) {
+        if prompts && !console.confirm(&prompt, &details) {
             console.line("Aborted");
             return Ok(SendOutcome::Aborted {
                 safe_tx_hash: tx.plan.prepared.safe_tx_hash,
@@ -315,21 +313,17 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
         console.line(format!("Sent {}, waiting for receipt...", tx.outer.tx_hash));
         let receipt = receipt(&provider, tx.outer.tx_hash, run.timeout).await?;
         let success = receipt.status();
-        emit(
-            &ApproveHashOutput {
-                tx_hash: tx.outer.tx_hash,
-                success,
-                gas_used: receipt.gas_used,
-                safe_tx_hash: tx.plan.prepared.safe_tx_hash,
-                safe_nonce: tx.plan.prepared.params.nonce,
-                approver: tx.from.address(),
-                signatures_collected: have,
-                threshold: need,
-                bundle_path: bundle_path_str,
-            },
-            output,
-            console,
-        );
+        console.emit(&ApproveHashOutput {
+            tx_hash: tx.outer.tx_hash,
+            success,
+            gas_used: receipt.gas_used,
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            safe_nonce: tx.plan.prepared.params.nonce,
+            approver: tx.from.address(),
+            signatures_collected: have,
+            threshold: need,
+            bundle_path: bundle_path_str,
+        });
         if !success {
             return Err(SendError::ApproveHashReverted {
                 tx_hash: tx.outer.tx_hash,
@@ -362,19 +356,15 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
             .copied()
             .filter(|o| !tx.signed.signatures.contains_key(o))
             .collect();
-        emit(
-            &BundleSavedOutput {
-                safe_tx_hash: tx.plan.prepared.safe_tx_hash,
-                safe_nonce: tx.plan.prepared.params.nonce,
-                signatures_collected: have,
-                threshold: need,
-                signers,
-                remaining_owners,
-                bundle_path: bundle_path.display().to_string(),
-            },
-            output,
-            console,
-        );
+        console.emit(&BundleSavedOutput {
+            safe_tx_hash: tx.plan.prepared.safe_tx_hash,
+            safe_nonce: tx.plan.prepared.params.nonce,
+            signatures_collected: have,
+            threshold: need,
+            signers,
+            remaining_owners,
+            bundle_path: bundle_path.display().to_string(),
+        });
         return Ok(SendOutcome::Signed {
             safe_tx_hash: tx.plan.prepared.safe_tx_hash,
             safe_nonce: tx.plan.prepared.params.nonce,
@@ -396,14 +386,16 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
 
     if onboarding && sweep_enabled {
         let balance = provider.get_balance(tx.from.address()).await?;
-        console.line(format!(
+        let note = format!(
             "The --from-* key {} holds {} ETH. All of it moves to the new owner {} after the rotation.",
             tx.from.address(),
             format_ether(balance),
             tx.to.address
-        ));
+        );
+        console.line(&note);
+        details.push_str(&format!("\n{note}"));
     }
-    if prompts && !confirm_prompt("Execute transaction and rotate the owner key?") {
+    if prompts && !console.confirm("Execute transaction and rotate the owner key?", &details) {
         console.line("Aborted");
         return Ok(SendOutcome::Aborted {
             safe_tx_hash: tx.plan.prepared.safe_tx_hash,
@@ -424,10 +416,10 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
         }
     }
     if run.no_submit {
-        if json && raw_out.as_deref() != Some("-") {
-            document.print(true);
-        } else if output == Output::Human {
-            console.line(document.human());
+        if raw_out.as_deref() == Some("-") {
+            console.emit_human(&document);
+        } else {
+            console.emit(&document);
         }
         console.line(format!(
             "Not broadcast. Key {} is now recorded as used: once this transaction is mined, \
@@ -469,11 +461,7 @@ pub async fn run(run: RotationRun<'_>) -> Result<SendOutcome, SendError> {
         gas_used: outcome.gas_used,
         block: None,
     };
-    emit(
-        &RotationOutput::new(plan, &outcome, owner, warnings),
-        output,
-        console,
-    );
+    console.emit(&RotationOutput::new(plan, &outcome, owner, warnings));
     match status {
         RotationStatus::Rotated => Ok(executed),
         RotationStatus::RotatedElsewhere => Err(SendError::RotatedElsewhere {

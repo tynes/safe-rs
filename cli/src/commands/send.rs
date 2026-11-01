@@ -27,18 +27,24 @@ use crate::commands::default_safe::safe_or_default;
 #[cfg(feature = "hd-wallet")]
 use crate::commands::rotation::{self, RotationRun};
 use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
+use crate::console::Console;
 #[cfg(feature = "hd-wallet")]
 use crate::error::OptionsError;
-use crate::error::SendError;
+use crate::error::{BroadcastError, SendError};
+use crate::log::{Logger, NoopLogger};
 use crate::output::{
-    calls_summary, confirm_prompt, emit, ApproveHashOutput, BundleSavedOutput, Console,
-    EoaExecutionOutput, ExecutionOutput, Report, SignedTxOutput, SimulationOutput,
+    calls_summary, ApproveHashOutput, BundleSavedOutput, EoaExecutionOutput, ExecutionOutput,
+    Report, SignedTxOutput, SimulationOutput,
 };
-pub use crate::output::{EoaTx, Output, SendOutcome};
+pub use crate::output::{EoaTx, SendOutcome};
+use crate::prompt::{Prompt, TerminalPrompt};
 use crate::sig_parser::{encode_function_call, parse_call_spec};
 #[cfg(feature = "hd-wallet")]
-use crate::wallet::open_wallet;
-use crate::wallet::{create_payer, create_signer};
+use crate::signers::open_wallet;
+use crate::signers::{create_payer, create_signer};
+#[cfg(feature = "hd-wallet")]
+use std::path::PathBuf;
+use std::sync::Arc;
 use url::Url;
 
 /// How often to poll for the receipt after broadcasting.
@@ -74,24 +80,33 @@ pub struct SendContext {
     ///
     /// For [`Sender::Eoa`], the account that sends and pays; required.
     pub signer: Option<PrivateKeySigner>,
-    /// What the send prints
-    pub output: Output,
+    /// Where progress and warnings go (default: nowhere)
+    pub logger: Arc<dyn Logger>,
+    /// What asks for confirmation and passwords (default: the terminal)
+    pub prompt: Arc<dyn Prompt>,
+    /// Where HD wallets and their state live, for `--rotate` (default:
+    /// `$SAFE_RS_HOME` or `~/.safe-rs`)
+    #[cfg(feature = "hd-wallet")]
+    pub home: Option<PathBuf>,
 }
 
 impl SendContext {
-    /// A send through `safe` over `rpc_url`, with no signer and
-    /// [`Output::Human`].
+    /// A send through `safe` over `rpc_url`, with no signer, a silent
+    /// [`NoopLogger`] and a [`TerminalPrompt`].
     pub fn new(rpc_url: Url, safe: Address) -> Self {
         Self {
             rpc_url,
             sender: Sender::Safe(safe),
             signer: None,
-            output: Output::Human,
+            logger: Arc::new(NoopLogger),
+            prompt: Arc::new(TerminalPrompt::new()),
+            #[cfg(feature = "hd-wallet")]
+            home: None,
         }
     }
 
     /// A send from the signer's own account over `rpc_url`, one transaction
-    /// per call, with [`Output::Human`]. Give it a signer with
+    /// per call, with the same defaults as [`new`](Self::new). Give it a signer with
     /// [`with_signer`](Self::with_signer).
     ///
     /// The options that only apply to a Safe (`--bundle`, `--nonce`,
@@ -102,7 +117,10 @@ impl SendContext {
             rpc_url,
             sender: Sender::Eoa,
             signer: None,
-            output: Output::Human,
+            logger: Arc::new(NoopLogger),
+            prompt: Arc::new(TerminalPrompt::new()),
+            #[cfg(feature = "hd-wallet")]
+            home: None,
         }
     }
 
@@ -111,9 +129,31 @@ impl SendContext {
         self
     }
 
-    pub fn with_output(mut self, output: Output) -> Self {
-        self.output = output;
+    /// Sends progress and warnings to `logger`. An `Arc<dyn Logger>` is a
+    /// logger too, so one can be shared between contexts.
+    pub fn with_logger(mut self, logger: impl Logger + 'static) -> Self {
+        self.logger = Arc::new(logger);
         self
+    }
+
+    /// Asks `prompt` for confirmations and secrets.
+    /// [`NoPrompt`](crate::prompt::NoPrompt) declines every confirmation:
+    /// set `no_confirm` on the options to send unattended.
+    pub fn with_prompt(mut self, prompt: impl Prompt + 'static) -> Self {
+        self.prompt = Arc::new(prompt);
+        self
+    }
+
+    /// Looks for HD wallets and their state under `home` instead of
+    /// `$SAFE_RS_HOME` or `~/.safe-rs`.
+    #[cfg(feature = "hd-wallet")]
+    pub fn with_home(mut self, home: PathBuf) -> Self {
+        self.home = Some(home);
+        self
+    }
+
+    fn console(&self) -> Console {
+        Console::new(self.logger.clone(), self.prompt.clone())
     }
 }
 
@@ -123,8 +163,7 @@ impl fmt::Debug for SendContext {
             .field("rpc_url", &self.rpc_url.as_str())
             .field("sender", &self.sender)
             .field("signer", &self.signer.as_ref().map(|s| s.address()))
-            .field("output", &self.output)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -135,15 +174,19 @@ pub struct Target {
     pub rpc_url: Url,
     pub safe: Option<Address>,
     pub signer: Option<PrivateKeySigner>,
+    /// The HD wallet directory, for `--rotate`
+    #[cfg(feature = "hd-wallet")]
+    pub home: Option<PathBuf>,
 }
 
-pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
+/// `safe send`.
+pub async fn run(args: SendArgs, console: &Console) -> eyre::Result<()> {
     let calls = build_cli_calls(&args)?;
     if args.send_eoa {
-        return run_eoa(args, calls, json).await;
+        return run_eoa(args, calls, console).await;
     }
     // Checked before any key or password prompt.
-    let checked = args.opts.validate_safe(args.wallet.is_set());
+    let checked = args.opts.validate_safe(args.signer.is_set());
     #[cfg(feature = "hd-wallet")]
     if checked == Err(OptionsError::RotateWithSigner) {
         eyre::bail!(
@@ -152,11 +195,11 @@ pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
         );
     }
     checked?;
-    if calls.is_empty() && args.opts.bundle.is_none() && !args.opts.rotates() {
+    if calls.is_empty() && args.opts.collect.bundle.is_none() && !args.opts.rotates() {
         eyre::bail!("Target address required for single call mode");
     }
-    let signer = if args.wallet.is_set() {
-        Some(create_signer(&args.wallet, &args.opts.password)?)
+    let signer = if args.signer.is_set() {
+        Some(create_signer(&args.signer, &args.opts.password, console)?)
     } else {
         None
     };
@@ -164,14 +207,16 @@ pub async fn run(args: SendArgs, json: bool) -> eyre::Result<()> {
         rpc_url: args.rpc.rpc_url,
         safe: args.safe.safe,
         signer,
+        #[cfg(feature = "hd-wallet")]
+        home: None,
     };
-    dispatch(target, calls, args.opts, Output::from_json(json)).await?;
+    dispatch(target, calls, args.opts, console).await?;
     Ok(())
 }
 
 /// `safe send --send-eoa`: the calls go from the signer's own account, one
 /// transaction each, through the same path as [`SendContext::eoa`].
-async fn run_eoa(args: SendArgs, calls: Vec<Call>, json: bool) -> eyre::Result<()> {
+async fn run_eoa(args: SendArgs, calls: Vec<Call>, console: &Console) -> eyre::Result<()> {
     // `--safe` and SAFE_ADDRESS look the same here; refuse both rather than
     // send from the EOA when a Safe was asked for.
     if args.safe.safe.is_some() {
@@ -185,14 +230,11 @@ async fn run_eoa(args: SendArgs, calls: Vec<Call>, json: bool) -> eyre::Result<(
     if calls.is_empty() {
         eyre::bail!("nothing to send: pass a target address or --call");
     }
-    if !args.wallet.is_set() {
+    if !args.signer.is_set() {
         return Err(SendError::NoSigner.into());
     }
-    let signer = create_signer(&args.wallet, &args.opts.password)?;
-    let ctx = SendContext::eoa(args.rpc.rpc_url)
-        .with_signer(signer)
-        .with_output(Output::from_json(json));
-    send(ctx, calls, args.opts).await?;
+    let signer = create_signer(&args.signer, &args.opts.password, console)?;
+    execute_eoa(&args.rpc.rpc_url, &signer, calls, &args.opts, console).await?;
     Ok(())
 }
 
@@ -208,6 +250,7 @@ async fn run_eoa(args: SendArgs, calls: Vec<Call>, json: bool) -> eyre::Result<(
 /// simulated together, confirmed once, then broadcast one after another,
 /// each waiting for the one before it to be mined.
 pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<SendOutcome> {
+    let console = ctx.console();
     match ctx.sender {
         Sender::Safe(safe) => {
             opts.validate_safe(ctx.signer.is_some())?;
@@ -215,13 +258,15 @@ pub async fn send(ctx: SendContext, calls: Vec<Call>, opts: SendOpts) -> Result<
                 rpc_url: ctx.rpc_url,
                 safe: Some(safe),
                 signer: ctx.signer,
+                #[cfg(feature = "hd-wallet")]
+                home: ctx.home,
             };
-            dispatch(target, calls, opts, ctx.output).await
+            dispatch(target, calls, opts, &console).await
         }
         Sender::Eoa => {
             opts.validate_eoa(calls.len())?;
             let signer = ctx.signer.ok_or(SendError::NoSigner)?;
-            execute_eoa(&ctx.rpc_url, &signer, calls, &opts, ctx.output).await
+            execute_eoa(&ctx.rpc_url, &signer, calls, &opts, &console).await
         }
     }
 }
@@ -238,26 +283,23 @@ async fn execute_eoa(
     signer: &PrivateKeySigner,
     mut calls: Vec<Call>,
     args: &SendOpts,
-    output: Output,
+    console: &Console,
 ) -> Result<SendOutcome> {
     check_eoa_calls(&calls)?;
-    if let (Some(gas), [call]) = (args.gas_limit, calls.as_mut_slice()) {
+    if let (Some(gas), [call]) = (args.fees.gas_limit, calls.as_mut_slice()) {
         call.gas_limit = Some(gas);
     }
-    let console = Console::for_output(output, false);
     let from = signer.address();
     let provider = http_provider(rpc_url);
     let chain_id = provider.get_chain_id().await?;
 
-    console.line(format!("From: {from} (EOA)"));
-    console.line("");
-    console.line(calls_summary(&calls));
-    console.line("");
+    let details = format!("From: {from} (EOA)\n\n{}\n", calls_summary(&calls));
+    console.line(&details);
 
     let fees = outer_fees(
         &provider,
-        args.max_fee_per_gas,
-        args.max_priority_fee_per_gas,
+        args.fees.max_fee_per_gas,
+        args.fees.max_priority_fee_per_gas,
     )
     .await?;
 
@@ -267,13 +309,14 @@ async fn execute_eoa(
         let nonce = provider.get_transaction_count(from).await?;
         (nonce..).zip(calls.iter().map(|c| c.gas_limit)).collect()
     } else {
-        let session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
+        let session = fork_session(provider.clone(), chain_id, &args.simulate.sim, true).await?;
         let simulated = simulate_eoa_calls(&session, from, &calls, fees)?;
         let failed = simulated
             .iter()
             .position(|s| !s.result.success)
             .map(|i| (i, &simulated[i].result));
         let traces = args
+            .simulate
             .trace
             .then(|| {
                 let all: Vec<String> = simulated
@@ -302,10 +345,10 @@ async fn execute_eoa(
             traces,
             ..SimulationOutput::default()
         };
-        if output == Output::Quiet && failed.is_some() {
-            console.line(report.human());
-        } else if args.simulate_only || failed.is_some() {
-            emit(&report, output, console);
+        if failed.is_some() {
+            console.emit_or_line(&report);
+        } else if args.simulate.simulate_only {
+            console.emit(&report);
         } else {
             console.line(report.human());
             console.line("");
@@ -313,7 +356,7 @@ async fn execute_eoa(
         if let Some(reason) = revert_reason {
             return Err(SendError::SimulationFailed { reason });
         }
-        if args.simulate_only {
+        if args.simulate.simulate_only {
             return Ok(SendOutcome::EoaSimulated { gas_used });
         }
         simulated
@@ -333,7 +376,7 @@ async fn execute_eoa(
     } else {
         format!("{what}?")
     };
-    if !args.no_confirm && output.prompts() && !confirm_prompt(&prompt) {
+    if !args.no_confirm && !console.confirm(&prompt, &details) {
         console.line("Aborted");
         return Ok(SendOutcome::EoaAborted);
     }
@@ -351,7 +394,7 @@ async fn execute_eoa(
                 simulated_gas,
                 fees,
             },
-            args.timeout,
+            args.fees.timeout,
             console,
         )
         .await;
@@ -368,14 +411,10 @@ async fn execute_eoa(
         }
     }
 
-    emit(
-        &EoaExecutionOutput {
-            from,
-            txs: txs.clone(),
-        },
-        output,
-        console,
-    );
+    console.emit(&EoaExecutionOutput {
+        from,
+        txs: txs.clone(),
+    });
     Ok(SendOutcome::EoaExecuted { txs })
 }
 
@@ -400,7 +439,7 @@ async fn send_eoa_tx(
     chain_id: u64,
     plan: EoaTxPlan<'_>,
     timeout: u64,
-    console: Console,
+    console: &Console,
 ) -> Result<EoaTx> {
     let from = signer.address();
     let call = plan.call;
@@ -417,7 +456,7 @@ async fn send_eoa_tx(
                 .estimate_gas(request)
                 .await
                 .map_err(|e| node_estimate_failed(e, "the transaction"))?;
-            cross_check_gas_limit(simulated, estimate + estimate / 5)
+            cross_check_gas_limit(simulated, estimate + estimate / 5, console)
         } else {
             let estimate = provider
                 .estimate_gas(request)
@@ -452,13 +491,13 @@ async fn dispatch(
     target: Target,
     calls: Vec<Call>,
     opts: SendOpts,
-    output: Output,
+    console: &Console,
 ) -> Result<SendOutcome> {
     #[cfg(feature = "hd-wallet")]
     if opts.rotate {
-        return Box::pin(run_rotating(target, calls, opts, output)).await;
+        return Box::pin(run_rotating(target, calls, opts, console)).await;
     }
-    execute(target, opts, calls, ExecHooks::default(), output).await
+    execute(target, opts, calls, ExecHooks::default(), console).await
 }
 
 /// Checks the Safe in the session the simulated transaction was committed to.
@@ -480,11 +519,11 @@ pub async fn execute(
     args: SendOpts,
     cli_calls: Vec<Call>,
     hooks: ExecHooks<'_>,
-    output: Output,
+    console: &Console,
 ) -> Result<SendOutcome> {
     // 1. Load/Build Calls & Existing Bundle State
-    let bundle_existed = args.bundle.as_ref().is_some_and(|p| p.exists());
-    let mut bundle = if let Some(bundle_path) = &args.bundle {
+    let bundle_existed = args.collect.bundle.as_ref().is_some_and(|p| p.exists());
+    let mut bundle = if let Some(bundle_path) = &args.collect.bundle {
         if bundle_path.exists() {
             let mut loaded = BundleFile::load(bundle_path)?;
             if !cli_calls.is_empty() {
@@ -517,7 +556,7 @@ pub async fn execute(
         BundleFile::from_calls(&cli_calls)
     };
 
-    for merge_path in &args.merge_bundle {
+    for merge_path in &args.collect.merge_bundle {
         let other = BundleFile::load(merge_path)?;
         bundle.merge_from_file(&other)?;
     }
@@ -530,11 +569,13 @@ pub async fn execute(
     // `--no-submit` without a destination writes the signed transaction to
     // stdout, unless the caller prints its own output.
     let raw_out = args
+        .raw
         .raw_out
         .clone()
-        .or_else(|| (args.no_submit && output != Output::Quiet).then(|| "-".to_string()));
-    let console = Console::for_output(output, raw_out.as_deref() == Some("-"));
-    let json = output == Output::Json;
+        .or_else(|| (args.raw.no_submit && console.prints_results()).then(|| "-".to_string()));
+    if raw_out.as_deref() == Some("-") {
+        console.stdout_carries_data();
+    }
 
     // 2. Inspect Safe State & Resolve Signer / Payer
     let signer_opt = target.signer;
@@ -554,12 +595,13 @@ pub async fn execute(
         target.safe.or(bundle.tx.as_ref().map(|tx| tx.safe)),
         signer_opt.as_ref(),
         BlockId::latest(),
+        console,
     )
     .await?;
     let addresses = chain_addresses(&provider, &args, safe_address).await;
     let config = ChainConfig::with_addresses(chain_id, addresses.clone());
 
-    let sim_block = args.sim.block.unwrap_or_else(BlockId::latest);
+    let sim_block = args.simulate.sim.block.unwrap_or_else(BlockId::latest);
     let state = read_safe_state(
         &provider,
         safe_address,
@@ -652,7 +694,7 @@ pub async fn execute(
         if let Some(gas) = args.safe_tx_gas {
             builder = builder.with_safe_tx_gas(gas);
         }
-        if let (false, Some(block)) = (args.skip_simulation, args.sim.block) {
+        if let (false, Some(block)) = (args.skip_simulation, args.simulate.sim.block) {
             builder = builder.with_batch_target_block(block);
         }
         builder.prepare().await?
@@ -684,10 +726,10 @@ pub async fn execute(
 
     if let Some(signer) = &signer_opt {
         if signer_is_owner {
-            if args.approve_hash {
+            if args.collect.approve_hash {
                 // When approving on-chain, the owner authorizes via approveHash (v = 1)
                 // unless they also want an offchain signature in --bundle.
-                if args.bundle.is_some() && !offchain_sigs.contains_key(&signer.address()) {
+                if args.collect.bundle.is_some() && !offchain_sigs.contains_key(&signer.address()) {
                     let sig_tx = prepared.sign(signer).await?;
                     if let Some(sig) = sig_tx.signature() {
                         signed.insert_signature(signer.address(), sig.clone())?;
@@ -713,7 +755,7 @@ pub async fn execute(
     }
 
     let have = signed.signatures.len();
-    if !signer_is_owner && (args.approve_hash || args.sign_only || have < need) {
+    if !signer_is_owner && (args.collect.approve_hash || args.collect.sign_only || have < need) {
         let bad_signer = signer_opt.as_ref().map_or(from, |s| s.address());
         return Err(Error::NotOwner {
             signer: bad_signer,
@@ -722,24 +764,26 @@ pub async fn execute(
         .into());
     }
 
-    console.line(format!("Safe: {}", safe_address));
+    // What a confirmation is about: logged now, and handed to the prompt.
+    let mut details = format!("Safe: {safe_address}\n");
     if let Some(signer) = &signer_opt {
-        console.line(format!("Signer: {}", signer.address()));
+        details.push_str(&format!("Signer: {}\n", signer.address()));
     }
     if Some(from) != signer_opt.as_ref().map(|s| s.address()) {
-        console.line(format!("Payer: {from}"));
+        details.push_str(&format!("Payer: {from}\n"));
     }
-    console.line(format!("Threshold: {have}/{need} signatures"));
-    console.line(format!("Nonce: {}", prepared.params.nonce));
-    console.line(format!("Safe Tx Hash: {}", prepared.safe_tx_hash));
-    console.line("");
-    console.line(calls_summary(&calls));
-    console.line("");
+    details.push_str(&format!(
+        "Threshold: {have}/{need} signatures\nNonce: {}\nSafe Tx Hash: {}\n\n{}\n",
+        prepared.params.nonce,
+        prepared.safe_tx_hash,
+        calls_summary(&calls)
+    ));
+    console.line(&details);
 
     let fees = outer_fees(
         &provider,
-        args.max_fee_per_gas,
-        args.max_priority_fee_per_gas,
+        args.fees.max_fee_per_gas,
+        args.fees.max_priority_fee_per_gas,
     )
     .await?;
 
@@ -768,16 +812,20 @@ pub async fn execute(
             gas_used: result.gas_used,
             revert_reason: result.revert_reason.clone(),
             safe_tx_hash: Some(prepared.safe_tx_hash),
-            traces: args.trace.then(|| result.format_traces()).flatten(),
+            traces: args
+                .simulate
+                .trace
+                .then(|| result.format_traces())
+                .flatten(),
             signatures_collected: Some(have),
             threshold: Some(need),
             ready_to_execute: Some(have >= need),
         };
-        if output == Output::Quiet && !result.success {
-            // The caller only sees the error: show the traces too.
-            console.line(report.human());
-        } else if args.simulate_only || !result.success {
-            emit(&report, output, console);
+        if !result.success {
+            // A host only sees the error: show it the traces too.
+            console.emit_or_line(&report);
+        } else if args.simulate.simulate_only {
+            console.emit(&report);
         } else {
             console.line(report.human());
             console.line("");
@@ -790,7 +838,7 @@ pub async fn execute(
                     .unwrap_or_else(|| "unknown reason".to_string()),
             });
         }
-        if args.simulate_only {
+        if args.simulate.simulate_only {
             return Ok(SendOutcome::Simulated {
                 safe_tx_hash: prepared.safe_tx_hash,
                 gas_used: result.gas_used,
@@ -801,12 +849,12 @@ pub async fn execute(
 
     // 5. Smart Action Branching
     // Branch A: --approve-hash
-    if args.approve_hash {
+    if args.collect.approve_hash {
         let signer = signer_opt.as_ref().ok_or_else(|| {
             SendError::other("--approve-hash requires an owner wallet (--private-key, --keystore, or --interactive)")
         })?;
         let approver = signer.address();
-        let bundle_path_str = if let Some(bundle_path) = &args.bundle {
+        let bundle_path_str = if let Some(bundle_path) = &args.collect.bundle {
             bundle.merge(&prepared, &offchain_sigs, &[])?;
             bundle.save(bundle_path)?;
             Some(bundle_path.display().to_string())
@@ -816,7 +864,7 @@ pub async fn execute(
 
         let (approve_nonce, approve_gas) = if args.skip_simulation {
             let nonce = provider.get_transaction_count(approver).await?;
-            let gas = if let Some(g) = args.gas_limit {
+            let gas = if let Some(g) = args.fees.gas_limit {
                 g
             } else {
                 let tx = <AnyNetwork as Network>::TransactionRequest::default()
@@ -828,7 +876,8 @@ pub async fn execute(
             };
             (nonce, gas)
         } else {
-            let session = fork_session(provider.clone(), chain_id, &args.sim, false).await?;
+            let session =
+                fork_session(provider.clone(), chain_id, &args.simulate.sim, false).await?;
             let sim = simulate_approve_hash(
                 &session,
                 chain_id,
@@ -836,7 +885,7 @@ pub async fn execute(
                 prepared.safe_tx_hash,
                 approver,
                 fees,
-                args.gas_limit,
+                args.fees.gas_limit,
             )?;
             if !sim.result.success {
                 return Err(SendError::ApproveHashSimulationFailed {
@@ -846,7 +895,7 @@ pub async fn execute(
                         .unwrap_or_else(|| "unknown reason".to_string()),
                 });
             }
-            let gas = if args.gas_limit.is_some() {
+            let gas = if args.fees.gas_limit.is_some() {
                 sim.gas_limit
             } else {
                 let tx = <AnyNetwork as Network>::TransactionRequest::default()
@@ -857,7 +906,7 @@ pub async fn execute(
                     .estimate_gas(tx)
                     .await
                     .map_err(|e| node_estimate_failed(e, "approveHash"))?;
-                cross_check_gas_limit(sim.gas_limit, est + est / 5)
+                cross_check_gas_limit(sim.gas_limit, est + est / 5, console)
             };
             (sim.payer_nonce, gas)
         };
@@ -878,7 +927,7 @@ pub async fn execute(
 
         let prompt =
             format!("Approve Safe transaction hash on-chain ({have}/{need} toward threshold)?");
-        if !args.no_confirm && output.prompts() && !confirm_prompt(&prompt) {
+        if !args.no_confirm && !console.confirm(&prompt, &details) {
             console.line("Aborted");
             return Ok(SendOutcome::Aborted {
                 safe_tx_hash: prepared.safe_tx_hash,
@@ -887,24 +936,20 @@ pub async fn execute(
 
         broadcast(&provider, outer.tx_hash, &outer.raw, console).await?;
         console.line(format!("Sent {}, waiting for receipt...", outer.tx_hash));
-        let receipt = receipt(&provider, outer.tx_hash, args.timeout).await?;
+        let receipt = receipt(&provider, outer.tx_hash, args.fees.timeout).await?;
 
         let success = receipt.status();
-        emit(
-            &ApproveHashOutput {
-                tx_hash: outer.tx_hash,
-                success,
-                gas_used: receipt.gas_used,
-                safe_tx_hash: prepared.safe_tx_hash,
-                safe_nonce: prepared.params.nonce,
-                approver,
-                signatures_collected: have,
-                threshold: need,
-                bundle_path: bundle_path_str,
-            },
-            output,
-            console,
-        );
+        console.emit(&ApproveHashOutput {
+            tx_hash: outer.tx_hash,
+            success,
+            gas_used: receipt.gas_used,
+            safe_tx_hash: prepared.safe_tx_hash,
+            safe_nonce: prepared.params.nonce,
+            approver,
+            signatures_collected: have,
+            threshold: need,
+            bundle_path: bundle_path_str,
+        });
         if !success {
             return Err(SendError::ApproveHashReverted {
                 tx_hash: outer.tx_hash,
@@ -919,8 +964,8 @@ pub async fn execute(
     }
 
     // Branch B: Offchain signature collection (`have < need` or `--sign-only`)
-    if have < need || args.sign_only {
-        let Some(bundle_path) = &args.bundle else {
+    if have < need || args.collect.sign_only {
+        let Some(bundle_path) = &args.collect.bundle else {
             return Err(SendError::BelowThreshold { have, need });
         };
         bundle.merge(&prepared, &offchain_sigs, &[])?;
@@ -932,19 +977,15 @@ pub async fn execute(
             .copied()
             .filter(|o| !signed.signatures.contains_key(o))
             .collect();
-        emit(
-            &BundleSavedOutput {
-                safe_tx_hash: prepared.safe_tx_hash,
-                safe_nonce: prepared.params.nonce,
-                signatures_collected: have,
-                threshold: need,
-                signers,
-                remaining_owners,
-                bundle_path: bundle_path.display().to_string(),
-            },
-            output,
-            console,
-        );
+        console.emit(&BundleSavedOutput {
+            safe_tx_hash: prepared.safe_tx_hash,
+            safe_nonce: prepared.params.nonce,
+            signatures_collected: have,
+            threshold: need,
+            signers,
+            remaining_owners,
+            bundle_path: bundle_path.display().to_string(),
+        });
         return Ok(SendOutcome::Signed {
             safe_tx_hash: prepared.safe_tx_hash,
             safe_nonce: prepared.params.nonce,
@@ -955,8 +996,8 @@ pub async fn execute(
     }
 
     // Branch C: Threshold met (`have >= need`) -> Execute `execTransaction`
-    if !args.no_submit {
-        if let Some(bundle_path) = &args.bundle {
+    if !args.raw.no_submit {
+        if let Some(bundle_path) = &args.collect.bundle {
             if !bundle_existed || bundle.tx.is_some() {
                 bundle.merge(&prepared, &offchain_sigs, &[])?;
                 bundle.save(bundle_path)?;
@@ -974,19 +1015,19 @@ pub async fn execute(
         .collect();
 
     let (eoa_nonce, gas_limit) = if let Some((nonce, simulated)) = sim_info {
-        let gas_limit = if args.gas_limit.is_some() {
+        let gas_limit = if args.fees.gas_limit.is_some() {
             simulated
         } else {
             let est = provider
                 .estimate_gas(exec_request(&exec_signed, from))
                 .await
                 .map_err(|e| node_estimate_failed(e, "execTransaction"))?;
-            cross_check_gas_limit(simulated, est + est / 5)
+            cross_check_gas_limit(simulated, est + est / 5, console)
         };
         (nonce, gas_limit)
     } else {
         let nonce = provider.get_transaction_count(from).await?;
-        let gas_limit = if let Some(gas) = args.gas_limit {
+        let gas_limit = if let Some(gas) = args.fees.gas_limit {
             gas
         } else {
             estimate_outer_gas(&provider, &exec_signed, from).await?
@@ -1012,11 +1053,11 @@ pub async fn execute(
         }
     }
 
-    if args.no_submit {
-        if json && raw_out.as_deref() != Some("-") {
-            document.print(true);
-        } else if output == Output::Human {
-            console.line(document.human());
+    if args.raw.no_submit {
+        if raw_out.as_deref() == Some("-") {
+            console.emit_human(&document);
+        } else {
+            console.emit(&document);
         }
         return Ok(SendOutcome::NotSubmitted {
             tx_hash: outer.tx_hash,
@@ -1032,7 +1073,7 @@ pub async fn execute(
     } else {
         "Execute transaction?".to_string()
     };
-    if !args.no_confirm && output.prompts() && !confirm_prompt(&prompt) {
+    if !args.no_confirm && !console.confirm(&prompt, &details) {
         console.line("Aborted");
         return Ok(SendOutcome::Aborted {
             safe_tx_hash: prepared.safe_tx_hash,
@@ -1041,20 +1082,16 @@ pub async fn execute(
 
     broadcast(&provider, outer.tx_hash, &outer.raw, console).await?;
     console.line(format!("Sent {}, waiting for receipt...", outer.tx_hash));
-    let receipt = receipt(&provider, outer.tx_hash, args.timeout).await?;
+    let receipt = receipt(&provider, outer.tx_hash, args.fees.timeout).await?;
     let outcome = safe_outcome_for_receipt(&receipt, safe_address, prepared.safe_tx_hash)?;
 
-    emit(
-        &ExecutionOutput {
-            tx_hash: outer.tx_hash,
-            success: outcome.is_success(),
-            gas_used: receipt.gas_used,
-            safe_tx_hash: Some(prepared.safe_tx_hash),
-            outcome: Some(outcome.label()),
-        },
-        output,
-        console,
-    );
+    console.emit(&ExecutionOutput {
+        tx_hash: outer.tx_hash,
+        success: outcome.is_success(),
+        gas_used: receipt.gas_used,
+        safe_tx_hash: Some(prepared.safe_tx_hash),
+        outcome: Some(outcome.label()),
+    });
     if !outcome.is_success() {
         return Err(SendError::SafeTxFailed {
             tx_hash: outer.tx_hash,
@@ -1077,10 +1114,10 @@ async fn run_rotating(
     target: Target,
     cli_calls: Vec<Call>,
     args: SendOpts,
-    output: Output,
+    console: &Console,
 ) -> Result<SendOutcome> {
     let mut bundle_safe = None;
-    let calls = if let Some(bundle_path) = &args.bundle {
+    let calls = if let Some(bundle_path) = &args.collect.bundle {
         if bundle_path.exists() {
             let loaded = BundleFile::load(bundle_path)?;
             bundle_safe = loaded.tx.as_ref().map(|tx| tx.safe);
@@ -1110,7 +1147,7 @@ async fn run_rotating(
         return Err(SendError::NoCalls);
     }
     let payer = create_payer(&args.payer)?;
-    let ring = open_wallet(&args.hd, &args.password).await?;
+    let ring = open_wallet(&args.hd, &args.password, target.home.as_deref(), console).await?;
     let safe = if let Some(safe) = target.safe.or(bundle_safe) {
         safe
     } else {
@@ -1127,21 +1164,21 @@ async fn run_rotating(
         sweep: &args.sweep,
         calls,
         multi_send_call_only: args.multi_send_call_only,
-        sim: &args.sim,
-        gas_limit: args.gas_limit,
-        max_fee_per_gas: args.max_fee_per_gas,
-        max_priority_fee_per_gas: args.max_priority_fee_per_gas,
-        timeout: args.timeout,
-        trace: args.trace,
-        simulate_only: args.simulate_only,
-        raw_out: args.raw_out.clone(),
-        no_submit: args.no_submit,
+        sim: &args.simulate.sim,
+        gas_limit: args.fees.gas_limit,
+        max_fee_per_gas: args.fees.max_fee_per_gas,
+        max_priority_fee_per_gas: args.fees.max_priority_fee_per_gas,
+        timeout: args.fees.timeout,
+        trace: args.simulate.trace,
+        simulate_only: args.simulate.simulate_only,
+        raw_out: args.raw.raw_out.clone(),
+        no_submit: args.raw.no_submit,
         no_confirm: args.no_confirm,
-        bundle: args.bundle.clone(),
-        merge_bundle: args.merge_bundle.clone(),
-        approve_hash: args.approve_hash,
-        sign_only: args.sign_only,
-        output,
+        bundle: args.collect.bundle.clone(),
+        merge_bundle: args.collect.merge_bundle.clone(),
+        approve_hash: args.collect.approve_hash,
+        sign_only: args.collect.sign_only,
+        console,
     })
     .await
 }
@@ -1161,7 +1198,7 @@ async fn simulate(
     from: Address,
     fees: Eip1559Estimation,
 ) -> Result<ExecSimulation> {
-    let session = fork_session(provider.clone(), chain_id, &args.sim, true).await?;
+    let session = fork_session(provider.clone(), chain_id, &args.simulate.sim, true).await?;
     Ok(simulate_exec_with_threshold(
         &session,
         signed,
@@ -1169,7 +1206,7 @@ async fn simulate(
         threshold,
         from,
         fees,
-        args.gas_limit,
+        args.fees.gas_limit,
     )?)
 }
 
@@ -1212,10 +1249,10 @@ const GAS_DIVERGENCE_WARN_PERCENT: u64 = 25;
 /// [`GAS_DIVERGENCE_WARN_PERCENT`]: the local EVM may not model the gas
 /// schedule of the chain's current fork, and a limit sized by it alone can run
 /// out of gas on chain even though the simulation succeeded.
-fn cross_check_gas_limit(simulated: u64, node: u64) -> u64 {
+fn cross_check_gas_limit(simulated: u64, node: u64, console: &Console) -> u64 {
     let (gas_limit, warning) = reconcile_gas_limits(simulated, node);
     if let Some(warning) = warning {
-        eprintln!("warning: {warning}");
+        console.warn(warning);
     }
     gas_limit
 }
@@ -1255,7 +1292,7 @@ pub(crate) async fn broadcast(
     provider: &HttpProvider,
     tx_hash: B256,
     raw: &Bytes,
-    console: Console,
+    console: &Console,
 ) -> Result<()> {
     match broadcast_raw(provider, raw, tx_hash).await {
         BroadcastOutcome::Accepted(_) => Ok(()),
@@ -1263,13 +1300,14 @@ pub(crate) async fn broadcast(
             console.line("Node already knew the transaction");
             Ok(())
         }
-        BroadcastOutcome::Rejected { reason, class } => Err(SendError::Rejected {
+        BroadcastOutcome::Rejected { reason, class } => Err(BroadcastError::Rejected {
             tx_hash,
             reason,
             class,
-        }),
+        }
+        .into()),
         BroadcastOutcome::Ambiguous { reason } => {
-            Err(SendError::BroadcastAmbiguous { tx_hash, reason })
+            Err(BroadcastError::Ambiguous { tx_hash, reason }.into())
         }
     }
 }
@@ -1283,10 +1321,11 @@ pub(crate) async fn receipt(
     let timeout = Duration::from_secs(timeout_secs);
     match wait_for_receipt(provider, tx_hash, timeout, RECEIPT_POLL_INTERVAL).await? {
         ReceiptWait::Mined(receipt) => Ok(receipt),
-        ReceiptWait::TimedOut { tx_hash } => Err(SendError::ReceiptTimeout {
+        ReceiptWait::TimedOut { tx_hash } => Err(BroadcastError::ReceiptTimeout {
             tx_hash,
             timeout_secs,
-        }),
+        }
+        .into()),
     }
 }
 

@@ -7,22 +7,23 @@ use crate::cli::RotateArgs;
 use crate::commands::default_safe::{read_default_safe, recorded_safe};
 use crate::commands::http_provider;
 use crate::commands::rotation::{self, RotationRun};
-use crate::output::Output;
-use crate::wallet::{create_payer, legacy_signer, open_wallet};
+use crate::console::Console;
+use crate::signers::{create_payer, legacy_signer, open_wallet};
 
 /// `safe rotate`: swap the Safe's owner for the HD wallet's next unused key,
 /// with no other calls.
 ///
 /// With a `--from-*` option the current owner is a key outside the wallet,
 /// which is how an existing Safe is moved onto it.
-pub async fn run(args: RotateArgs, json: bool) -> Result<()> {
+pub async fn run(args: RotateArgs, console: &Console) -> Result<()> {
     let legacy_owner = legacy_signer(
         args.from_private_key.as_deref(),
         args.from_keystore.as_deref(),
         args.from_interactive,
+        console,
     )?;
     let payer = create_payer(&args.payer)?;
-    let ring = open_wallet(&args.hd, &args.password).await?;
+    let ring = open_wallet(&args.hd, &args.password, None, console).await?;
     let safe = if let Some(safe) = args.safe {
         safe
     } else {
@@ -50,21 +51,21 @@ pub async fn run(args: RotateArgs, json: bool) -> Result<()> {
         sweep: &args.sweep,
         calls: Vec::new(),
         multi_send_call_only: args.multi_send_call_only,
-        sim: &args.sim,
-        gas_limit: args.gas_limit,
-        max_fee_per_gas: args.max_fee_per_gas,
-        max_priority_fee_per_gas: args.max_priority_fee_per_gas,
-        timeout: args.timeout,
-        trace: args.trace,
-        simulate_only: args.simulate_only,
+        sim: &args.simulate.sim,
+        gas_limit: args.fees.gas_limit,
+        max_fee_per_gas: args.fees.max_fee_per_gas,
+        max_priority_fee_per_gas: args.fees.max_priority_fee_per_gas,
+        timeout: args.fees.timeout,
+        trace: args.simulate.trace,
+        simulate_only: args.simulate.simulate_only,
         raw_out: None,
         no_submit: false,
         no_confirm: args.no_confirm,
-        bundle: args.bundle.clone(),
-        merge_bundle: args.merge_bundle.clone(),
-        approve_hash: args.approve_hash,
-        sign_only: args.sign_only,
-        output: Output::from_json(json),
+        bundle: args.collect.bundle.clone(),
+        merge_bundle: args.collect.merge_bundle.clone(),
+        approve_hash: args.collect.approve_hash,
+        sign_only: args.collect.sign_only,
+        console,
     })
     .await?;
     Ok(())

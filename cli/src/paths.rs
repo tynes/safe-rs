@@ -23,6 +23,14 @@ pub fn home() -> Result<PathBuf> {
         .ok_or_else(|| eyre!("cannot find the home directory; set {HOME_ENV}"))
 }
 
+/// `home` if given, else [`home`].
+pub fn home_or(home: Option<&Path>) -> Result<PathBuf> {
+    match home {
+        Some(home) => Ok(home.to_path_buf()),
+        None => self::home(),
+    }
+}
+
 /// The directory holding wallet keystores.
 pub fn wallets_dir(home: &Path) -> PathBuf {
     home.join("wallets")

@@ -1,7 +1,7 @@
 //! What `--rotate`, `safe rotate`, `safe create --hd-wallet` and `safe wallet`
 //! report.
 
-use std::fmt::{Display, Write as _};
+use std::fmt::Write as _;
 
 use alloy::primitives::utils::format_ether;
 use alloy::primitives::{Address, TxHash, B256, U256};
@@ -10,17 +10,9 @@ use safe_rs::rotation::{
 };
 use serde::Serialize;
 
-use super::{calls_summary, Report};
+use super::{calls_summary, OwnerKey, Report, SweptEth};
 
-/// An owner key: a wallet key index, or an address the wallet cannot derive.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OwnerOutput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index: Option<u32>,
-    pub address: Address,
-}
-
-impl From<OwnerRef> for OwnerOutput {
+impl From<OwnerRef> for OwnerKey {
     fn from(owner: OwnerRef) -> Self {
         Self {
             index: owner.index(),
@@ -29,7 +21,7 @@ impl From<OwnerRef> for OwnerOutput {
     }
 }
 
-impl From<Reserved> for OwnerOutput {
+impl From<Reserved> for OwnerKey {
     fn from(reserved: Reserved) -> Self {
         Self {
             index: Some(reserved.index),
@@ -38,18 +30,9 @@ impl From<Reserved> for OwnerOutput {
     }
 }
 
-impl Display for OwnerOutput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.index {
-            Some(index) => write!(f, "key {index} ({})", self.address),
-            None => write!(f, "{} (not a wallet key)", self.address),
-        }
-    }
-}
-
 /// A sweep that is expected to follow a rotation.
 #[derive(Serialize, Clone, Copy)]
-pub struct PlannedSweepOutput {
+pub struct PlannedSweptEth {
     pub from: Address,
     pub to: Address,
     /// Approximate wei; the exact amount depends on the gas the rotation pays
@@ -60,13 +43,13 @@ pub struct PlannedSweepOutput {
 #[derive(Serialize, Clone, Copy)]
 pub struct RotationPlanOutput {
     /// The owner that signs and is swapped out
-    pub old_owner: OwnerOutput,
+    pub old_owner: OwnerKey,
     /// The owner the Safe has afterwards
-    pub new_owner: OwnerOutput,
+    pub new_owner: OwnerKey,
     /// Sender of the outer transaction
     pub payer: Address,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub planned_sweep: Option<PlannedSweepOutput>,
+    pub planned_sweep: Option<PlannedSweptEth>,
 }
 
 impl RotationPlanOutput {
@@ -75,7 +58,7 @@ impl RotationPlanOutput {
             old_owner: tx.from.into(),
             new_owner: tx.to.into(),
             payer: tx.payer,
-            planned_sweep: tx.planned_sweep.map(|sweep| PlannedSweepOutput {
+            planned_sweep: tx.planned_sweep.map(|sweep| PlannedSweptEth {
                 from: sweep.from,
                 to: sweep.to,
                 estimated: sweep.estimated,
@@ -162,17 +145,7 @@ pub fn rotation_summary(
     s
 }
 
-/// A completed sweep.
-#[derive(Serialize, Clone, Copy)]
-pub struct SweepOutput {
-    pub tx_hash: TxHash,
-    /// Wei moved
-    pub amount: U256,
-    pub from: Address,
-    pub to: Address,
-}
-
-impl From<SweepOutcome> for SweepOutput {
+impl From<SweepOutcome> for SweptEth {
     fn from(sweep: SweepOutcome) -> Self {
         Self {
             tx_hash: sweep.tx_hash,
@@ -180,18 +153,6 @@ impl From<SweepOutcome> for SweepOutput {
             from: sweep.from,
             to: sweep.to,
         }
-    }
-}
-
-impl Report for SweepOutput {
-    fn human(&self) -> String {
-        format!(
-            "Swept {} ETH from {} to {}\n  Tx Hash: {}",
-            format_ether(self.amount),
-            self.from,
-            self.to,
-            self.tx_hash
-        )
     }
 }
 
@@ -207,12 +168,12 @@ pub struct RotationOutput {
     /// Owner list outcome: `rotated`, `rotated_elsewhere` or `not_rotated`
     pub status: &'static str,
     pub gas_used: u64,
-    pub old_owner: OwnerOutput,
+    pub old_owner: OwnerKey,
     /// The owner the Safe has now
-    pub owner: OwnerOutput,
+    pub owner: OwnerKey,
     pub payer: Address,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sweep: Option<SweepOutput>,
+    pub sweep: Option<SweptEth>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -221,7 +182,7 @@ impl RotationOutput {
     pub fn new(
         plan: RotationPlanOutput,
         outcome: &RotationOutcome,
-        owner: OwnerOutput,
+        owner: OwnerKey,
         warnings: Vec<String>,
     ) -> Self {
         Self {

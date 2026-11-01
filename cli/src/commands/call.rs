@@ -7,22 +7,24 @@ use safe_rs::SimTx;
 use crate::cli::CallArgs;
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::{fork_session, http_provider};
-use crate::output::{CallOutput, Report};
+use crate::console::Console;
+use crate::output::CallOutput;
 use crate::sig_parser::encode_function_call;
-use crate::wallet::create_signer;
+use crate::signers::create_signer;
 
-pub async fn run(args: CallArgs, json: bool) -> Result<()> {
+pub async fn run(args: CallArgs, console: &Console) -> Result<()> {
     let provider = http_provider(&args.rpc.rpc_url);
     let data = encode_function_call(&args.sig, &args.args)?;
     let chain_id = provider.get_chain_id().await?;
-    let signer = (args.safe.safe.is_none() && args.wallet.is_set())
-        .then(|| create_signer(&args.wallet, &args.password))
+    let signer = (args.safe.safe.is_none() && args.signer.is_set())
+        .then(|| create_signer(&args.signer, &args.password, console))
         .transpose()?;
     let safe = safe_or_default(
         &provider,
         args.safe.safe,
         signer.as_ref(),
         args.sim.block.unwrap_or(BlockId::latest()),
+        console,
     )
     .await?;
 
@@ -36,14 +38,13 @@ pub async fn run(args: CallArgs, json: bool) -> Result<()> {
         READ_CALL_GAS,
     ))?;
 
-    CallOutput {
+    console.emit(&CallOutput {
         success: result.success,
         gas_used: result.gas_used,
         return_data: (!result.return_data.is_empty()).then(|| result.return_data.clone()),
         traces: result.format_traces(),
         revert_reason: result.revert_reason,
-    }
-    .print(json);
+    });
 
     Ok(())
 }

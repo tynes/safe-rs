@@ -4,11 +4,14 @@ use std::path::PathBuf;
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, B256, U256};
 use alloy_dyn_abi::DynSolType;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use safe_rs::{ChainAddresses, SpecId};
 use url::Url;
 
+pub use crate::commands::create::CreateArgs;
 use crate::error::OptionsError;
+#[cfg(feature = "hd-wallet")]
+pub use crate::wallet::WalletCommand;
 
 #[derive(Parser)]
 #[command(name = "safe")]
@@ -42,7 +45,7 @@ pub enum Commands {
     Config(Box<ConfigArgs>),
 
     /// Deploy a new Safe deterministically (same address across chains)
-    Create(CreateArgs),
+    Create(Box<CreateArgs>),
 
     /// Swap the Safe's owner for the HD wallet's next unused key, with no other
     /// calls. Also moves an existing Safe onto the wallet (--from-*) and retires
@@ -52,8 +55,26 @@ pub enum Commands {
 
     /// Manage HD wallets: the encrypted phrase that one-time owner keys come from
     #[cfg(feature = "hd-wallet")]
+    Wallet(WalletCliArgs),
+}
+
+/// `safe wallet`: the subcommands, and the RPC and Safe that `sync` and
+/// `sweep` read. A CLI that embeds [`WalletCommand`] resolves those itself
+/// into a [`WalletContext`](crate::signers::WalletContext).
+#[cfg(feature = "hd-wallet")]
+#[derive(Args, Clone)]
+pub struct WalletCliArgs {
+    /// RPC endpoint URL (sync and sweep)
+    #[arg(long, env = "ETH_RPC_URL", global = true)]
+    pub rpc_url: Option<Url>,
+
+    /// Safe contract address (sync and sweep: default, the wallet's sole
+    /// recorded Safe on this chain; status: only show this Safe)
+    #[arg(long, global = true)]
+    pub safe: Option<Address>,
+
     #[command(subcommand)]
-    Wallet(WalletCommand),
+    pub command: WalletCommand,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -109,7 +130,7 @@ pub enum EvmSpec {
 }
 
 /// Safe versions `safe create` can deploy, newest first.
-#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+#[derive(ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SafeVersion {
     #[default]
     #[value(name = "1.5.0")]
@@ -213,7 +234,7 @@ pub struct SendArgs {
     pub opts: SendOpts,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 }
 
 /// Seconds to wait for a receipt after broadcasting (`--timeout`).
@@ -230,30 +251,23 @@ pub const DEFAULT_BLOCK_TIME: u64 = 12;
 /// a CLI that embeds these flags resolves those itself. Flatten it into a
 /// command with `#[command(flatten)]`, or build it in code from
 /// [`Default`], which matches the flag defaults.
-#[derive(Args, Clone, Debug)]
+#[derive(Args, Clone, Debug, Default)]
+#[command(
+    group(ArgGroup::new("send_approve_or_simulate").args(["approve_hash", "simulate_only"])),
+    group(ArgGroup::new("send_sign_or_simulate").args(["sign_only", "simulate_only"])),
+    group(ArgGroup::new("send_raw_or_simulate").args(["raw_out", "simulate_only"])),
+    group(ArgGroup::new("send_no_submit_or_simulate").args(["no_submit", "simulate_only"])),
+)]
 pub struct SendOpts {
-    /// Path to bundle JSON file (reads calls and existing signatures; writes updated bundle when collecting offchain signatures)
-    #[arg(long)]
-    pub bundle: Option<PathBuf>,
+    #[command(flatten)]
+    pub collect: CollectArgs,
 
-    /// Merge offchain signatures from additional bundle file(s) into this run
-    #[arg(long = "merge-bundle", value_name = "PATH")]
-    pub merge_bundle: Vec<PathBuf>,
-
-    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
-    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
-    pub approve_hash: bool,
-
-    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
-    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
-    pub sign_only: bool,
     /// Use MultiSendCallOnly (safer, no delegatecall)
     #[arg(long)]
     pub call_only: bool,
 
-    /// Only simulate, don't sign or broadcast the outer transaction
-    #[arg(long)]
-    pub simulate_only: bool,
+    #[command(flatten)]
+    pub simulate: SimulateArgs,
 
     /// Skip simulation and execute directly (use with caution)
     #[arg(long, conflicts_with = "simulate_only")]
@@ -268,40 +282,11 @@ pub struct SendOpts {
     #[arg(long)]
     pub nonce: Option<U256>,
 
-    /// Gas limit of the outer transaction (default: simulated gas + 20%)
-    #[arg(long)]
-    pub gas_limit: Option<u64>,
-
-    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
-    /// ("30gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_fee_per_gas: Option<u128>,
-
-    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
-    /// unit ("1gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_priority_fee_per_gas: Option<u128>,
-
-    /// Write the signed transaction as JSON to PATH ("-" for stdout) before it
-    /// is broadcast
-    #[arg(long, value_name = "PATH", conflicts_with = "simulate_only")]
-    pub raw_out: Option<String>,
-
-    /// Sign the transaction but do not broadcast it (writes it to --raw-out,
-    /// stdout by default)
-    #[arg(long, conflicts_with_all = ["simulate_only"])]
-    pub no_submit: bool,
-
-    /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
-    pub timeout: u64,
-
-    /// Print call traces of the simulated transaction
-    #[arg(long)]
-    pub trace: bool,
+    #[command(flatten)]
+    pub fees: FeeArgs,
 
     #[command(flatten)]
-    pub sim: SimArgs,
+    pub raw: RawTxArgs,
 
     /// MultiSend address (default: canonical for the Safe's version)
     #[arg(long)]
@@ -336,39 +321,59 @@ pub struct SendOpts {
     pub payer: PayerArgs,
 }
 
-impl Default for SendOpts {
-    fn default() -> Self {
-        Self {
-            bundle: None,
-            merge_bundle: Vec::new(),
-            approve_hash: false,
-            sign_only: false,
-            call_only: false,
-            simulate_only: false,
-            skip_simulation: false,
-            safe_tx_gas: None,
-            nonce: None,
-            gas_limit: None,
-            max_fee_per_gas: None,
-            max_priority_fee_per_gas: None,
-            raw_out: None,
-            no_submit: false,
-            timeout: DEFAULT_TIMEOUT,
-            trace: false,
-            sim: SimArgs::default(),
-            multi_send: None,
-            multi_send_call_only: None,
-            no_confirm: false,
-            #[cfg(feature = "hd-wallet")]
-            rotate: false,
-            #[cfg(feature = "hd-wallet")]
-            hd: HdArgs::default(),
-            #[cfg(feature = "hd-wallet")]
-            sweep: SweepArgs::default(),
-            password: PasswordArgs::default(),
-            payer: PayerArgs::default(),
-        }
-    }
+/// How a Safe transaction collects its signatures: `--bundle`,
+/// `--merge-bundle`, `--approve-hash` and `--sign-only`.
+///
+/// `--approve-hash` and `--sign-only` conflict with `--simulate-only` of
+/// [`SimulateArgs`]; a command that flattens both declares that itself, as
+/// [`SendOpts`] does, so this group also flattens on its own.
+#[derive(Args, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CollectArgs {
+    /// Path to bundle JSON file (reads calls and existing signatures; writes updated bundle when collecting offchain signatures)
+    #[arg(long)]
+    pub bundle: Option<PathBuf>,
+
+    /// Merge offchain signatures from additional bundle file(s) into this run
+    #[arg(long = "merge-bundle", value_name = "PATH")]
+    pub merge_bundle: Vec<PathBuf>,
+
+    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
+    #[arg(long, conflicts_with = "sign_only")]
+    pub approve_hash: bool,
+
+    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
+    #[arg(long)]
+    pub sign_only: bool,
+}
+
+/// Simulation of the outer transaction: `--simulate-only`, `--trace` and the
+/// [`SimArgs`] (`--block`, `--evm-spec`, `--block-time`).
+#[derive(Args, Clone, Debug, Default)]
+pub struct SimulateArgs {
+    /// Only simulate, don't sign or broadcast the outer transaction
+    #[arg(long)]
+    pub simulate_only: bool,
+
+    /// Print call traces of the simulated transaction
+    #[arg(long)]
+    pub trace: bool,
+
+    #[command(flatten)]
+    pub sim: SimArgs,
+}
+
+/// The signed transaction itself: `--raw-out` and `--no-submit`.
+#[derive(Args, Clone, Debug, Default, PartialEq, Eq)]
+pub struct RawTxArgs {
+    /// Write the signed transaction as JSON to PATH ("-" for stdout) before it
+    /// is broadcast
+    #[arg(long, value_name = "PATH")]
+    pub raw_out: Option<String>,
+
+    /// Sign the transaction but do not broadcast it (writes it to --raw-out,
+    /// stdout by default)
+    #[arg(long)]
+    pub no_submit: bool,
 }
 
 impl SendOpts {
@@ -377,32 +382,32 @@ impl SendOpts {
     pub fn validate(&self) -> Result<(), OptionsError> {
         let conflicts = [
             (
-                self.approve_hash && self.sign_only,
+                self.collect.approve_hash && self.collect.sign_only,
                 "--approve-hash",
                 "--sign-only",
             ),
             (
-                self.approve_hash && self.simulate_only,
+                self.collect.approve_hash && self.simulate.simulate_only,
                 "--approve-hash",
                 "--simulate-only",
             ),
             (
-                self.sign_only && self.simulate_only,
+                self.collect.sign_only && self.simulate.simulate_only,
                 "--sign-only",
                 "--simulate-only",
             ),
             (
-                self.skip_simulation && self.simulate_only,
+                self.skip_simulation && self.simulate.simulate_only,
                 "--skip-simulation",
                 "--simulate-only",
             ),
             (
-                self.raw_out.is_some() && self.simulate_only,
+                self.raw.raw_out.is_some() && self.simulate.simulate_only,
                 "--raw-out",
                 "--simulate-only",
             ),
             (
-                self.no_submit && self.simulate_only,
+                self.raw.no_submit && self.simulate.simulate_only,
                 "--no-submit",
                 "--simulate-only",
             ),
@@ -483,7 +488,7 @@ impl SendOpts {
         if let Some(flag) = self.safe_only_flag() {
             return Err(OptionsError::SafeOnly { flag });
         }
-        if self.gas_limit.is_some() && calls > 1 {
+        if self.fees.gas_limit.is_some() && calls > 1 {
             return Err(OptionsError::GasLimitForBatch { calls });
         }
         Ok(())
@@ -492,15 +497,15 @@ impl SendOpts {
     /// The first option given that only a send through a Safe uses.
     fn safe_only_flag(&self) -> Option<&'static str> {
         let safe_only = [
-            (self.bundle.is_some(), "--bundle"),
-            (!self.merge_bundle.is_empty(), "--merge-bundle"),
-            (self.approve_hash, "--approve-hash"),
-            (self.sign_only, "--sign-only"),
+            (self.collect.bundle.is_some(), "--bundle"),
+            (!self.collect.merge_bundle.is_empty(), "--merge-bundle"),
+            (self.collect.approve_hash, "--approve-hash"),
+            (self.collect.sign_only, "--sign-only"),
             (self.call_only, "--call-only"),
             (self.safe_tx_gas.is_some(), "--safe-tx-gas"),
             (self.nonce.is_some(), "--nonce"),
-            (self.raw_out.is_some(), "--raw-out"),
-            (self.no_submit, "--no-submit"),
+            (self.raw.raw_out.is_some(), "--raw-out"),
+            (self.raw.no_submit, "--no-submit"),
             (self.multi_send.is_some(), "--multi-send"),
             (
                 self.multi_send_call_only.is_some(),
@@ -555,6 +560,16 @@ pub fn parse_owner_swap(s: &str) -> Result<(Address, Address), String> {
 }
 
 #[derive(Parser, Clone)]
+#[command(
+    mut_arg("bundle", |a| a.help(
+        "Path to bundle JSON file. Saves the planned transaction and signatures \
+         when the threshold is not met; co-signers pass it without change flags",
+    )),
+    group(ArgGroup::new("config_approve_or_simulate").args(["approve_hash", "simulate_only"])),
+    group(ArgGroup::new("config_sign_or_simulate").args(["sign_only", "simulate_only"])),
+    group(ArgGroup::new("config_raw_or_simulate").args(["raw_out", "simulate_only"])),
+    group(ArgGroup::new("config_no_submit_or_simulate").args(["no_submit", "simulate_only"])),
+)]
 pub struct ConfigArgs {
     #[command(flatten)]
     pub safe: SafeArgs,
@@ -606,26 +621,11 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub allow_unchecked_guard: bool,
 
-    /// Path to bundle JSON file. Saves the planned transaction and signatures
-    /// when the threshold is not met; co-signers pass it without change flags
-    #[arg(long)]
-    pub bundle: Option<PathBuf>,
+    #[command(flatten)]
+    pub collect: CollectArgs,
 
-    /// Merge offchain signatures from additional bundle file(s) into this run
-    #[arg(long = "merge-bundle", value_name = "PATH")]
-    pub merge_bundle: Vec<PathBuf>,
-
-    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
-    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
-    pub approve_hash: bool,
-
-    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
-    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
-    pub sign_only: bool,
-
-    /// Only simulate, don't sign or broadcast the outer transaction
-    #[arg(long)]
-    pub simulate_only: bool,
+    #[command(flatten)]
+    pub simulate: SimulateArgs,
 
     /// Skip simulation, and with it the check of the resulting configuration
     /// (use with caution)
@@ -636,40 +636,11 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub nonce: Option<U256>,
 
-    /// Gas limit of the outer transaction (default: simulated gas + 20%)
-    #[arg(long)]
-    pub gas_limit: Option<u64>,
-
-    /// maxFeePerGas of the outer transaction: wei, or a number with a unit
-    /// ("30gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_fee_per_gas: Option<u128>,
-
-    /// maxPriorityFeePerGas of the outer transaction: wei, or a number with a
-    /// unit ("1gwei") (default: node estimate)
-    #[arg(long, value_parser = parse_fee_value)]
-    pub max_priority_fee_per_gas: Option<u128>,
-
-    /// Write the signed transaction as JSON to PATH ("-" for stdout) before it
-    /// is broadcast
-    #[arg(long, value_name = "PATH", conflicts_with = "simulate_only")]
-    pub raw_out: Option<String>,
-
-    /// Sign the transaction but do not broadcast it (writes it to --raw-out,
-    /// stdout by default)
-    #[arg(long, conflicts_with_all = ["simulate_only"])]
-    pub no_submit: bool,
-
-    /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
-    pub timeout: u64,
-
-    /// Print call traces of the simulated transaction
-    #[arg(long)]
-    pub trace: bool,
+    #[command(flatten)]
+    pub fees: FeeArgs,
 
     #[command(flatten)]
-    pub sim: SimArgs,
+    pub raw: RawTxArgs,
 
     /// MultiSendCallOnly address, used when there are several changes
     /// (default: canonical for the Safe's version)
@@ -685,7 +656,7 @@ pub struct ConfigArgs {
     pub hd: HdArgs,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 
     #[command(flatten)]
     pub password: PasswordArgs,
@@ -726,7 +697,7 @@ pub struct CallArgs {
     pub sim: SimArgs,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 
     #[command(flatten)]
     pub password: PasswordArgs,
@@ -748,7 +719,7 @@ pub struct InfoArgs {
     pub block: Option<BlockId>,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 
     #[command(flatten)]
     pub password: PasswordArgs,
@@ -780,80 +751,25 @@ pub struct ApprovalsArgs {
     pub block: Option<BlockId>,
 
     #[command(flatten)]
-    pub wallet: WalletArgs,
+    pub signer: SignerArgs,
 
     #[command(flatten)]
     pub password: PasswordArgs,
-}
-
-#[derive(Parser, Clone)]
-pub struct CreateArgs {
-    #[command(flatten)]
-    pub rpc: RpcArgs,
-
-    /// Salt nonce for CREATE2 (default: 0)
-    #[arg(long, default_value = "0")]
-    pub salt_nonce: U256,
-
-    /// Additional owner address (repeatable, signer is always included)
-    #[arg(long = "owner", value_name = "ADDR")]
-    pub owners: Vec<Address>,
-
-    /// Signature threshold (default: 1)
-    #[arg(long, default_value = "1")]
-    pub threshold: u64,
-
-    /// Only compute and display the address, don't deploy
-    #[arg(long)]
-    pub compute_only: bool,
-
-    /// Custom fallback handler address
-    #[arg(long)]
-    pub fallback_handler: Option<Address>,
-
-    /// Safe singleton address (default: based on --safe-version)
-    #[arg(long)]
-    pub singleton: Option<Address>,
-
-    /// Safe proxy factory address (default: based on --safe-version)
-    #[arg(long)]
-    pub factory: Option<Address>,
-
-    /// Safe version to use
-    #[arg(long, value_enum, default_value_t)]
-    pub safe_version: SafeVersion,
-
-    /// Skip confirmation prompt
-    #[arg(long)]
-    pub no_confirm: bool,
-
-    /// Deploy the same Safe an HD wallet created on another chain, given as
-    /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
-    /// must be rotated right away
-    #[cfg(feature = "hd-wallet")]
-    #[arg(long, value_name = "CHAIN_ID:SAFE", conflicts_with_all = ["owners", "salt_nonce", "safe_version", "singleton", "factory", "fallback_handler"])]
-    pub same_as: Option<String>,
-
-    #[cfg(feature = "hd-wallet")]
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    #[cfg(feature = "hd-wallet")]
-    #[command(flatten)]
-    pub sweep: SweepArgs,
-
-    #[command(flatten)]
-    pub wallet: WalletArgs,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
-
-    #[command(flatten)]
-    pub payer: PayerArgs,
 }
 
 #[cfg(feature = "hd-wallet")]
 #[derive(Parser, Clone)]
+#[command(
+    mut_arg("bundle", |a| a.help(
+        "Path to bundle JSON file (reads existing signatures/rotations; writes \
+         updated bundle when collecting offchain signatures)",
+    )),
+    mut_arg("simulate_only", |a| a.help(
+        "Only simulate, don't sign off or broadcast the transaction",
+    )),
+    group(ArgGroup::new("rotate_approve_or_simulate").args(["approve_hash", "simulate_only"])),
+    group(ArgGroup::new("rotate_sign_or_simulate").args(["sign_only", "simulate_only"])),
+)]
 pub struct RotateArgs {
     /// Safe contract address (default: the wallet's sole recorded Safe on this
     /// chain, or the legacy signer's default Safe with --from-*)
@@ -892,11 +808,29 @@ pub struct RotateArgs {
     #[command(flatten)]
     pub payer: PayerArgs,
 
-    /// Only simulate, don't sign off or broadcast the transaction
-    #[arg(long)]
-    pub simulate_only: bool,
+    #[command(flatten)]
+    pub simulate: SimulateArgs,
 
-    /// Gas limit of the outer transaction (default: simulated gas + 20%)
+    #[command(flatten)]
+    pub fees: FeeArgs,
+
+    /// MultiSendCallOnly address (default: canonical for the Safe's version)
+    #[arg(long)]
+    pub multi_send_call_only: Option<Address>,
+
+    #[command(flatten)]
+    pub collect: CollectArgs,
+
+    /// Skip confirmation prompt
+    #[arg(long)]
+    pub no_confirm: bool,
+}
+
+/// The fee and receipt flags of a transaction: `--gas-limit`,
+/// `--max-fee-per-gas`, `--max-priority-fee-per-gas` and `--timeout`.
+#[derive(Args, Clone, Debug, PartialEq, Eq)]
+pub struct FeeArgs {
+    /// Gas limit of the outer transaction (default: simulated or estimated gas + 20%)
     #[arg(long)]
     pub gas_limit: Option<u64>,
 
@@ -913,180 +847,130 @@ pub struct RotateArgs {
     /// Seconds to wait for the receipt after broadcasting
     #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
     pub timeout: u64,
-
-    /// Print call traces of the simulated transaction
-    #[arg(long)]
-    pub trace: bool,
-
-    #[command(flatten)]
-    pub sim: SimArgs,
-
-    /// MultiSendCallOnly address (default: canonical for the Safe's version)
-    #[arg(long)]
-    pub multi_send_call_only: Option<Address>,
-
-    /// Path to bundle JSON file (reads existing signatures/rotations; writes updated bundle when collecting offchain signatures)
-    #[arg(long)]
-    pub bundle: Option<PathBuf>,
-
-    /// Merge offchain signatures from additional bundle file(s) into this run
-    #[arg(long = "merge-bundle", value_name = "PATH")]
-    pub merge_bundle: Vec<PathBuf>,
-
-    /// Publish an on-chain approveHash(safeTxHash) transaction from the signer instead of executing or only saving offchain
-    #[arg(long, conflicts_with_all = ["sign_only", "simulate_only"])]
-    pub approve_hash: bool,
-
-    /// Only sign and save the signature to --bundle (do not execute on-chain even if threshold is met)
-    #[arg(long, conflicts_with_all = ["approve_hash", "simulate_only"])]
-    pub sign_only: bool,
-
-    /// Skip confirmation prompt
-    #[arg(long)]
-    pub no_confirm: bool,
 }
 
-#[cfg(feature = "hd-wallet")]
-#[derive(Subcommand, Clone)]
-pub enum WalletCommand {
-    /// Create an HD wallet from a new 24-word phrase and encrypt it to disk
-    New(WalletNewArgs),
-
-    /// Encrypt an existing BIP-39 phrase to disk as an HD wallet
-    Import(WalletImportArgs),
-
-    /// List the HD wallets on disk
-    List,
-
-    /// Print the wallet's funding address, or the address of one owner key
-    Address(WalletAddressArgs),
-
-    /// Show which keys own which Safe, and where to send gas money
-    Status(WalletStatusArgs),
-
-    /// Rebuild the record of used keys for a Safe from the chain
-    Sync(WalletSyncArgs),
-
-    /// Move the ETH left on a Safe's retired owner keys to its current owner
-    Sweep(WalletSweepArgs),
+impl Default for FeeArgs {
+    fn default() -> Self {
+        Self {
+            gas_limit: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            timeout: DEFAULT_TIMEOUT,
+        }
+    }
 }
 
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletNewArgs {
-    /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
-    pub name: String,
+/// The Safe `safe create` deploys: owners, threshold, salt and contracts.
+#[derive(Args, Clone, Debug, PartialEq, Eq)]
+pub struct SafeSetupArgs {
+    /// Additional owner address (repeatable, the first owner is always included)
+    #[arg(long = "owner", value_name = "ADDR")]
+    pub owners: Vec<Address>,
 
-    #[command(flatten)]
-    pub password: PasswordArgs,
-}
+    /// Signature threshold (default: 1)
+    #[arg(long, default_value = "1")]
+    pub threshold: u64,
 
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletImportArgs {
-    /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
-    pub name: String,
+    /// Salt nonce for CREATE2 (default: 0)
+    #[arg(long, default_value = "0")]
+    pub salt_nonce: U256,
 
-    /// File holding the phrase (default: prompt, without echo)
-    #[arg(long, value_name = "PATH")]
-    pub phrase_file: Option<PathBuf>,
-
-    /// First index to use for owner keys, for a phrase whose lower indices
-    /// were already used by another wallet
-    #[arg(long, value_name = "INDEX")]
-    pub start_index: Option<u32>,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
-}
-
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletAddressArgs {
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    /// Owner key index (default: the funding address, which needs no password)
+    /// Custom fallback handler address
     #[arg(long)]
-    pub index: Option<u32>,
+    pub fallback_handler: Option<Address>,
 
-    #[command(flatten)]
-    pub password: PasswordArgs,
-}
+    /// Safe version to use
+    #[arg(long, value_enum, default_value_t)]
+    pub safe_version: SafeVersion,
 
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletStatusArgs {
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    /// Only show this Safe
+    /// Safe singleton address (default: based on --safe-version)
     #[arg(long)]
-    pub safe: Option<Address>,
-}
+    pub singleton: Option<Address>,
 
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletSyncArgs {
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    #[command(flatten)]
-    pub safe: SafeArgs,
-
-    #[command(flatten)]
-    pub rpc: RpcArgs,
-
-    /// How many wallet indices to derive and compare (default: 1000 for an HD
-    /// wallet file, 52 for a Ledger, which answers one address at a time)
+    /// Safe proxy factory address (default: based on --safe-version)
     #[arg(long)]
-    pub scan_limit: Option<u32>,
-
-    /// Also read the Safe's owner events from this block on, to restore its
-    /// history and find keys that never paid for gas. Use the Safe's
-    /// deployment block or earlier
-    #[arg(long, value_name = "BLOCK")]
-    pub from_block: Option<u64>,
-
-    /// Blocks per eth_getLogs request
-    #[arg(long, default_value_t = 10_000, requires = "from_block")]
-    pub chunk: u64,
-
-    /// MultiSendCallOnly address (default: canonical v1.4.1)
-    #[arg(long)]
-    pub multi_send_call_only: Option<Address>,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
+    pub factory: Option<Address>,
 }
 
-#[cfg(feature = "hd-wallet")]
-#[derive(Args, Clone)]
-pub struct WalletSweepArgs {
-    #[command(flatten)]
-    pub hd: HdArgs,
-
-    #[command(flatten)]
-    pub safe: SafeArgs,
-
-    #[command(flatten)]
-    pub rpc: RpcArgs,
-
-    /// Wei to leave on the retired owner, or a number with a unit ("0.01ether")
-    /// (default: what the chain charges outside gas)
-    #[arg(long, value_name = "WEI", value_parser = parse_ether_value)]
-    pub sweep_reserve: Option<U256>,
-
-    /// Seconds to wait for the receipt after broadcasting
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT)]
-    pub timeout: u64,
-
-    #[command(flatten)]
-    pub password: PasswordArgs,
+impl Default for SafeSetupArgs {
+    fn default() -> Self {
+        Self {
+            owners: Vec::new(),
+            threshold: 1,
+            salt_nonce: U256::ZERO,
+            fallback_handler: None,
+            safe_version: SafeVersion::default(),
+            singleton: None,
+            factory: None,
+        }
+    }
 }
 
+/// A Safe setup with every default filled in: what the address is computed
+/// from and the deployment sends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSetup {
+    /// The first owner, then the `--owner`s in order, without duplicates
+    pub owners: Vec<Address>,
+    pub threshold: u64,
+    pub salt_nonce: U256,
+    pub singleton: Address,
+    pub factory: Address,
+    pub fallback_handler: Address,
+}
+
+impl SafeSetupArgs {
+    /// `first` followed by the `--owner`s, without duplicates: the order the
+    /// address is computed with.
+    pub fn owners(&self, first: Address) -> Vec<Address> {
+        let mut owners = vec![first];
+        for &owner in &self.owners {
+            if !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+        owners
+    }
+
+    /// Refuses a zero-address owner and a threshold outside 1..=owners.
+    /// Needs the first owner, so it runs once the key is known.
+    pub fn validate(&self, first: Address) -> Result<(), String> {
+        check_setup(&self.owners(first), self.threshold)
+    }
+
+    /// The setup with the version's contracts filled in, after
+    /// [`validate`](Self::validate).
+    pub fn resolve(&self, first: Address) -> ResolvedSetup {
+        let defaults = safe_rs::ChainAddresses::from(self.safe_version);
+        ResolvedSetup {
+            owners: self.owners(first),
+            threshold: self.threshold,
+            salt_nonce: self.salt_nonce,
+            singleton: self.singleton.unwrap_or(defaults.safe_singleton),
+            factory: self.factory.unwrap_or(defaults.proxy_factory),
+            fallback_handler: self.fallback_handler.unwrap_or(defaults.fallback_handler),
+        }
+    }
+}
+
+/// Refuses a zero-address owner and a threshold outside 1..=owners.
+pub(crate) fn check_setup(owners: &[Address], threshold: u64) -> Result<(), String> {
+    if owners.contains(&Address::ZERO) {
+        return Err("Zero address cannot be an owner".to_string());
+    }
+    if threshold == 0 || usize::try_from(threshold).map_or(true, |t| t > owners.len()) {
+        return Err(format!(
+            "Invalid threshold: {threshold} (must be 1-{})",
+            owners.len()
+        ));
+    }
+    Ok(())
+}
+
+/// The single key that signs: `--private-key` (`PRIVATE_KEY`), `--keystore`
+/// or `--interactive`.
 #[derive(Args, Clone, Default)]
-pub struct WalletArgs {
+pub struct SignerArgs {
     /// Raw private key
     #[arg(long, env = "PRIVATE_KEY")]
     pub private_key: Option<String>,
@@ -1100,7 +984,11 @@ pub struct WalletArgs {
     pub interactive: bool,
 }
 
-impl WalletArgs {
+/// The old name of [`SignerArgs`].
+#[deprecated(since = "0.14.0", note = "renamed to SignerArgs")]
+pub type WalletArgs = SignerArgs;
+
+impl SignerArgs {
     /// Whether any wallet option was given.
     pub fn is_set(&self) -> bool {
         self.interactive || self.keystore.is_some() || self.private_key.is_some()
@@ -1176,9 +1064,9 @@ fn redacted<T>(secret: Option<&T>) -> &'static str {
     }
 }
 
-impl fmt::Debug for WalletArgs {
+impl fmt::Debug for SignerArgs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WalletArgs")
+        f.debug_struct("SignerArgs")
             .field(
                 "private_key",
                 &format_args!("{}", redacted(self.private_key.as_ref())),
@@ -1255,7 +1143,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(args.value, U256::from(1_500_000_000_000_000_000_u128));
-        assert_eq!(args.opts.max_fee_per_gas, Some(2_000_000_000));
+        assert_eq!(args.opts.fees.max_fee_per_gas, Some(2_000_000_000));
         #[cfg(feature = "hd-wallet")]
         assert!(send(&["--rotate", "--sweep-reserve", "0.01ether"]).is_ok());
     }
@@ -1275,7 +1163,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(call.safe.safe, None);
-        assert!(call.wallet.is_set());
+        assert!(call.signer.is_set());
     }
 
     fn parse_info(args: &[&str]) -> Result<InfoArgs, clap::Error> {
@@ -1322,7 +1210,7 @@ mod tests {
 
         let info = parse_info(&["--private-key", "0x01"]).unwrap();
         assert_eq!(info.safe, None);
-        assert!(info.wallet.is_set());
+        assert!(info.signer.is_set());
 
         assert!(parse_info(&["--safe", SAFE]).is_err());
     }
@@ -1565,6 +1453,40 @@ mod tests {
         assert!(!send_eoa(send(&[]).unwrap()));
     }
 
+    /// Each shared group flattens on its own into a host's command: none
+    /// names an argument from another group.
+    #[test]
+    fn each_flag_group_flattens_alone() {
+        fn check<T: Args>(name: &'static str) {
+            T::augment_args(clap::Command::new(name)).debug_assert();
+        }
+        check::<CollectArgs>("collect");
+        check::<SimulateArgs>("simulate");
+        check::<FeeArgs>("fees");
+        check::<RawTxArgs>("raw");
+        check::<SendOpts>("send");
+        check::<SafeSetupArgs>("setup");
+    }
+
+    #[test]
+    fn the_groups_keep_their_conflicts_with_simulate_only() {
+        for flag in [
+            &["--approve-hash"][..],
+            &["--sign-only"],
+            &["--no-submit"],
+            &["--raw-out", "-"],
+        ] {
+            let args = [flag, &["--simulate-only"][..]].concat();
+            let error = send(&args).err().expect("a conflict");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{flag:?}"
+            );
+        }
+        assert!(send(&["--approve-hash", "--sign-only"]).is_err());
+    }
+
     #[test]
     fn an_eoa_send_refuses_what_only_a_safe_does() {
         let opts = SendOpts::default();
@@ -1579,7 +1501,10 @@ mod tests {
         );
         assert_eq!(with_nonce.validate_safe(true), Ok(()));
         let gas = SendOpts {
-            gas_limit: Some(21_000),
+            fees: FeeArgs {
+                gas_limit: Some(21_000),
+                ..FeeArgs::default()
+            },
             ..SendOpts::default()
         };
         assert_eq!(gas.validate_eoa(1), Ok(()));
@@ -1589,9 +1514,15 @@ mod tests {
         );
         // The flag conflicts come first, for either kind of send.
         let conflicting = SendOpts {
-            simulate_only: true,
+            simulate: SimulateArgs {
+                simulate_only: true,
+                ..SimulateArgs::default()
+            },
             skip_simulation: true,
-            bundle: Some("tx.json".into()),
+            collect: CollectArgs {
+                bundle: Some("tx.json".into()),
+                ..CollectArgs::default()
+            },
             ..SendOpts::default()
         };
         let conflict = Err(OptionsError::Conflict {

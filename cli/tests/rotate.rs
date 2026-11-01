@@ -43,6 +43,11 @@ struct Output {
 }
 
 impl Output {
+    /// Progress (stderr) followed by the result (stdout).
+    fn all(&self) -> String {
+        format!("{}\n{}", self.stderr, self.stdout)
+    }
+
     fn json(&self) -> Value {
         assert!(self.ok, "command failed:\n{}\n{}", self.stdout, self.stderr);
         serde_json::from_str(&self.stdout)
@@ -797,6 +802,8 @@ async fn a_signed_but_unsent_transaction_is_tracked_until_it_lands() {
     let dry = send(&["--simulate-only"]);
     assert!(dry.ok, "{}", dry.stderr);
     println!("{}", dry.stdout);
+    // The summary is progress, on stderr; the simulation result is on stdout.
+    let shown = dry.all();
     for expected in [
         "Owner: key 1",
         "Next owner: key ",
@@ -805,11 +812,7 @@ async fn a_signed_but_unsent_transaction_is_tracked_until_it_lands() {
         "Sweep: about",
         "Success: true",
     ] {
-        assert!(
-            dry.stdout.contains(expected),
-            "missing {expected:?}:\n{}",
-            dry.stdout
-        );
+        assert!(shown.contains(expected), "missing {expected:?}:\n{shown}");
     }
     assert_eq!(h.owners(safe).await, vec![key(1)]);
     let reserved = status();
@@ -864,7 +867,7 @@ async fn a_signed_but_unsent_transaction_is_tracked_until_it_lands() {
     let resumed = send(&["--no-confirm"]);
     assert!(resumed.ok, "{}\n{}", resumed.stdout, resumed.stderr);
     println!("{}", resumed.stdout);
-    assert!(resumed.stdout.contains("owed from"), "{}", resumed.stdout);
+    assert!(resumed.stderr.contains("owed from"), "{}", resumed.stderr);
     assert!(
         resumed.stdout.contains("Rotation: rotated"),
         "{}",

@@ -15,6 +15,7 @@ use safe_rs::{
 
 use crate::cli::SafeVersion;
 use crate::commands::HttpProvider;
+use crate::console::Console;
 
 /// The Safe a `--safe` command acts on: `--safe` (or `SAFE_ADDRESS`) when
 /// given, else the signer's default Safe, read at `block`.
@@ -23,6 +24,7 @@ pub(super) async fn safe_or_default(
     safe: Option<Address>,
     signer: Option<&PrivateKeySigner>,
     block: BlockId,
+    console: &Console,
 ) -> Result<Address> {
     if let Some(safe) = safe {
         return Ok(safe);
@@ -36,10 +38,10 @@ pub(super) async fn safe_or_default(
     let safe = read_default_safe(provider, signer.clone(), block)
         .await?
         .address;
-    eprintln!(
-        "Using the default Safe of signer {}: {safe}",
+    console.warn(format!(
+        "using the default Safe of signer {}: {safe}",
         signer.address()
-    );
+    ));
     Ok(safe)
 }
 
@@ -90,7 +92,7 @@ pub(super) async fn read_default_safe(
 ///
 /// `choose` tells how to pass an address instead, such as "--safe <SAFE>".
 #[cfg(feature = "hd-wallet")]
-pub(super) fn recorded_safe(state: &RotationState, chain_id: u64, choose: &str) -> Result<Address> {
+pub(crate) fn recorded_safe(state: &RotationState, chain_id: u64, choose: &str) -> Result<Address> {
     let mut candidates = Vec::new();
     for key in state.safes.keys() {
         let (chain, safe) = key

@@ -1,3 +1,10 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+
+# Only the CLI's terminal prompt (cli/src/prompt.rs) asks the terminal, so a
+# host that embeds the CLI decides how questions are asked.
+disallowed-methods = [
+    { path = "rpassword::prompt_password", reason = "ask through the Prompt trait (Console::secret)", allow-invalid = true },
+    { path = "dialoguer::Confirm::interact", reason = "ask through the Prompt trait (Console::confirm)", allow-invalid = true },
+]

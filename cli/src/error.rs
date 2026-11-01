@@ -1,12 +1,14 @@
-//! Errors of the library API: [`send`](crate::send) and the checks on
-//! [`SendOpts`](crate::args::SendOpts) (`validate`, `validate_safe` and
-//! `validate_eoa`).
+//! Errors of the library API: [`send`](crate::send),
+//! [`create`](crate::create::create), the [`wallet`](crate::wallet)
+//! functions, and the checks on their options.
 //!
-//! The `safe` binary and its other commands report errors with `eyre`; a
-//! [`SendError`] converts into an `eyre::Report` with `?`.
+//! The `safe` binary and its other commands report errors with `eyre`; every
+//! error here converts into an `eyre::Report` with `?`.
 
 use std::error::Error as StdError;
 use std::fmt;
+#[cfg(feature = "hd-wallet")]
+use std::path::PathBuf;
 
 use alloy::primitives::{Address, B256};
 use alloy::transports::TransportError;
@@ -48,6 +50,59 @@ pub enum OptionsError {
     /// one transaction
     #[error("--gas-limit applies to one transaction, but an EOA sends each of the {calls} calls as its own")]
     GasLimitForBatch { calls: usize },
+    /// A signer with `create --hd-wallet` / `--ledger`, where the owner key
+    /// comes from the wallet
+    #[error(
+        "the owner key comes from the HD wallet or Ledger: remove --private-key, --keystore \
+         and --interactive, and unset PRIVATE_KEY"
+    )]
+    SignerWithHd,
+    /// An option of `create` that only applies with `--hd-wallet` or
+    /// `--ledger`
+    #[error("{flag} needs --hd-wallet or --ledger")]
+    HdOnly { flag: &'static str },
+}
+
+/// A broadcast transaction that did not land: refused by the node, possibly
+/// sent, or sent without a receipt in time.
+///
+/// Shared by every command that broadcasts.
+/// [`may_be_pending`](Self::may_be_pending) tells apart the failures after
+/// which the transaction may still be mined.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum BroadcastError {
+    /// The node refused the signed transaction, so it was not sent
+    #[error("node rejected {tx_hash}: {reason} ({class:?})")]
+    Rejected {
+        tx_hash: B256,
+        reason: String,
+        class: RejectClass,
+    },
+    /// The broadcast failed in a way that leaves the transaction possibly
+    /// pending
+    #[error("broadcast of {tx_hash} is ambiguous and it may still be pending: {reason}")]
+    Ambiguous { tx_hash: B256, reason: String },
+    /// The transaction was sent but no receipt arrived within the timeout
+    #[error("no receipt for {tx_hash} after {timeout_secs}s; it may still be pending")]
+    ReceiptTimeout { tx_hash: B256, timeout_secs: u64 },
+}
+
+impl BroadcastError {
+    /// Whether the transaction may still be mined, so a retry could send it
+    /// twice.
+    pub fn may_be_pending(&self) -> bool {
+        matches!(self, Self::Ambiguous { .. } | Self::ReceiptTimeout { .. })
+    }
+
+    /// The transaction this is about.
+    pub fn tx_hash(&self) -> B256 {
+        match self {
+            Self::Rejected { tx_hash, .. }
+            | Self::Ambiguous { tx_hash, .. }
+            | Self::ReceiptTimeout { tx_hash, .. } => *tx_hash,
+        }
+    }
 }
 
 /// Why a send failed.
@@ -78,20 +133,10 @@ pub enum SendError {
          and collect signatures offchain, or --approve-hash to approve on-chain"
     )]
     BelowThreshold { have: usize, need: usize },
-    /// The node refused the signed transaction, so it was not sent
-    #[error("node rejected {tx_hash}: {reason} ({class:?})")]
-    Rejected {
-        tx_hash: B256,
-        reason: String,
-        class: RejectClass,
-    },
-    /// The broadcast failed in a way that leaves the transaction possibly
-    /// pending
-    #[error("broadcast of {tx_hash} is ambiguous and it may still be pending: {reason}")]
-    BroadcastAmbiguous { tx_hash: B256, reason: String },
-    /// The transaction was sent but no receipt arrived within the timeout
-    #[error("no receipt for {tx_hash} after {timeout_secs}s; it may still be pending")]
-    ReceiptTimeout { tx_hash: B256, timeout_secs: u64 },
+    /// The transaction was refused, may still be pending, or got no receipt
+    /// in time
+    #[error(transparent)]
+    Broadcast(#[from] BroadcastError),
     /// The rotating transaction was sent, or may have been, and is not
     /// confirmed. Its signature is public, so the old owner key counts as used.
     #[error(
@@ -177,18 +222,140 @@ impl SendError {
         if let Self::EoaBatchFailed { source, .. } = self {
             return source.may_be_pending();
         }
+        if let Self::Broadcast(error) = self {
+            return error.may_be_pending();
+        }
         matches!(
             self,
-            Self::BroadcastAmbiguous { .. }
-                | Self::ReceiptTimeout { .. }
-                | Self::RotationUnconfirmed { .. }
-                | Self::Safe(safe_rs::Error::Unconfirmed { .. })
+            Self::RotationUnconfirmed { .. } | Self::Safe(safe_rs::Error::Unconfirmed { .. })
         )
     }
 
     /// An [`Other`](Self::Other) error with `message`.
     pub(crate) fn other(message: impl fmt::Display) -> Self {
         Self::Other(message.to_string().into())
+    }
+}
+
+/// Why [`create`](crate::create::create) failed.
+///
+/// Every error after the deployment was signed carries the predicted `safe`,
+/// so a host can tell the user what to `safe wallet sync --safe` once it is
+/// mined.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CreateError {
+    /// The options conflict; nothing was signed or sent
+    #[error(transparent)]
+    Options(#[from] OptionsError),
+    /// No signer, and no `--hd-wallet` or `--ledger` to take the owner from
+    #[error("No wallet specified. Use --private-key, --keystore or --interactive, or --hd-wallet or --ledger")]
+    NoSigner,
+    /// A zero-address owner, or a threshold outside 1..=owners
+    #[error("{0}")]
+    InvalidSetup(String),
+    /// The predicted owner key turned out to be used on chain between the
+    /// preview and the reservation; nothing was sent. Running again picks the
+    /// next unused key.
+    #[error(
+        "the owner key changed while the deployment was prepared (key {previewed} was used on \
+         chain in the meantime); nothing was sent, run again"
+    )]
+    OwnerChanged { previewed: u32 },
+    /// The deployment was refused, may still be pending, or got no receipt
+    #[error("deploying Safe {safe}: {error}")]
+    Broadcast {
+        safe: Address,
+        #[source]
+        error: BroadcastError,
+    },
+    /// The deployment was mined and reverted
+    #[error("deployment transaction {tx_hash} of Safe {safe} reverted")]
+    Reverted { safe: Address, tx_hash: B256 },
+    /// The deployment was mined but there is no Safe at the predicted address
+    #[error("the deployment {tx_hash} was mined but there is no Safe at {safe}")]
+    NotDeployed { safe: Address, tx_hash: B256 },
+    /// An error from the Safe library
+    #[error(transparent)]
+    Safe(#[from] safe_rs::Error),
+    /// An RPC request failed
+    #[error(transparent)]
+    Rpc(#[from] TransportError),
+    /// Any other failure: the wallet file, its password, the state lock
+    #[error(transparent)]
+    Other(#[from] eyre::Report),
+}
+
+impl CreateError {
+    /// Whether the deployment may have been broadcast and still be mined, so
+    /// a retry could send it twice.
+    pub fn may_be_pending(&self) -> bool {
+        match self {
+            Self::Broadcast { error, .. } => error.may_be_pending(),
+            Self::Safe(safe_rs::Error::Unconfirmed { .. }) => true,
+            _ => false,
+        }
+    }
+
+    /// The Safe the failed deployment was for, once it was signed.
+    pub fn safe(&self) -> Option<Address> {
+        match self {
+            Self::Broadcast { safe, .. }
+            | Self::Reverted { safe, .. }
+            | Self::NotDeployed { safe, .. } => Some(*safe),
+            _ => None,
+        }
+    }
+}
+
+/// Why a [`wallet`](crate::wallet) function failed.
+#[cfg(feature = "hd-wallet")]
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum WalletError {
+    /// No HD wallet file by this name
+    #[error("no HD wallet at {path} (create one with `safe wallet new`)")]
+    NotFound { path: PathBuf },
+    /// A wallet file is already there
+    #[error("{} already exists", path.display())]
+    AlreadyExists { path: PathBuf },
+    /// The password does not open the wallet
+    #[error("Wrong keystore password (or corrupt keystore)")]
+    WrongPassword,
+    /// Another process holds the wallet's state
+    #[error("another safe command is using this HD wallet ({} is locked); wait for it to finish", path.display())]
+    Locked { path: PathBuf },
+    /// Not a valid BIP-39 phrase
+    #[error("invalid recovery phrase: {0}")]
+    InvalidPhrase(String),
+    /// `sync` and `sweep` read the chain
+    #[error("this needs --rpc-url (or ETH_RPC_URL)")]
+    NoRpcUrl,
+    /// Some sweeps could not be sent; the ones that were are in `swept`
+    #[error("{} sweep(s) could not be completed", still_owed.len())]
+    Sweep {
+        swept: Vec<crate::wallet::SweptEth>,
+        still_owed: Vec<crate::wallet::OwedSweep>,
+    },
+    /// Any other failure
+    #[error(transparent)]
+    Other(#[from] eyre::Report),
+}
+
+#[cfg(feature = "hd-wallet")]
+impl From<safe_rs::Error> for WalletError {
+    fn from(error: safe_rs::Error) -> Self {
+        match error {
+            safe_rs::Error::StateLocked(path) => Self::Locked { path: path.into() },
+            other => Self::Other(other.into()),
+        }
+    }
+}
+
+#[cfg(feature = "hd-wallet")]
+impl From<std::io::Error> for WalletError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Other(error.into())
     }
 }
 
@@ -224,14 +391,14 @@ mod tests {
     fn unconfirmed_transactions_may_be_pending() {
         let tx_hash = B256::repeat_byte(1);
         let pending = [
-            SendError::BroadcastAmbiguous {
+            SendError::Broadcast(BroadcastError::Ambiguous {
                 tx_hash,
                 reason: "connection reset".into(),
-            },
-            SendError::ReceiptTimeout {
+            }),
+            SendError::Broadcast(BroadcastError::ReceiptTimeout {
                 tx_hash,
                 timeout_secs: 60,
-            },
+            }),
             SendError::RotationUnconfirmed {
                 tx_hash,
                 reason: "no receipt".into(),
@@ -245,10 +412,10 @@ mod tests {
             SendError::EoaBatchFailed {
                 mined: vec![B256::repeat_byte(2)],
                 failed_index: 1,
-                source: Box::new(SendError::ReceiptTimeout {
+                source: Box::new(SendError::Broadcast(BroadcastError::ReceiptTimeout {
                     tx_hash,
                     timeout_secs: 60,
-                }),
+                })),
             },
         ];
         for error in pending {
@@ -260,11 +427,11 @@ mod tests {
             SendError::SimulationFailed {
                 reason: "GS013".into(),
             },
-            SendError::Rejected {
+            SendError::Broadcast(BroadcastError::Rejected {
                 tx_hash,
                 reason: "nonce too low".into(),
                 class: RejectClass::NonceTooLow,
-            },
+            }),
             SendError::Safe(safe_rs::Error::NoCalls),
             SendError::EoaBatchFailed {
                 mined: vec![B256::repeat_byte(2)],
@@ -275,6 +442,25 @@ mod tests {
         for error in settled {
             assert!(!error.may_be_pending(), "{error:?}");
         }
+    }
+
+    #[test]
+    fn create_errors_after_signing_name_the_safe() {
+        let safe = Address::repeat_byte(5);
+        let tx_hash = B256::repeat_byte(1);
+        let timeout = CreateError::Broadcast {
+            safe,
+            error: BroadcastError::ReceiptTimeout {
+                tx_hash,
+                timeout_secs: 120,
+            },
+        };
+        assert!(timeout.may_be_pending());
+        assert_eq!(timeout.safe(), Some(safe));
+        let reverted = CreateError::Reverted { safe, tx_hash };
+        assert!(!reverted.may_be_pending());
+        assert_eq!(reverted.safe(), Some(safe));
+        assert_eq!(CreateError::NoSigner.safe(), None);
     }
 
     #[test]
