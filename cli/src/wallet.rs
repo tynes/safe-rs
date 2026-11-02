@@ -433,6 +433,40 @@ pub fn new_wallet(ctx: &WalletContext, name: &str, password: &str) -> Result<Wal
     })
 }
 
+/// Warnings for a new Ledger wallet at `path` whose keys overlap those of
+/// another wallet: the default family (a bare `--ledger`, and phrase wallets
+/// of the same seed) or a Ledger wallet on disk. Each keeps its own record of
+/// used keys, so a one-time key could be handed out twice.
+fn overlap_warnings(home: &Path, path: &KeyPath) -> Vec<String> {
+    let mut others = vec![(
+        "a bare --ledger (and a phrase wallet of the same seed)".to_string(),
+        KeyPath::default(),
+    )];
+    if let Ok(entries) = std::fs::read_dir(paths::wallets_dir(home)) {
+        for entry in entries.flatten() {
+            let file = entry.path();
+            if let Some(wallet) = LedgerWallet::read(&file).ok().flatten() {
+                let name = file
+                    .file_stem()
+                    .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+                others.push((format!("Ledger wallet \"{name}\""), wallet.path));
+            }
+        }
+    }
+    others
+        .into_iter()
+        .filter(|(_, other)| path.overlaps(other))
+        .map(|(who, other)| {
+            format!(
+                "the keys of {path} overlap those of {who} ({other}) if both are on this \
+                 device: each keeps its own record of used keys, so a one-time key could be \
+                 handed out twice. Prefer a path of its own, such as another Ledger Live \
+                 account (m/44'/60'/1'/0/0)"
+            )
+        })
+        .collect()
+}
+
 /// Names an account on a connected Ledger: asks the device for the address
 /// of `path` (default: the first Ledger Live account, `m/44'/60'/0'/0/0`) and
 /// records both. Owner key `i` is `path` with `i` added to its last number.
@@ -447,7 +481,7 @@ pub async fn new_ledger_wallet(
     let path = path.unwrap_or_default();
     let keys = LedgerKeys::connect_at(path.clone()).await?;
     let address = keys.address(0).await?;
-    let mut warnings = Vec::new();
+    let mut warnings = overlap_warnings(&home, &path);
     if paths::state_file(&home, address).exists() {
         warnings.push(format!(
             "the keys of {path} are already on record ({}): this wallet continues from \
@@ -1203,6 +1237,29 @@ mod tests {
         };
         let error = wallet_status(&ctx, &missing).await.unwrap_err();
         assert!(matches!(error, WalletError::NotFound { .. }), "{error}");
+    }
+
+    #[test]
+    fn overlapping_ledger_paths_are_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallets = paths::wallets_dir(dir.path());
+        std::fs::create_dir_all(&wallets).unwrap();
+        let vault: KeyPath = "m/44'/60'/1'/0/0".parse().unwrap();
+        std::fs::write(
+            wallets.join("vault.json"),
+            LedgerWallet::new(vault, Address::repeat_byte(0x44)).to_json(),
+        )
+        .unwrap();
+
+        let path = |s: &str| s.parse::<KeyPath>().unwrap();
+        assert!(overlap_warnings(dir.path(), &KeyPath::default()).is_empty());
+        assert!(overlap_warnings(dir.path(), &path("m/44'/60'/2'/0/0")).is_empty());
+        let warnings = overlap_warnings(dir.path(), &path("m/44'/60'/0'/0/2"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("bare --ledger"), "{warnings:?}");
+        let warnings = overlap_warnings(dir.path(), &path("m/44'/60'/1'/0/5"));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("\"vault\""), "{warnings:?}");
     }
 
     #[test]

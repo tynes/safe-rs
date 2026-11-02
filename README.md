@@ -533,6 +533,7 @@ safe wallet status --wallet vault             # each Safe's owner key and its pa
 ```
 
 - **Paths.** `--path` takes any derivation path, with `'` or `h` (or `H`) for a hardened step; the default is the first Ledger Live account, `m/44'/60'/0'/0/0`. That path is the funding key (key 0), and owner key `i` is the same path with `i` added to its last number: `vault` above has owner keys `m/44'/60'/1'/0/1`, `m/44'/60'/1'/0/2` and so on. Each Ledger Live account is therefore its own wallet, with its own keys and its own record of used keys.
+- **Give each wallet a path of its own.** Paths that differ only in their last number (`m/44'/60'/0'/0/0` and `m/44'/60'/0'/0/2`) share owner keys but would keep separate records, so a one-time key could be handed out twice; `wallet new --ledger` warns about such a path. Another Ledger Live account (a different third number) never overlaps.
 - **The record of used keys** is kept under the funding address (`~/.safe-rs/state/<address>.json`), as for a phrase. Two wallets with the same path on the same device are the same keys, and share it. The first Ledger Live account's keys, `m/44'/60'/0'/0/i`, are those of the device's phrase, so a phrase wallet of the same seed shares its record too.
 - **A bare `--ledger`** (no wallet name) still works as before: under `--rotate` and on `safe wallet` it uses the first Ledger Live account; elsewhere it signs with one key, as in `cast` (`--mnemonic-index N` is the Ledger Live path `m/44'/60'/N'/0/0`). With a Ledger wallet, `--mnemonic-index N` is owner key `N` of that wallet instead.
 

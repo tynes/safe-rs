@@ -58,6 +58,21 @@ impl KeyPath {
     }
 }
 
+impl KeyPath {
+    /// Whether the keys of `self` and `other` overlap without being the same
+    /// family: both count up the same last step from different starts, so one
+    /// wallet's owner keys are the other's. (The same path is the same keys,
+    /// and shares one record of used keys; that is no overlap.)
+    pub fn overlaps(&self, other: &Self) -> bool {
+        let (Some((mine, my_parents)), Some((theirs, their_parents))) =
+            (self.components.split_last(), other.components.split_last())
+        else {
+            return false;
+        };
+        my_parents == their_parents && mine.hardened == theirs.hardened && mine != theirs
+    }
+}
+
 impl Default for KeyPath {
     /// The first Ledger Live account, `m/44'/60'/0'/0/0`.
     fn default() -> Self {
@@ -160,6 +175,17 @@ mod tests {
         let near_end: KeyPath = format!("m/0/{}", HARDENED - 2).parse().unwrap();
         assert!(near_end.key(1).is_ok());
         assert!(near_end.key(2).is_err());
+    }
+
+    #[test]
+    fn paths_counting_up_the_same_step_overlap() {
+        let path = |s: &str| s.parse::<KeyPath>().unwrap();
+        let first = KeyPath::default();
+        assert!(first.overlaps(&path("m/44'/60'/0'/0/2")));
+        assert!(!first.overlaps(&first), "the same keys share one record");
+        assert!(!first.overlaps(&path("m/44'/60'/1'/0/0")));
+        assert!(!first.overlaps(&path("m/44'/60'/0'/0/2'")));
+        assert!(!first.overlaps(&path("m/44'/60'/0'/1/0")));
     }
 
     #[test]
