@@ -812,13 +812,7 @@ impl SafeSetupArgs {
     /// `first` followed by the `--owner`s, without duplicates: the order the
     /// address is computed with.
     pub fn owners(&self, first: Address) -> Vec<Address> {
-        let mut owners = vec![first];
-        for &owner in &self.owners {
-            if !owners.contains(&owner) {
-                owners.push(owner);
-            }
-        }
-        owners
+        owners_with(first, &self.owners)
     }
 
     /// Refuses a zero-address owner and a threshold outside 1..=owners.
@@ -840,6 +834,17 @@ impl SafeSetupArgs {
             fallback_handler: self.fallback_handler.unwrap_or(defaults.fallback_handler),
         }
     }
+}
+
+/// `first` followed by `rest`, without duplicates.
+pub(crate) fn owners_with(first: Address, rest: &[Address]) -> Vec<Address> {
+    let mut owners = vec![first];
+    for &owner in rest {
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+    owners
 }
 
 /// Refuses a zero-address owner and a threshold outside 1..=owners.

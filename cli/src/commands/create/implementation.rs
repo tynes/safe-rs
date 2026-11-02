@@ -7,9 +7,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use alloy::primitives::{Address, Bytes};
-use safe_rs::encode_create_proxy_with_nonce;
+use safe_rs::{encode_create_proxy_with_nonce, fetch_proxy_creation_code, predict_safe_address};
 
-use super::{predict, CreateError};
+use super::CreateError;
 use crate::any_signer::AnySigner;
 pub use crate::cli::ResolvedSetup;
 pub use crate::commands::HttpProvider;
@@ -64,6 +64,34 @@ pub trait SafeImplementation: Send + Sync {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StandardSafe;
 
+impl StandardSafe {
+    /// The Safe `setup` deploys through the proxy factory, and its
+    /// `createProxyWithNonce` transaction. Needs no signer.
+    pub(crate) async fn deployment(
+        provider: &HttpProvider,
+        setup: &ResolvedSetup,
+    ) -> Result<SafeDeployment, CreateError> {
+        let creation_code = fetch_proxy_creation_code(provider, setup.factory).await?;
+        let (safe, initializer) = predict_safe_address(
+            setup.factory,
+            setup.singleton,
+            &setup.owners,
+            setup.threshold,
+            setup.fallback_handler,
+            setup.salt_nonce,
+            &creation_code,
+        );
+        Ok(SafeDeployment {
+            safe,
+            owners: setup.owners.clone(),
+            threshold: setup.threshold,
+            singleton: setup.singleton,
+            to: setup.factory,
+            input: encode_create_proxy_with_nonce(setup.singleton, initializer, setup.salt_nonce),
+        })
+    }
+}
+
 impl SafeImplementation for StandardSafe {
     fn name(&self) -> &'static str {
         "standard"
@@ -75,21 +103,7 @@ impl SafeImplementation for StandardSafe {
         setup: &'a ResolvedSetup,
         _owner: &'a AnySigner,
     ) -> BoxFuture<'a, Result<SafeDeployment, CreateError>> {
-        Box::pin(async move {
-            let (safe, initializer) = predict(provider, setup).await?;
-            Ok(SafeDeployment {
-                safe,
-                owners: setup.owners.clone(),
-                threshold: setup.threshold,
-                singleton: setup.singleton,
-                to: setup.factory,
-                input: encode_create_proxy_with_nonce(
-                    setup.singleton,
-                    initializer,
-                    setup.salt_nonce,
-                ),
-            })
-        })
+        Box::pin(Self::deployment(provider, setup))
     }
 }
 
