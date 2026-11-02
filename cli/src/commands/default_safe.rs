@@ -11,9 +11,25 @@ use safe_rs::{
 };
 
 use crate::any_signer::AnySigner;
-use crate::cli::SafeVersion;
+use crate::cli::{SafeVersion, SignerArgs};
 use crate::commands::HttpProvider;
 use crate::console::Console;
+use crate::signers::{create_signer, SIGNER_FLAGS_HELP};
+
+/// The signer `args` name, if they name one and it is `wanted`. A signer that
+/// only picks the default Safe is not wanted when the Safe is known, so a
+/// keystore is not unlocked for nothing.
+pub(super) async fn optional_signer(
+    args: &SignerArgs,
+    wanted: bool,
+    console: &Console,
+) -> Result<Option<AnySigner>> {
+    if wanted && args.is_set() {
+        Ok(Some(create_signer(args, console).await?))
+    } else {
+        Ok(None)
+    }
+}
 
 /// The Safe a `--safe` command acts on: `--safe` (or `SAFE_ADDRESS`) when
 /// given, else the signer's default Safe, read at `block`.
@@ -29,8 +45,8 @@ pub(super) async fn safe_or_default(
     }
     let Some(signer) = signer else {
         bail!(
-            "No Safe specified. Pass --safe (or set SAFE_ADDRESS), or --private-key, --keystore \
-             or --interactive to use the signer's default Safe"
+            "No Safe specified. Pass --safe (or set SAFE_ADDRESS), or {SIGNER_FLAGS_HELP} to use \
+             the signer's default Safe"
         );
     };
     let safe = read_default_safe(provider, signer.address(), block)

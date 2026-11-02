@@ -591,10 +591,11 @@ impl SignedTxOutput {
         }
     }
 
-    /// The document for a rotating transaction, including the owner swap.
-    pub fn for_rotation(tx: &RotationTx) -> Self {
+    /// The document for a rotating transaction, including its owner swap
+    /// (`plan`, from [`RotationPlanOutput::new`] of `tx`).
+    pub fn for_rotation(tx: &RotationTx, plan: RotationPlanOutput) -> Self {
         Self {
-            rotation: Some(RotationPlanOutput::new(tx)),
+            rotation: Some(plan),
             ..Self::new(&tx.signed, &tx.outer)
         }
     }
