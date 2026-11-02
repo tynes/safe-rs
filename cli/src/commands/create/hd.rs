@@ -18,8 +18,7 @@ use super::{
 };
 use crate::any_signer::AnySigner;
 use crate::cli::{check_setup, ResolvedSetup};
-use crate::commands::rotation::rotation_config;
-use crate::commands::{http_provider, latest_sim_spec, HttpProvider};
+use crate::commands::{head_rotation_config, http_provider, HttpProvider};
 use crate::console::Console;
 use crate::keys::CliKeys;
 use crate::output::Report;
@@ -397,8 +396,7 @@ pub(super) async fn create(
     // Set up the Safe with the next keys at hand.
     ring.look_ahead(SETUP_LOOKAHEAD).await?;
 
-    let spec = latest_sim_spec(&provider, chain_id, None, 12).await?;
-    let mut config = rotation_config(None, spec, 12, opts.fees.timeout);
+    let mut config = head_rotation_config(&provider, chain_id, None, opts.fees.timeout).await?;
     config.sweep_reserve = opts.sweep.sweep_reserve;
     let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     let report = rotating.sweep_all().await?;

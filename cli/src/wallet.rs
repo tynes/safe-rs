@@ -17,7 +17,9 @@ use rand::rngs::OsRng;
 use safe_rs::hd::{key_path, normalize_phrase};
 use safe_rs::keystore::{encrypt_mnemonic_keystore, keystore_address, ScryptParams};
 use safe_rs::rotation::store::write_private;
-use safe_rs::rotation::{Binding, Exposure, KeySource, RotatingSafe, RotationState};
+use safe_rs::rotation::{
+    Binding, Exposure, KeySource, RotatingSafe, RotationConfig, RotationState,
+};
 use safe_rs::HdWallet;
 use serde::Serialize;
 use url::Url;
@@ -25,10 +27,10 @@ use zeroize::Zeroizing;
 
 use crate::cli::{parse_ether_value, HdArgs, PasswordArgs, DEFAULT_TIMEOUT};
 use crate::commands::default_safe::recorded_safe;
-use crate::commands::rotation::rotation_config;
-use crate::commands::{http_provider, latest_sim_spec};
+use crate::commands::{head_rotation_config, http_provider, HttpProvider};
 use crate::console::{Console, Reports};
 pub use crate::error::WalletError;
+use crate::keys::CliKeys;
 use crate::log::{Logger, NoopLogger};
 use crate::output::Report;
 pub use crate::output::{OwnerKey, SweptEth};
@@ -720,24 +722,47 @@ impl Report for WalletSync {
     }
 }
 
-/// Rebuilds the record of used keys for the context's Safe (or the wallet's
-/// sole recorded Safe on the chain) from the chain.
-pub async fn sync_wallet(ctx: &WalletContext, opts: WalletSyncOpts) -> Result<WalletSync> {
-    let console = ctx.console();
+/// The wallet `hd` names, locked, around the context's Safe (or the wallet's
+/// sole recorded Safe on the context's chain), with the rotation config
+/// `configure` adjusts.
+async fn open_rotating(
+    ctx: &WalletContext,
+    hd: &HdArgs,
+    console: &Console,
+    multi_send_call_only: Option<Address>,
+    timeout: u64,
+    configure: impl FnOnce(&mut RotationConfig),
+) -> Result<(RotatingSafe<HttpProvider, CliKeys>, Address)> {
     let rpc_url = ctx.rpc_url()?;
-    let ring = open_wallet(&opts.hd, ctx.home.as_deref(), &console)
+    let ring = open_wallet(hd, ctx.home.as_deref(), console)
         .await
         .map_err(classify)?;
     let provider = http_provider(rpc_url);
     let chain_id = provider.get_chain_id().await.map_err(|e| eyre!(e))?;
-    let spec = latest_sim_spec(&provider, chain_id, None, 12).await?;
-    let mut config = rotation_config(opts.multi_send_call_only, spec, 12, 120);
-    config.scan_limit = opts.scan_limit;
+    let mut config =
+        head_rotation_config(&provider, chain_id, multi_send_call_only, timeout).await?;
+    configure(&mut config);
     let safe = match ctx.safe {
         Some(safe) => safe,
         None => recorded_safe(ring.state(), chain_id, "--safe")?,
     };
-    let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
+    let rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
+    Ok((rotating, safe))
+}
+
+/// Rebuilds the record of used keys for the context's Safe (or the wallet's
+/// sole recorded Safe on the chain) from the chain.
+pub async fn sync_wallet(ctx: &WalletContext, opts: WalletSyncOpts) -> Result<WalletSync> {
+    let console = ctx.console();
+    let (mut rotating, safe) = open_rotating(
+        ctx,
+        &opts.hd,
+        &console,
+        opts.multi_send_call_only,
+        DEFAULT_TIMEOUT,
+        |config| config.scan_limit = opts.scan_limit,
+    )
+    .await?;
     let report = rotating.sync(opts.from_block, opts.chunk).await?;
     let warnings = rotating.take_warnings();
     console.warnings(&warnings);
@@ -790,20 +815,10 @@ impl Report for WalletSweep {
 /// sent and the ones still owed.
 pub async fn sweep_wallet(ctx: &WalletContext, opts: WalletSweepOpts) -> Result<WalletSweep> {
     let console = ctx.console();
-    let rpc_url = ctx.rpc_url()?;
-    let ring = open_wallet(&opts.hd, ctx.home.as_deref(), &console)
-        .await
-        .map_err(classify)?;
-    let provider = http_provider(rpc_url);
-    let chain_id = provider.get_chain_id().await.map_err(|e| eyre!(e))?;
-    let spec = latest_sim_spec(&provider, chain_id, None, 12).await?;
-    let mut config = rotation_config(None, spec, 12, opts.timeout);
-    config.sweep_reserve = opts.sweep_reserve;
-    let safe = match ctx.safe {
-        Some(safe) => safe,
-        None => recorded_safe(ring.state(), chain_id, "--safe")?,
-    };
-    let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
+    let (mut rotating, _) = open_rotating(ctx, &opts.hd, &console, None, opts.timeout, |config| {
+        config.sweep_reserve = opts.sweep_reserve;
+    })
+    .await?;
     rotating.schedule_retired_sweeps().await?;
     let report = rotating.sweep_all().await?;
     let warnings = rotating.take_warnings();
