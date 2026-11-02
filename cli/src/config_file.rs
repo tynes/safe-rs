@@ -386,6 +386,38 @@ mod tests {
         assert_eq!(host.signer.keystore_path.as_deref(), Some("/keys/me.json"));
     }
 
+    /// The hand-kept lists of signer ids follow `SignerArgs`: every option
+    /// that names a key, and only those, with the switches among them.
+    #[test]
+    fn the_signer_flag_lists_match_signer_args() {
+        use std::collections::BTreeSet;
+
+        use clap::{ArgAction, Args};
+
+        // Options that refine a key rather than name one.
+        const NOT_KEYS: [&str; 6] = [
+            "from",
+            "mnemonic_passphrase",
+            "hd_path",
+            "mnemonic_index",
+            "keystore_password",
+            "keystore_password_file",
+        ];
+        let command = SignerArgs::augment_args(Command::new("signer"));
+        let keys: Vec<_> = command
+            .get_arguments()
+            .filter(|arg| !NOT_KEYS.contains(&arg.get_id().as_str()))
+            .collect();
+        let ids: BTreeSet<&str> = keys.iter().map(|arg| arg.get_id().as_str()).collect();
+        assert_eq!(ids, SIGNER_FLAGS.into_iter().collect());
+        let switches: BTreeSet<&str> = keys
+            .iter()
+            .filter(|arg| matches!(arg.get_action(), ArgAction::SetTrue))
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        assert_eq!(switches, SWITCHES.into_iter().collect());
+    }
+
     #[test]
     fn the_whole_tree_stays_valid() {
         let config = ConfigFile {
