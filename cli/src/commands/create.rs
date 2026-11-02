@@ -394,7 +394,7 @@ async fn create_with(
     console: &Console,
 ) -> Result<CreateOutcome, CreateError> {
     opts.validate(ctx.signer.is_some())?;
-    if opts.hd.is_set() {
+    if opts.uses_hd() {
         return Box::pin(hd::create(ctx, opts, console)).await;
     }
     let signer = ctx.signer.ok_or(CreateError::NoSigner)?;
