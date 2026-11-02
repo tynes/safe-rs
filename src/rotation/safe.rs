@@ -444,10 +444,7 @@ where
             .block(block)
             .call()
             .await
-            .map_err(|e| Error::Fetch {
-                what: "owners",
-                reason: e.to_string(),
-            })
+            .map_err(Error::fetch("owners"))
     }
 
     /// Starts tracking a Safe from what the chain shows.

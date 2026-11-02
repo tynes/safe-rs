@@ -18,7 +18,6 @@ use std::future::Future;
 use alloy::network::AnyNetwork;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 
 use crate::envelope::{PreparedSafeTx, SignedSafeTx};
 use crate::error::{Error, Result};
@@ -66,28 +65,17 @@ pub trait KeySource: Send + Sync {
     ) -> impl Future<Output = Result<SignedOuterTx>> + Send;
 }
 
-impl HdWallet {
-    /// Key `index`, the funding key included.
-    fn key(&self, index: u32) -> Result<PrivateKeySigner> {
-        if index == 0 {
-            Ok(self.funding().clone())
-        } else {
-            self.owner(index)
-        }
-    }
-}
-
 impl KeySource for HdWallet {
     fn address(&self, index: u32) -> impl Future<Output = Result<Address>> + Send {
-        std::future::ready(self.key(index).map(|key| key.address()))
+        std::future::ready(self.key_at(index).map(|key| key.address()))
     }
 
     async fn sign_safe_tx(&self, index: u32, tx: &PreparedSafeTx) -> Result<SignedSafeTx> {
-        tx.sign(&self.key(index)?).await
+        tx.sign(&self.key_at(index)?).await
     }
 
     async fn sign_outer_tx(&self, index: u32, params: OuterTxParams) -> Result<SignedOuterTx> {
-        sign_outer_tx(&self.key(index)?, params).await
+        sign_outer_tx(&self.key_at(index)?, params).await
     }
 }
 

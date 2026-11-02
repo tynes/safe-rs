@@ -119,10 +119,7 @@ pub async fn fetch_proxy_creation_code<P: Provider<N>, N: Network>(
         .proxyCreationCode()
         .call()
         .await
-        .map_err(|e| Error::Fetch {
-            what: "proxy creation code",
-            reason: e.to_string(),
-        })
+        .map_err(Error::fetch("proxy creation code"))
 }
 
 /// Predicts a Safe address and returns it with the initializer used.

@@ -113,6 +113,14 @@ where
         let config = ChainConfig::new(chain_id);
         Ok(Self::new(provider, signer, config, rpc_url))
     }
+
+    /// The signer's account nonce
+    async fn account_nonce(&self) -> Result<u64> {
+        self.provider
+            .get_transaction_count(Signer::address(&self.signer))
+            .await
+            .map_err(Error::fetch("nonce"))
+    }
 }
 
 /// Builder for constructing and executing EOA transaction batches
@@ -141,18 +149,6 @@ where
             #[cfg(feature = "simulation")]
             aggregated_result: None,
         }
-    }
-
-    /// Validates that no calls use DelegateCall operation
-    fn validate_operations(&self) -> Result<()> {
-        for (i, call) in self.calls.iter().enumerate() {
-            if call.operation == Operation::DelegateCall {
-                return Err(Error::UnsupportedEoaOperation {
-                    operation: format!("DelegateCall (call index {})", i),
-                });
-            }
-        }
-        Ok(())
     }
 
     /// Continue executing remaining transactions even if one fails
@@ -195,11 +191,7 @@ where
     /// and then call `execute()` which will use the simulation gas values.
     #[cfg(feature = "simulation")]
     pub async fn simulate(mut self) -> Result<Self> {
-        if self.calls.is_empty() {
-            return Err(Error::NoCalls);
-        }
-
-        self.validate_operations()?;
+        check_eoa_calls(&self.calls)?;
 
         let mut simulator = ForkSimulator::new(self.eoa.provider.clone(), self.eoa.config.chain_id);
 
@@ -306,46 +298,37 @@ where
     /// If simulation was performed, uses the simulated gas + 10% buffer.
     /// If no simulation, estimates gas via `eth_estimateGas` RPC call.
     pub async fn execute(self) -> Result<EoaBatchResult> {
-        if self.calls.is_empty() {
-            return Err(Error::NoCalls);
-        }
+        check_eoa_calls(&self.calls)?;
 
-        self.validate_operations()?;
-
-        let mut nonce = self
-            .eoa
-            .provider
-            .get_transaction_count(self.eoa.address())
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "nonce",
-                reason: e.to_string(),
-            })?;
+        let mut nonce = self.eoa.account_nonce().await?;
+        // Wallet-attached provider for signed transactions
+        let wallet_provider = ProviderBuilder::new()
+            .network::<AnyNetwork>()
+            .wallet(EthereumWallet::from(self.eoa.signer.clone()))
+            .connect_http(self.eoa.rpc_url.clone());
         let mut results = Vec::with_capacity(self.calls.len());
         let mut success_count = 0;
         let mut failure_count = 0;
         let mut first_failure = None;
 
         for (i, call) in self.calls.iter().enumerate() {
+            let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
+                .with_from(self.eoa.address())
+                .with_to(call.to)
+                .with_value(call.value)
+                .with_input(call.data.clone())
+                .with_nonce(nonce);
+
             // Determine gas: use fixed gas limit if set, then simulation result, otherwise estimate
             let gas_with_buffer = if let Some(fixed_gas) = call.gas_limit {
                 fixed_gas
             } else if let Some(gas_used) = self.simulated_gas(i) {
                 gas_used + gas_used / 10
             } else {
-                // Build transaction for gas estimation
-                let tx_request =
-                    <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
-                        .with_from(self.eoa.address())
-                        .with_to(call.to)
-                        .with_value(call.value)
-                        .with_input(call.data.clone())
-                        .with_nonce(nonce);
-
                 let gas_limit = self
                     .eoa
                     .provider
-                    .estimate_gas(tx_request)
+                    .estimate_gas(tx_request.clone())
                     .await
                     .map_err(|e| Error::TransactionSendFailed {
                         index: i,
@@ -355,24 +338,9 @@ where
                 gas_limit + gas_limit / 10
             };
 
-            // Build transaction
-            let tx_request = <AnyNetwork as alloy::network::Network>::TransactionRequest::default()
-                .with_from(self.eoa.address())
-                .with_to(call.to)
-                .with_value(call.value)
-                .with_input(call.data.clone())
-                .with_nonce(nonce)
-                .with_gas_limit(gas_with_buffer);
-
-            // Create wallet-attached provider for signed transactions
-            let wallet_provider = ProviderBuilder::new()
-                .network::<AnyNetwork>()
-                .wallet(EthereumWallet::from(self.eoa.signer.clone()))
-                .connect_http(self.eoa.rpc_url.clone());
-
             // Send transaction
             let pending_tx = wallet_provider
-                .send_transaction(tx_request)
+                .send_transaction(tx_request.with_gas_limit(gas_with_buffer))
                 .await
                 .map_err(|e| Error::TransactionSendFailed {
                     index: i,
@@ -537,15 +505,7 @@ where
     }
 
     async fn nonce(&self) -> crate::error::Result<U256> {
-        let nonce = self
-            .provider
-            .get_transaction_count(Signer::address(&self.signer))
-            .await
-            .map_err(|e| Error::Fetch {
-                what: "nonce",
-                reason: e.to_string(),
-            })?;
-        Ok(U256::from(nonce))
+        Ok(U256::from(self.account_nonce().await?))
     }
 
     fn batch(&self) -> EoaBuilder<'_, P, S> {
@@ -716,9 +676,19 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_operations_rejects_delegatecall() {
-        // This test verifies at compile time that the types work
-        let _addr = address!("0x1234567890123456789012345678901234567890");
+    fn check_eoa_calls_rejects_empty_and_delegatecall() {
+        let to = address!("0x1234567890123456789012345678901234567890");
+        assert!(matches!(check_eoa_calls(&[]), Err(Error::NoCalls)));
+        assert!(check_eoa_calls(&[Call::new(to, U256::ZERO, Bytes::new())]).is_ok());
+        let calls = [
+            Call::new(to, U256::ZERO, Bytes::new()),
+            Call::delegate_call(to, Bytes::new()),
+        ];
+        assert!(matches!(
+            check_eoa_calls(&calls),
+            Err(Error::UnsupportedEoaOperation { operation })
+                if operation == "DelegateCall (call index 1)"
+        ));
     }
 
     #[test]
@@ -814,32 +784,5 @@ mod tests {
         assert_eq!(hashes[0], hash1);
         assert_eq!(hashes[1], hash2);
         assert_eq!(hashes[2], hash3);
-    }
-
-    #[test]
-    fn test_call_with_regular_operation() {
-        let to = address!("0x1234567890123456789012345678901234567890");
-        let value = U256::from(1000);
-        let data = Bytes::from(vec![0x01, 0x02, 0x03]);
-
-        let call = Call::new(to, value, data.clone());
-
-        assert_eq!(call.to, to);
-        assert_eq!(call.value, value);
-        assert_eq!(call.data, data);
-        assert_eq!(call.operation, Operation::Call);
-    }
-
-    #[test]
-    fn test_delegate_call_creates_correct_operation() {
-        let to = address!("0x1234567890123456789012345678901234567890");
-        let data = Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]);
-
-        let call = Call::delegate_call(to, data.clone());
-
-        assert_eq!(call.to, to);
-        assert_eq!(call.value, U256::ZERO);
-        assert_eq!(call.data, data);
-        assert_eq!(call.operation, Operation::DelegateCall);
     }
 }
