@@ -32,8 +32,8 @@ use crate::cli::{OwnerKeysArgs, SweepArgs};
 use crate::commands::{http_provider, outer_fees, with_gas_margin, RECEIPT_POLL_INTERVAL};
 use crate::console::Console;
 pub use crate::error::CreateError;
-use crate::error::{BroadcastError, OptionsError};
-use crate::log::{Logger, NoopLogger};
+use crate::error::{short_ether, BroadcastError, OptionsError};
+use crate::log::{Level, Logger, NoopLogger};
 use crate::output::{CreateOutput, Report};
 pub use crate::output::{OwnerKey, SweptEth};
 use crate::prompt::{Prompt, TerminalPrompt};
@@ -64,6 +64,19 @@ pub struct CreateOpts {
 
     #[command(flatten)]
     pub fees: FeeArgs,
+
+    /// When the account that pays holds too little ETH, wait for it to be
+    /// funded instead of failing: `--wait-for-funds` waits without a limit,
+    /// `--wait-for-funds=SECS` gives up after SECS seconds. With --rotate, no
+    /// wallet key is used until the funds arrive
+    #[arg(
+        long,
+        value_name = "SECS",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "0"
+    )]
+    pub wait_for_funds: Option<u64>,
 
     /// Deploy the same Safe a mnemonic wallet created on another chain, given as
     /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
@@ -341,7 +354,7 @@ impl Report for CreateOutcome {
 /// rotating document when a mnemonic wallet key owns the Safe, else the plain one.
 #[derive(Serialize)]
 #[serde(untagged)]
-enum Document {
+pub(crate) enum Document {
     Plain(CreateOutput),
     Rotating(rotating::RotatingCreateOutput),
 }
@@ -355,7 +368,7 @@ impl Report for Document {
     }
 }
 
-fn document(outcome: &CreateOutcome) -> Option<Document> {
+pub(crate) fn document(outcome: &CreateOutcome) -> Option<Document> {
     let none = Vec::new();
     let (safe, tx_hash, owners, threshold, already_deployed, owner_key, payer, sweep, warnings) =
         match outcome {
@@ -436,7 +449,7 @@ pub async fn create(ctx: CreateContext, opts: CreateOpts) -> Result<CreateOutcom
     create_with(ctx, opts, &console).await
 }
 
-async fn create_with(
+pub(crate) async fn create_with(
     ctx: CreateContext,
     opts: CreateOpts,
     console: &Console,
@@ -508,15 +521,26 @@ async fn create_with(
     }
 
     let chain_id = provider.get_chain_id().await?;
-    let params = deployment_tx(
-        &provider,
-        chain_id,
-        payer.address(),
-        plan.to,
-        plan.input.clone(),
-        &opts.fees,
-    )
-    .await?;
+    let tx = || {
+        deployment_tx(
+            &provider,
+            chain_id,
+            payer.address(),
+            plan.to,
+            plan.input.clone(),
+            &opts.fees,
+        )
+    };
+    let mut params = tx().await?;
+    let funding = Payer {
+        label: "the deployer",
+        sweeps: false,
+        resume: None,
+    };
+    if ensure_funds(&provider, &params, opts.wait_for_funds, &funding, console).await? {
+        // Fees may have moved while waiting.
+        params = tx().await?;
+    }
     let outer = sign_outer_tx(&payer, params).await?;
     let tx_hash = submit(&provider, &outer, safe, opts.fees.timeout, console).await?;
     if !is_safe_with(&provider, safe, &[plan.singleton]).await? {
@@ -574,6 +598,102 @@ pub(crate) async fn deployment_tx(
         value: U256::ZERO,
         input,
     })
+}
+
+/// How often the payer's balance is read under `--wait-for-funds`.
+const FUNDS_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Gas set aside for the Safe's first rotating send, for the amount
+/// suggested when the funding key pays and sweeps the rest to the owner.
+const FIRST_SEND_GAS: u64 = 300_000;
+
+/// Who pays for a deployment, for the funding messages.
+pub(crate) struct Payer<'a> {
+    /// "the funding address" or "the deployer"
+    pub label: &'a str,
+    /// Whether what is left moves to the Safe's owner key afterwards, so a
+    /// little more than the deployment is worth sending
+    pub sweeps: bool,
+    /// With --rotate, before a new owner key is used: the command that
+    /// creates the same Safe later, so stopping the wait is safe
+    pub resume: Option<String>,
+}
+
+/// Checks that `params.from` holds what `params` can cost. Without `wait`,
+/// fails with [`CreateError::NeedsFunding`]; with it, says how much to send
+/// and polls the balance until it is there, or until `wait` seconds pass
+/// (`0`: no limit). Returns whether it waited.
+pub(crate) async fn ensure_funds(
+    provider: &HttpProvider,
+    params: &OuterTxParams,
+    wait: Option<u64>,
+    payer: &Payer<'_>,
+    console: &Console,
+) -> Result<bool, CreateError> {
+    let needed = U256::from(params.gas_limit) * U256::from(params.max_fee_per_gas) + params.value;
+    let mut balance = provider.get_balance(params.from).await?;
+    if balance >= needed {
+        return Ok(false);
+    }
+    let needs_funding = |balance| CreateError::NeedsFunding {
+        payer: params.from,
+        chain_id: params.chain_id,
+        needed,
+        balance,
+    };
+    let Some(limit) = wait else {
+        return Err(needs_funding(balance));
+    };
+
+    let address = params.from;
+    let chain_id = params.chain_id;
+    if console.logger().enabled(Level::Info) {
+        let mut s = format!(
+            "Send at least {} ETH to {} ({address}) on chain {chain_id}.",
+            short_ether(needed - balance),
+            payer.label
+        );
+        if payer.sweeps {
+            let first_send = U256::from(FIRST_SEND_GAS) * U256::from(params.max_fee_per_gas);
+            let _ = write!(
+                s,
+                "\n  Recommended: {} ETH. What is left after the deployment moves to the Safe's \
+                 owner key and pays for its next transactions.",
+                short_ether(needed + first_send - balance)
+            );
+        }
+        let _ = write!(s, "\nWaiting for funds");
+        if limit > 0 {
+            let _ = write!(s, " (up to {limit}s)");
+        }
+        s.push_str("...");
+        if let Some(resume) = &payer.resume {
+            let _ = write!(
+                s,
+                "\nCtrl-C is safe: no wallet key has been used yet, and `{resume}` with the \
+                 same options creates the same Safe later."
+            );
+        }
+        console.line(s);
+    } else {
+        console.warn(format!(
+            "waiting for {address} to hold {} ETH on chain {chain_id}",
+            short_ether(needed)
+        ));
+    }
+
+    let deadline = (limit > 0).then(|| std::time::Instant::now() + Duration::from_secs(limit));
+    loop {
+        tokio::time::sleep(FUNDS_POLL_INTERVAL).await;
+        balance = provider.get_balance(address).await?;
+        if balance >= needed {
+            console.line(format!("  {address} holds {} ETH", short_ether(balance)));
+            return Ok(true);
+        }
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            return Err(needs_funding(balance));
+        }
+    }
 }
 
 /// Broadcasts the signed deployment of `safe` and waits up to `timeout`
@@ -670,6 +790,20 @@ mod tests {
     #[test]
     fn the_create_flags_are_consistent() {
         CreateArgs::command().debug_assert();
+    }
+
+    #[test]
+    fn wait_for_funds_takes_an_optional_limit() {
+        let parse = |extra: &[&str]| {
+            let args = ["create", "--rpc-url", "http://localhost:8545"];
+            CreateArgs::try_parse_from(args.iter().chain(extra))
+                .unwrap()
+                .opts
+                .wait_for_funds
+        };
+        assert_eq!(parse(&[]), None);
+        assert_eq!(parse(&["--wait-for-funds"]), Some(0), "no limit");
+        assert_eq!(parse(&["--wait-for-funds=30"]), Some(30));
     }
 
     #[test]

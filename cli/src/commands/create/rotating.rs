@@ -13,8 +13,8 @@ use safe_rs::{is_safe_with, sign_outer_tx};
 use serde::Serialize;
 
 use super::{
-    deployment_tx, submit, CreateContext, CreateError, CreateOpts, CreateOutcome, OwnerKey,
-    StandardSafe, SweptEth,
+    deployment_tx, ensure_funds, submit, CreateContext, CreateError, CreateOpts, CreateOutcome,
+    OwnerKey, Payer, StandardSafe, SweptEth,
 };
 use crate::any_signer::AnySigner;
 use crate::cli::{check_setup, owners_with, ResolvedSetup};
@@ -62,7 +62,7 @@ pub fn parse_same_as(value: &str) -> Result<SameAs, String> {
 
 /// The result of `safe create --rotate`.
 #[derive(Serialize)]
-pub(super) struct RotatingCreateOutput {
+pub(crate) struct RotatingCreateOutput {
     pub(super) safe_address: Address,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) tx_hash: Option<TxHash>,
@@ -269,6 +269,45 @@ pub(super) async fn create(
         }
     }
 
+    // Before any key is used: a payer that cannot cover the deployment fails
+    // here (or waits), so running again later gives the same Safe. The
+    // deployment is signed with the params checked last, so fees that rose
+    // during a wait are checked again rather than failing once the key is used.
+    let mut deployment = None;
+    if !already_deployed {
+        let tx = || {
+            deployment_tx(
+                &provider,
+                chain_id,
+                payer,
+                plan.to,
+                plan.input.clone(),
+                &opts.fees,
+            )
+        };
+        let mut params = tx().await?;
+        let funding = Payer {
+            label: if funded_by_wallet {
+                "the funding address"
+            } else {
+                "the gas payer"
+            },
+            sweeps: sweep,
+            resume: fresh.then(|| {
+                let keys = opts
+                    .owner_keys
+                    .mnemonic
+                    .as_deref()
+                    .map_or_else(|| "--ledger".to_string(), |name| format!("--wallet {name}"));
+                format!("safe create --rotate {keys}")
+            }),
+        };
+        while ensure_funds(&provider, &params, opts.wait_for_funds, &funding, console).await? {
+            params = tx().await?;
+        }
+        deployment = Some(params);
+    }
+
     // Reserve the key now that the user agreed. Only a key used on chain
     // since the preview can make the commit land elsewhere.
     if fresh {
@@ -281,16 +320,14 @@ pub(super) async fn create(
         }
     }
 
-    let tx_hash = if already_deployed {
-        None
-    } else {
-        let params =
-            deployment_tx(&provider, chain_id, payer, plan.to, plan.input, &opts.fees).await?;
+    let tx_hash = if let Some(params) = deployment {
         let outer = match &explicit_payer {
             Some(key) => sign_outer_tx(key, params).await?,
             None => ring.sign_outer_tx(0, ring.id(), params).await?,
         };
         Some(submit(&provider, &outer, safe, opts.fees.timeout, console).await?)
+    } else {
+        None
     };
     if let Some(tx_hash) = tx_hash {
         if !is_safe_with(&provider, safe, &[setup.singleton]).await? {

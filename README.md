@@ -101,9 +101,9 @@ safe call 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 \
 Use the owner key once, and hand the Safe to the next key in the same transaction:
 
 ```bash
-safe wallet new treasury                      # encrypts a new 24-word phrase to disk
-# send ETH for gas to the funding address it prints, then:
-safe create --rotate --mnemonic treasury --rpc-url $ETH_RPC_URL
+# A new 24-word phrase encrypted to disk, and a Safe owned by one of its keys.
+# It waits for you to send ETH for gas to the funding address it prints.
+safe wallet new treasury --create --rpc-url $ETH_RPC_URL
 safe send 0xRecipient --value 1000000000000000000 \
     --safe 0xYourSafe \
     --rpc-url $ETH_RPC_URL \
@@ -409,7 +409,10 @@ safe create \
 | `--rotate` | The first owner is a key of the mnemonic wallet `--mnemonic` or `--ledger` names (below) |
 | `--same-as <chain_id>:<safe>` | With `--rotate`: deploy the same Safe on another chain |
 | `--no-sweep` / `--sweep-reserve <wei>` | With `--rotate`: keep, or leave some of, the funding key's ETH |
+| `--wait-for-funds[=<secs>]` | If the account that pays holds too little ETH, wait for it (without a limit, or up to `secs` seconds) instead of failing |
 | Wallet options, `--gas-payer-*` | The deployer key, and an optional separate key that pays for gas (see [Wallet options](#wallet-options)) |
+
+Before anything is signed, `create` checks that the account that pays holds what the deployment can cost (its gas limit times the max fee). If it doesn't, the command fails and names the address and the amount, or with `--wait-for-funds` it waits for the ETH to arrive. Under `--rotate` this check comes before any wallet key is used, so running the same command later gives the same Safe.
 
 With `--rotate --mnemonic <name>` (or `--rotate --ledger`) the Safe's first owner is a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--owner` and `--threshold` add co-owners, and `--safe-version` applies as usual. With `--rotate`, `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version, contracts, owners and threshold it was first created with. It reuses the Safe's first owner key and salt, so rotate that key right away; the setup flags (`--owner`, `--threshold` and so on) are refused with it.
 
@@ -420,6 +423,7 @@ Manage wallets: the encrypted phrase or Ledger account that one-time owner keys 
 ```bash
 safe wallet new <name>                        # new 24-word phrase, shown once
 safe wallet new <name> --ledger [--path PATH] # a name for an account on a Ledger
+safe wallet new <name> [--ledger] --create --rpc-url $ETH_RPC_URL [Safe options]   # and a Safe it owns
 safe wallet import <name> [--phrase-file F] [--start-index N]
 safe wallet list
 safe wallet address --mnemonic <name> [--index N]
@@ -432,12 +436,22 @@ safe wallet sweep   --mnemonic <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL [
 
 | Command | What it does |
 |---------|--------------|
-| `new` | Creates a phrase, prints it once, and writes the keystore. With `--ledger`, names a Ledger account instead (see [On a Ledger](#on-a-ledger)) |
+| `new` | Creates a phrase, prints it once, and writes the keystore. With `--ledger`, names a Ledger account instead (see [On a Ledger](#on-a-ledger)). With `--create`, also creates a Safe the wallet owns (below) |
 | `import` | Encrypts an existing BIP-39 phrase. `--start-index` skips keys another wallet already used |
 | `address` | Prints the funding address (no password needed), or owner key `--index N` |
 | `status` | Shows, per Safe, the current owner key (the address to send gas money to), whether it is exposed, and any pending transaction or owed sweep |
 | `sync` | Rebuilds the record of used keys for a Safe from the chain |
 | `sweep` | Moves ETH left on a Safe's retired owner keys to its current owner |
+
+**A wallet and its Safe in one step.** `safe wallet new <name> --create --rpc-url <RPC>` does what `safe wallet new <name>` and then `safe create --rotate --wallet <name>` do:
+
+1. It checks the RPC URL and the Safe options before it writes anything.
+2. It writes the wallet and shows its phrase, then asks whether you have written the phrase down.
+3. It shows the Safe it will create and asks to confirm.
+4. It says how much ETH to send to the funding address, and waits until it is there. Anything above the deployment's cost moves to the Safe's owner key afterwards and pays for its next transactions.
+5. It deploys the Safe.
+
+It takes the Safe options of `safe create --rotate`: `--owner`, `--threshold`, `--salt-nonce`, `--safe-version`, `--singleton`, `--factory`, `--fallback-handler`, the fee options, `--no-sweep`, `--sweep-reserve`, `--gas-payer-*`, `--no-confirm` and `--wait-for-funds`. With a `--gas-payer-*` key, the Safe is deployed at once, with no wait. With `--json` (which also skips the questions) it waits only if `--wait-for-funds` is given; otherwise it fails at once with the wallet written. Either way no wallet key is used before the funds arrive, so if the command stops or fails before deploying, `safe create --rotate --wallet <name>` with the same options creates the same Safe later. The JSON document is the wallet's, plus `safe` (what `safe create --json` prints) or `error`.
 
 ### Wallet options
 
@@ -489,12 +503,14 @@ This assumes ECDSA is weakened, not broken instantly: while a transaction waits 
 ### Getting started
 
 ```bash
-# 1. A wallet. The phrase is shown once: write it down.
-safe wallet new treasury
+# 1. A wallet and its Safe. The phrase is shown once: write it down. Then send
+#    ETH for gas to the funding address it prints; it waits for it. The funding
+#    key deploys; the Safe's owner is a key that has never signed.
+safe wallet new treasury --create --rpc-url $ETH_RPC_URL
 
-# 2. Send ETH for gas to the funding address it prints, then create a Safe.
-#    The funding key deploys; the Safe's owner is a key that has never signed.
-safe create --rotate --mnemonic treasury --rpc-url $ETH_RPC_URL
+#    The same in two steps, or for a wallet you already have:
+#    safe wallet new treasury
+#    safe create --rotate --wallet treasury --rpc-url $ETH_RPC_URL
 
 # 3. Use it. Each send rotates the owner and moves the gas money along.
 safe send 0xToken 'transfer(address,uint256)' 0xRecipient 1000000 \

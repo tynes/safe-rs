@@ -44,6 +44,14 @@ impl Console {
         Self::new(Arc::new(NoopLogger), prompt)
     }
 
+    /// The same console, asking `prompt` instead.
+    pub fn answering(&self, prompt: Arc<dyn Prompt>) -> Self {
+        Self {
+            prompt,
+            ..self.clone()
+        }
+    }
+
     /// Holds every Safe transaction to `policy`.
     pub fn with_policy(mut self, policy: Option<Arc<dyn SafePolicy>>) -> Self {
         self.policy = policy;

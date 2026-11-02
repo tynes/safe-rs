@@ -19,7 +19,7 @@ safe-rs = { path = "..", version = "0.13", default-features = false, features = 
 # safe-rs's `ledger` feature, which turns on `alloy-signer-ledger/eip712` for
 # the Ledger signer foundry-wallets uses as well.
 clap = { version = "4", features = ["derive", "env", "string"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 alloy = "2.5"
 alloy-dyn-abi = "1.6"
 # The signers `cast` and `forge` use: local keys, keystores, mnemonics,
