@@ -208,7 +208,12 @@ pub async fn run(command: Commands, config: RunConfig) -> Result<()> {
                 commands::config::run(*args, &console).await
             }
             Commands::Create(args) => commands::create::run_with(*args, &console, json).await,
-            Commands::Wallet(args) => run_wallet(args, &console).await,
+            Commands::Wallet(mut args) => {
+                if let wallet::WalletCommand::New(opts) = &mut args.command {
+                    opts.safe.no_confirm |= json && opts.create;
+                }
+                run_wallet(args, &console).await
+            }
         }
     };
     config.console().printing(json, run).await

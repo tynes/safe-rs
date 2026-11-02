@@ -56,7 +56,7 @@ pub enum Commands {
 /// into a [`WalletContext`](crate::wallet::WalletContext).
 #[derive(Args, Clone)]
 pub struct WalletCliArgs {
-    /// RPC endpoint URL (sync and sweep)
+    /// RPC endpoint URL (sync, sweep, and new --create)
     #[arg(long, env = "ETH_RPC_URL", global = true)]
     pub rpc_url: Option<Url>,
 

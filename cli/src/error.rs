@@ -9,7 +9,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::path::PathBuf;
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::{Address, B256, U256};
 use alloy::transports::TransportError;
 use safe_rs::RejectClass;
 
@@ -275,6 +275,21 @@ pub enum CreateError {
          chain in the meantime); nothing was sent, run again"
     )]
     OwnerChanged { previewed: u32 },
+    /// The account that pays holds less than the deployment can cost (or
+    /// still did after `--wait-for-funds` gave up). Nothing was sent, and no
+    /// wallet key was used.
+    #[error(
+        "{payer} holds {} ETH, and the deployment can cost up to {} ETH on chain {chain_id}: \
+         send ETH to it and run again (--wait-for-funds waits for it)",
+        short_ether(*balance),
+        short_ether(*needed)
+    )]
+    NeedsFunding {
+        payer: Address,
+        chain_id: u64,
+        needed: U256,
+        balance: U256,
+    },
     /// The deployment was refused, may still be pending, or got no receipt
     #[error("deploying Safe {safe}: {error}")]
     Broadcast {
@@ -369,6 +384,22 @@ impl From<std::io::Error> for WalletError {
     }
 }
 
+/// Wei as ETH without trailing zeros: `0`, `0.0004`, `1.5`.
+pub(crate) fn short_ether(wei: U256) -> String {
+    let text = alloy::primitives::utils::format_ether(wei);
+    match text.split_once('.') {
+        Some((whole, fraction)) => {
+            let fraction = fraction.trim_end_matches('0');
+            if fraction.is_empty() {
+                whole.to_string()
+            } else {
+                format!("{whole}.{fraction}")
+            }
+        }
+        None => text,
+    }
+}
+
 /// Transaction hashes, comma separated.
 fn tx_list(hashes: &[B256]) -> String {
     hashes
@@ -396,6 +427,15 @@ impl From<eyre::Report> for SendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_ether_drops_trailing_zeros() {
+        let wei = |n: u64| U256::from(n);
+        assert_eq!(short_ether(U256::ZERO), "0");
+        assert_eq!(short_ether(wei(1_500_000_000_000_000_000)), "1.5");
+        assert_eq!(short_ether(wei(400_000_000_000_000)), "0.0004");
+        assert_eq!(short_ether(wei(1)), "0.000000000000000001");
+    }
 
     #[test]
     fn unconfirmed_transactions_may_be_pending() {

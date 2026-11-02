@@ -240,11 +240,7 @@ fn keystore_phrase(
     password: &PasswordArgs,
     console: &Console,
 ) -> Result<Zeroizing<String>> {
-    let password = read_password(
-        password,
-        &format!("Password for {}: ", path.display()),
-        console,
-    )?;
+    let password = read_password(password, &wallet_password_label(path), console)?;
     let decrypted = decrypt_keystore(json, password.as_bytes())
         .wrap_err_with(|| format!("cannot open mnemonic wallet {}", path.display()))?;
     match decrypted.mnemonic {
@@ -382,14 +378,15 @@ fn read_wallet_file(path: &Path) -> Result<String> {
     })
 }
 
+/// What the password prompt of the mnemonic wallet at `path` says.
+pub(crate) fn wallet_password_label(path: &Path) -> String {
+    format!("Password for {}: ", path.display())
+}
+
 /// Decrypts the mnemonic wallet at `path`.
 fn load_phrase(path: &Path, password: &PasswordArgs, console: &Console) -> Result<MnemonicWallet> {
     let json = read_wallet_file(path)?;
-    let password = read_password(
-        password,
-        &format!("Password for {}: ", path.display()),
-        console,
-    )?;
+    let password = read_password(password, &wallet_password_label(path), console)?;
     MnemonicWallet::from_keystore_json(&json, password.as_bytes())
         .wrap_err_with(|| format!("cannot open mnemonic wallet {}", path.display()))
 }

@@ -26,14 +26,19 @@ use serde::Serialize;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::cli::{parse_ether_value, OwnerKeysArgs, PasswordArgs, DEFAULT_TIMEOUT};
+use crate::cli::{
+    check_setup, parse_ether_value, FeeArgs, GasPayerArgs, OwnerKeysArgs, PasswordArgs,
+    SafeSetupArgs, SweepArgs, DEFAULT_TIMEOUT,
+};
+use crate::commands::create::{create_with, document, CreateContext, CreateOpts, Document};
 use crate::commands::default_safe::recorded_safe;
 use crate::commands::{head_rotation_config, http_provider, HttpProvider};
 use crate::console::Console;
+use crate::error::CreateError;
 pub use crate::error::WalletError;
 use crate::keys::CliKeys;
 use crate::ledger_wallet::LedgerWallet;
-use crate::log::{Logger, NoopLogger};
+use crate::log::{Level, Logger, NoopLogger};
 use crate::output::Report;
 pub use crate::output::{OwnerKey, SweptEth};
 use crate::paths;
@@ -82,8 +87,7 @@ pub struct WalletNewOpts {
     #[arg(long, short)]
     pub ledger: bool,
 
-    /// The Ledger wallet's funding key (key 0). Owner keys count up its last
-    /// number: m/44'/60'/1'/0/0 has owner keys m/44'/60'/1'/0/1, /2 and so on.
+    /// The derivation path of the Ledger wallet's first key, its funding key.
     /// `h` may stand for `'`, as in m/44h/60h/1h/0/0 [default: the first
     /// Ledger Live account, m/44'/60'/0'/0/0]
     #[arg(long, value_name = "PATH", requires = "ledger")]
@@ -91,6 +95,96 @@ pub struct WalletNewOpts {
 
     #[command(flatten)]
     pub password: PasswordArgs,
+
+    /// Also create a Safe owned by the new wallet, on the chain of --rpc-url:
+    /// what `safe create --rotate --wallet <NAME>` does, after waiting for
+    /// the funding address to hold enough ETH
+    #[arg(long)]
+    pub create: bool,
+
+    #[command(flatten)]
+    pub safe: Box<NewSafeOpts>,
+}
+
+/// The Safe `wallet new --create` deploys: the options of `safe create
+/// --rotate` that make sense for a wallet with no Safe yet.
+#[derive(Args, Clone, Debug, Default)]
+#[command(next_help_heading = "Create a Safe (with --create)")]
+pub struct NewSafeOpts {
+    #[command(flatten)]
+    pub setup: SafeSetupArgs,
+
+    #[command(flatten)]
+    pub fees: FeeArgs,
+
+    #[command(flatten)]
+    pub sweep: SweepArgs,
+
+    /// Skip the questions: whether the phrase is written down, and whether
+    /// to deploy
+    #[arg(long)]
+    pub no_confirm: bool,
+
+    /// Wait for the funding address to hold enough ETH: without a value, with
+    /// no limit; `=SECS` gives up after SECS seconds [default: wait without a
+    /// limit when progress is shown, else fail at once]
+    #[arg(
+        long,
+        value_name = "SECS",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "0"
+    )]
+    pub wait_for_funds: Option<u64>,
+
+    #[command(flatten)]
+    pub gas_payer: GasPayerArgs,
+}
+
+impl NewSafeOpts {
+    /// The first option given that only `--create` takes. The gas payer is
+    /// left out: its environment variables may be set for other commands.
+    fn first_set(&self) -> Option<&'static str> {
+        let setup = SafeSetupArgs::default();
+        [
+            (!self.setup.owners.is_empty(), "--owner"),
+            (self.setup.threshold != setup.threshold, "--threshold"),
+            (self.setup.salt_nonce != setup.salt_nonce, "--salt-nonce"),
+            (
+                self.setup.safe_version != setup.safe_version,
+                "--safe-version",
+            ),
+            (self.setup.singleton.is_some(), "--singleton"),
+            (self.setup.factory.is_some(), "--factory"),
+            (self.setup.fallback_handler.is_some(), "--fallback-handler"),
+            (self.fees != FeeArgs::default(), "the fee options"),
+            (self.sweep.no_sweep, "--no-sweep"),
+            (self.sweep.sweep_reserve.is_some(), "--sweep-reserve"),
+            (self.no_confirm, "--no-confirm"),
+            (self.wait_for_funds.is_some(), "--wait-for-funds"),
+        ]
+        .into_iter()
+        .find_map(|(set, flag)| set.then_some(flag))
+    }
+
+    /// The `safe create --rotate` these options stand for, with the owner
+    /// keys from `wallet`.
+    fn create_opts(self, wallet: &str) -> CreateOpts {
+        CreateOpts {
+            setup: self.setup,
+            no_confirm: self.no_confirm,
+            fees: self.fees,
+            wait_for_funds: self.wait_for_funds,
+            rotate: true,
+            owner_keys: OwnerKeysArgs {
+                mnemonic: Some(wallet.to_string()),
+                ..OwnerKeysArgs::default()
+            },
+            sweep: self.sweep,
+            gas_payer: self.gas_payer,
+            ..CreateOpts::default()
+        }
+    }
 }
 
 #[derive(Args, Clone, Debug)]
@@ -355,27 +449,20 @@ impl fmt::Debug for WalletCreated {
     }
 }
 
-impl Report for WalletCreated {
-    fn human(&self) -> String {
-        if self.kind == WalletKind::Ledger {
-            let mut s = format!("Ledger wallet \"{}\" saved to {}", self.name, self.path);
-            let _ = write!(s, "\n  Path: {}", self.key_path);
-            let _ = write!(s, "\n  Funding address: {}", self.funding_address);
-            if let Ok(first) = self
-                .key_path
-                .parse::<KeyPath>()
-                .and_then(|path| path.key(1))
-            {
-                let _ = write!(s, "\n  Owner keys count up from: {first}");
+impl WalletCreated {
+    /// The wallet, its funding address and (once) its phrase, without the
+    /// next step.
+    fn describe(&self) -> String {
+        let mut s = match self.kind {
+            WalletKind::Ledger => {
+                let mut s = format!("Ledger wallet \"{}\" saved to {}", self.name, self.path);
+                let _ = write!(s, "\n  Path: {}", self.key_path);
+                s
             }
-            let _ = write!(
-                s,
-                "\n\nUse it with --wallet {} (or --mnemonic {}).",
-                self.name, self.name
-            );
-            return s;
-        }
-        let mut s = format!("mnemonic wallet \"{}\" saved to {}", self.name, self.path);
+            WalletKind::Mnemonic => {
+                format!("Mnemonic wallet \"{}\" saved to {}", self.name, self.path)
+            }
+        };
         let _ = write!(s, "\n  Funding address: {}", self.funding_address);
         if let Some(phrase) = &self.phrase {
             let _ = write!(
@@ -387,6 +474,17 @@ impl Report for WalletCreated {
             );
         }
         s
+    }
+}
+
+impl Report for WalletCreated {
+    fn human(&self) -> String {
+        format!(
+            "{}\n\nNext: send ETH for gas to the funding address, then create a Safe:\n  \
+             safe create --rotate --wallet {} --rpc-url <RPC>",
+            self.describe(),
+            self.name
+        )
     }
 }
 
@@ -1053,14 +1151,180 @@ pub async fn sweep_wallet(ctx: &WalletContext, opts: WalletSweepOpts) -> Result<
     })
 }
 
+/// What `wallet new --create` prints: the wallet, then the Safe (or why
+/// there is none). The JSON is the wallet's document plus `safe` or `error`.
+#[derive(Serialize)]
+pub(crate) struct WalletWithSafe {
+    #[serde(flatten)]
+    wallet: WalletCreated,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safe: Option<Document>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    /// The wallet (and its phrase) already went out as progress
+    #[serde(skip)]
+    shown: bool,
+}
+
+impl Report for WalletWithSafe {
+    fn human(&self) -> String {
+        let mut s = String::new();
+        if !self.shown {
+            s.push_str(&self.wallet.describe());
+            s.push_str("\n\n");
+        }
+        let name = &self.wallet.name;
+        match &self.safe {
+            Some(doc) => {
+                s.push_str(&doc.human());
+                let _ = write!(
+                    s,
+                    "\n\nNext: safe send <TO> ... --rotate --wallet {name} --rpc-url <RPC>"
+                );
+            }
+            None if self.error.is_some() => s.push_str("No Safe was created."),
+            None => {
+                let _ = write!(
+                    s,
+                    "No Safe was created. Once the recovery phrase is written down, create it \
+                     with:\n  safe create --rotate --wallet {name} --rpc-url <RPC>"
+                );
+            }
+        }
+        s
+    }
+}
+
+/// Answers the new wallet's own password prompt with the password just
+/// chosen, so `--create` does not ask for it again; asks `inner` the rest.
+struct NewWalletPrompt {
+    inner: Arc<dyn Prompt>,
+    label: String,
+    password: Zeroizing<String>,
+}
+
+impl Prompt for NewWalletPrompt {
+    fn confirm(&self, question: &str, details: &str) -> bool {
+        self.inner.confirm(question, details)
+    }
+
+    fn secret(&self, label: &str) -> std::io::Result<Zeroizing<String>> {
+        if label == self.label {
+            return Ok(self.password.clone());
+        }
+        self.inner.secret(label)
+    }
+}
+
+/// `wallet new --create`: checks what it can before writing anything, makes
+/// the wallet and shows it, asks whether the phrase is written down, then
+/// creates the Safe as `safe create --rotate --wallet <NAME>` does, waiting
+/// for funds by default when progress is shown.
+async fn new_wallet_with_safe(
+    ctx: &WalletContext,
+    opts: WalletNewOpts,
+    console: &Console,
+) -> color_eyre::Result<()> {
+    let home = ctx.home()?;
+    let file = new_wallet_path(&home, &opts.name)?;
+    let rpc_url = ctx.rpc_url()?.clone();
+    let mut extra: Vec<Address> = opts.safe.setup.owners.clone();
+    extra.sort();
+    extra.dedup();
+    // The owner key is not known yet; any other address stands in for it.
+    let stand_in = Address::repeat_byte(0xff);
+    check_setup(&[vec![stand_in], extra].concat(), opts.safe.setup.threshold)
+        .map_err(|e| eyre!(e))?;
+    let mut safe_opts = (*opts.safe).create_opts(&opts.name);
+    safe_opts.wait_for_funds = safe_opts
+        .wait_for_funds
+        .or_else(|| console.logger().enabled(Level::Info).then_some(0));
+    safe_opts.validate(false)?;
+    // A typo in the RPC URL is found before there is a wallet to clean up.
+    http_provider(&rpc_url)
+        .get_chain_id()
+        .await
+        .wrap_err_with(|| format!("cannot reach {rpc_url}"))?;
+
+    let (wallet, prompt) = if opts.ledger {
+        let wallet = new_ledger_wallet(ctx, &opts.name, opts.path).await?;
+        (wallet, console.prompt().clone())
+    } else {
+        let password = new_password(&opts.password, console)?;
+        let wallet = new_wallet(ctx, &opts.name, &password)?;
+        let prompt: Arc<dyn Prompt> = Arc::new(NewWalletPrompt {
+            inner: console.prompt().clone(),
+            label: crate::signers::wallet_password_label(&file),
+            password,
+        });
+        (wallet, prompt)
+    };
+    let shown = console.logger().enabled(Level::Info);
+    console.line(format!("{}\n", wallet.describe()));
+
+    let backed_up = wallet.phrase.is_none()
+        || safe_opts.no_confirm
+        || console.confirm(
+            "Have you written down the recovery phrase?",
+            &wallet.describe(),
+        );
+    if !backed_up {
+        console.emit(&WalletWithSafe {
+            wallet,
+            safe: None,
+            error: None,
+            shown,
+        });
+        return Ok(());
+    }
+
+    let console = console.answering(prompt);
+    let create_ctx = CreateContext::new(rpc_url)
+        .with_home(home)
+        .with_console(&console);
+    match create_with(create_ctx, safe_opts, &console).await {
+        Ok(outcome) => {
+            console.emit(&WalletWithSafe {
+                wallet,
+                safe: document(&outcome),
+                error: None,
+                shown,
+            });
+            Ok(())
+        }
+        Err(error) => {
+            let name = wallet.name.clone();
+            let resume = matches!(error, CreateError::NeedsFunding { .. });
+            console.emit(&WalletWithSafe {
+                wallet,
+                safe: None,
+                error: Some(error.to_string()),
+                shown,
+            });
+            let mut context = format!("wallet \"{name}\" was created, but no Safe");
+            if resume {
+                let _ = write!(
+                    context,
+                    "; once it is funded: safe create --rotate --wallet {name} --rpc-url <RPC>"
+                );
+            }
+            Err(color_eyre::eyre::Report::new(error).wrap_err(context))
+        }
+    }
+}
+
 /// `safe wallet`: asks `ctx.prompt` for a phrase and a new password where
 /// needed, calls the functions above, and prints the outcome as `safe` does
 /// (JSON with `json`).
 pub async fn run(
-    command: WalletCommand,
+    mut command: WalletCommand,
     ctx: &WalletContext,
     json: bool,
 ) -> color_eyre::Result<()> {
+    // `--json` never prompts: it is the result document's only output.
+    if let WalletCommand::New(opts) = &mut command {
+        opts.safe.no_confirm |= json && opts.create;
+    }
     ctx.console()
         .printing(json, |console| async move {
             run_in(command, ctx, &console).await
@@ -1074,6 +1338,11 @@ pub(crate) async fn run_in(
     console: &Console,
 ) -> color_eyre::Result<()> {
     match command {
+        WalletCommand::New(opts) if opts.create => new_wallet_with_safe(ctx, opts, console).await?,
+        WalletCommand::New(opts) if opts.safe.first_set().is_some() => {
+            let flag = opts.safe.first_set().unwrap_or_default();
+            return Err(eyre!("{flag} creates a Safe with the wallet: add --create"));
+        }
         WalletCommand::New(opts) if opts.ledger => {
             console.emit(&new_ledger_wallet(ctx, &opts.name, opts.path).await?);
         }
@@ -1277,5 +1546,83 @@ mod tests {
             WalletContext::new().rpc_url().unwrap_err(),
             WalletError::NoRpcUrl
         ));
+    }
+
+    fn new_opts(args: &[&str]) -> WalletNewOpts {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        struct New {
+            #[command(flatten)]
+            opts: WalletNewOpts,
+        }
+        let args = ["new", "demo"].iter().chain(args);
+        New::try_parse_from(args).unwrap().opts
+    }
+
+    #[test]
+    fn safe_options_need_create() {
+        assert_eq!(new_opts(&[]).safe.first_set(), None);
+        for (args, flag) in [
+            (&["--threshold", "2"][..], "--threshold"),
+            (
+                &["--owner", "0x0000000000000000000000000000000000000001"],
+                "--owner",
+            ),
+            (&["--salt-nonce", "7"], "--salt-nonce"),
+            (&["--max-fee-per-gas", "1gwei"], "the fee options"),
+            (&["--no-sweep"], "--no-sweep"),
+            (&["--no-confirm"], "--no-confirm"),
+            (&["--wait-for-funds"], "--wait-for-funds"),
+        ] {
+            assert_eq!(new_opts(args).safe.first_set(), Some(flag), "{args:?}");
+        }
+        // A gas payer may come from the environment, so it is not refused.
+        let payer = new_opts(&["--gas-payer-private-key", "0x01"]);
+        assert_eq!(payer.safe.first_set(), None);
+    }
+
+    #[test]
+    fn create_turns_the_options_into_a_rotating_create() {
+        let opts = new_opts(&["--create", "--threshold", "2", "--wait-for-funds=30"]);
+        assert!(opts.create);
+        let create = (*opts.safe).create_opts("demo");
+        assert!(create.rotate);
+        assert_eq!(create.owner_keys.mnemonic.as_deref(), Some("demo"));
+        assert_eq!(create.setup.threshold, 2);
+        assert_eq!(create.wait_for_funds, Some(30));
+        assert!(create.same_as.is_none() && !create.compute_only);
+    }
+
+    #[test]
+    fn the_wallet_with_its_safe_shows_the_phrase_once() {
+        let wallet = WalletCreated {
+            name: "demo".to_string(),
+            path: "/w/demo.json".to_string(),
+            kind: WalletKind::Mnemonic,
+            key_path: KeyPath::default().to_string(),
+            funding_address: Address::repeat_byte(1),
+            phrase: Some(Zeroizing::new("word ".repeat(24))),
+            warnings: Vec::new(),
+        };
+        let report = |shown| WalletWithSafe {
+            wallet: wallet.clone(),
+            safe: None,
+            error: None,
+            shown,
+        };
+        // Shown as progress already: not again in the result.
+        let after = report(true).human();
+        assert!(!after.contains("word word"), "{after}");
+        assert!(
+            after.contains("safe create --rotate --wallet demo"),
+            "{after}"
+        );
+        // A host without progress gets it in the result.
+        assert!(report(false).human().contains("word word"));
+        let json = serde_json::to_value(report(true)).unwrap();
+        assert_eq!(json["name"], "demo");
+        assert!(json["phrase"].is_string());
+        assert!(json.get("safe").is_none() && json.get("shown").is_none());
     }
 }
