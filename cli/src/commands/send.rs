@@ -24,7 +24,9 @@ use crate::cli::{SendArgs, SendOpts};
 use crate::commands::default_safe::recorded_safe;
 use crate::commands::default_safe::safe_or_default;
 use crate::commands::rotation::{self, RotationRun};
-use crate::commands::{fork_session, http_provider, outer_fees, HttpProvider};
+use crate::commands::{
+    fork_session, http_provider, outer_fees, with_gas_margin, HttpProvider, RECEIPT_POLL_INTERVAL,
+};
 use crate::console::Console;
 use crate::error::OptionsError;
 use crate::error::{BroadcastError, SendError};
@@ -42,9 +44,6 @@ use crate::signers::{create_payer, create_signer};
 use std::path::PathBuf;
 use std::sync::Arc;
 use url::Url;
-
-/// How often to poll for the receipt after broadcasting.
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 type Result<T, E = SendError> = std::result::Result<T, E>;
 
@@ -466,13 +465,13 @@ async fn send_eoa_tx(
                 .estimate_gas(request)
                 .await
                 .map_err(|e| node_estimate_failed(e, "the transaction"))?;
-            cross_check_gas_limit(simulated, estimate + estimate / 5, console)
+            cross_check_gas_limit(simulated, with_gas_margin(estimate), console)
         } else {
             let estimate = provider
                 .estimate_gas(request)
                 .await
                 .map_err(|e| SendError::other(format!("gas estimation failed: {e}")))?;
-            estimate + estimate / 5
+            with_gas_margin(estimate)
         }
     };
 
@@ -1251,7 +1250,7 @@ async fn estimate_outer_gas(
             SendError::other(format!("gas estimation failed: {reason}"))
         }
     })?;
-    Ok(estimate + estimate / 5)
+    Ok(with_gas_margin(estimate))
 }
 
 /// The outer `execTransaction` call for `signed`, sent by `from`.

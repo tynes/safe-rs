@@ -20,7 +20,7 @@ use crate::any_signer::AnySigner;
 use crate::bundle::{BundleFile, BundleRotationSwap};
 use crate::cli::{SimArgs, SweepArgs};
 use crate::commands::send::{broadcast, receipt};
-use crate::commands::{http_provider, latest_sim_spec, outer_fees};
+use crate::commands::{http_provider, latest_sim_spec, outer_fees, RECEIPT_POLL_INTERVAL};
 use crate::console::Console;
 use crate::error::SendError;
 use crate::keys::CliKeys;
@@ -29,9 +29,6 @@ use crate::output::{
     RotationPlanOutput, SendOutcome, SignedTxOutput, SimulationOutput,
 };
 use crate::policy::{self, Plan, SafeSnapshot, SafeTxCheck};
-
-/// How often to poll for a receipt after broadcasting.
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Everything one rotating transaction needs.
 pub struct RotationRun<'a> {

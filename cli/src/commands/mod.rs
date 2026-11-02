@@ -18,6 +18,15 @@ pub mod info;
 pub mod rotation;
 pub mod send;
 
+/// How often to poll for a transaction's receipt.
+pub(crate) const RECEIPT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A gas estimate plus a 20% margin: the gas limit of an outer transaction
+/// without `--gas-limit`.
+pub(crate) fn with_gas_margin(estimate: u64) -> u64 {
+    estimate + estimate / 5
+}
+
 /// Read-only provider used by every command.
 pub type HttpProvider = DynProvider<AnyNetwork>;
 

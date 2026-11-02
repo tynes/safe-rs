@@ -16,7 +16,6 @@ use std::future::Future;
 use std::pin::Pin;
 
 use alloy::primitives::{Address, U256};
-use alloy::sol_types::SolCall;
 use safe_rs::{Call, ForkSession, ISafe, PreparedSafeTx, RotationPlan, SafeState};
 use url::Url;
 
@@ -60,18 +59,9 @@ impl SafeSnapshot {
 
     /// Reads the Safe from the simulated post-state.
     pub(crate) fn read(post: &mut ForkSession, safe: Address) -> safe_rs::Result<Self> {
-        fn call<C: SolCall>(
-            post: &mut ForkSession,
-            safe: Address,
-            call: &C,
-        ) -> safe_rs::Result<C::Return> {
-            let out = post.call(Address::ZERO, safe, call.abi_encode().into())?;
-            C::abi_decode_returns(&out).map_err(|e| safe_rs::Error::Abi(e.to_string()))
-        }
-        let owners = call(post, safe, &ISafe::getOwnersCall {})?;
-        let threshold = call(post, safe, &ISafe::getThresholdCall {})?;
-        let slot0 = call(
-            post,
+        let owners = post.call_sol(safe, &ISafe::getOwnersCall {})?;
+        let threshold = post.call_sol(safe, &ISafe::getThresholdCall {})?;
+        let slot0 = post.call_sol(
             safe,
             &ISafe::getStorageAtCall {
                 offset: U256::ZERO,

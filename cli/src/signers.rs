@@ -14,7 +14,8 @@ use crate::paths;
 pub use hd::*;
 
 /// The flags that name a key, for the message when none is given.
-const SIGNER_FLAGS_HELP: &str = "--private-key, --keystore, --account, --mnemonic, --ledger, \
+pub(crate) const SIGNER_FLAGS_HELP: &str =
+    "--private-key, --keystore, --account, --mnemonic, --ledger, \
      --trezor, --aws, --gcp, --turnkey or --interactive";
 
 /// The signer the options name, as `cast` resolves them: a hardware wallet
@@ -99,7 +100,7 @@ impl SignerArgs {
         &self,
         prompt: std::sync::Arc<dyn crate::prompt::Prompt>,
     ) -> Result<AnySigner> {
-        let console = Console::new(std::sync::Arc::new(crate::log::NoopLogger), prompt);
+        let console = Console::with_prompt(prompt);
         create_signer(self, &console).await
     }
 }
@@ -111,7 +112,7 @@ impl GasPayerArgs {
         &self,
         prompt: std::sync::Arc<dyn crate::prompt::Prompt>,
     ) -> Result<Option<AnySigner>> {
-        let console = Console::new(std::sync::Arc::new(crate::log::NoopLogger), prompt);
+        let console = Console::with_prompt(prompt);
         create_payer(self, &console).await
     }
 }

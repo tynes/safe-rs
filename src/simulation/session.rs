@@ -17,6 +17,7 @@ use alloy::eips::BlockId;
 use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
 use alloy::providers::Provider;
+use alloy::sol_types::SolCall;
 use foundry_fork_db::SharedBackend;
 use revm::context::{BlockEnv, TxEnv};
 use revm::context_interface::block::BlobExcessGasAndPrice;
@@ -384,6 +385,13 @@ impl ForkSession {
     /// Executes a transaction and discards its state changes.
     pub fn transact(&mut self, tx: SimTx) -> Result<SimulationResult> {
         self.run(tx, false)
+    }
+
+    /// [`call`](Self::call) of a typed contract call from the zero address,
+    /// decoding its return value.
+    pub fn call_sol<C: SolCall>(&mut self, to: Address, call: &C) -> Result<C::Return> {
+        let out = self.call(Address::ZERO, to, call.abi_encode().into())?;
+        C::abi_decode_returns(&out).map_err(|e| Error::Abi(e.to_string()))
     }
 
     /// Read-only call with relaxed checks; returns the output or an error on revert.

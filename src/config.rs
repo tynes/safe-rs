@@ -478,19 +478,12 @@ pub fn plan_config(state: &SafeState, changes: &ConfigChanges) -> Result<ConfigP
 }
 
 #[cfg(feature = "simulation")]
-fn read<C: SolCall>(post: &mut ForkSession, safe: Address, call: &C) -> Result<C::Return> {
-    let out = post.call(Address::ZERO, safe, call.abi_encode().into())?;
-    C::abi_decode_returns(&out).map_err(|e| Error::Abi(e.to_string()))
-}
-
-#[cfg(feature = "simulation")]
 fn read_slot(
     post: &mut ForkSession,
     safe: Address,
     slot: alloy::primitives::B256,
 ) -> Result<Address> {
-    let word = read(
-        post,
+    let word = post.call_sol(
         safe,
         &ISafe::getStorageAtCall {
             offset: slot.into(),
@@ -522,7 +515,7 @@ pub fn check_config_post_state(post: &mut ForkSession, plan: &ConfigPlan) -> Res
         ))
     };
 
-    let owners = read(post, safe, &ISafe::getOwnersCall {})?;
+    let owners = post.call_sol(safe, &ISafe::getOwnersCall {})?;
     if owners != want.owners {
         return Err(mismatch(
             "owners",
@@ -530,7 +523,7 @@ pub fn check_config_post_state(post: &mut ForkSession, plan: &ConfigPlan) -> Res
             format!("{:?}", want.owners),
         ));
     }
-    let threshold = read(post, safe, &ISafe::getThresholdCall {})?;
+    let threshold = post.call_sol(safe, &ISafe::getThresholdCall {})?;
     if threshold != want.threshold {
         return Err(mismatch(
             "threshold",
@@ -539,8 +532,7 @@ pub fn check_config_post_state(post: &mut ForkSession, plan: &ConfigPlan) -> Res
         ));
     }
     if let Some(modules) = &want.modules {
-        let page = read(
-            post,
+        let page = post.call_sol(
             safe,
             &ISafe::getModulesPaginatedCall {
                 start: SENTINEL,
@@ -656,7 +648,7 @@ fn failure_reason(mut result: SimulationResult) -> Option<String> {
 #[cfg(feature = "simulation")]
 fn followup_exec(session: &mut ForkSession, plan: &ConfigPlan) -> Result<Option<String>> {
     let safe = plan.safe;
-    let nonce = read(session, safe, &ISafe::nonceCall {})?;
+    let nonce = session.call_sol(safe, &ISafe::nonceCall {})?;
     let prepared = PreparedSafeTx::single_call(
         session.chain_id(),
         safe,

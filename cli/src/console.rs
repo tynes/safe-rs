@@ -38,6 +38,11 @@ impl Console {
         }
     }
 
+    /// A console that logs nothing and asks `prompt`.
+    pub fn with_prompt(prompt: Arc<dyn Prompt>) -> Self {
+        Self::new(Arc::new(NoopLogger), prompt)
+    }
+
     /// Holds every Safe transaction to `policy`.
     pub fn with_policy(mut self, policy: Option<Arc<dyn SafePolicy>>) -> Self {
         self.policy = policy;

@@ -30,7 +30,7 @@ use crate::any_signer::AnySigner;
 use crate::cli::{FeeArgs, SafeSetupArgs};
 use crate::cli::{GasPayerArgs, RpcArgs, SignerArgs};
 use crate::cli::{HdArgs, SweepArgs};
-use crate::commands::{http_provider, outer_fees};
+use crate::commands::{http_provider, outer_fees, with_gas_margin, RECEIPT_POLL_INTERVAL};
 use crate::console::{Console, Reports};
 pub use crate::error::CreateError;
 use crate::error::{BroadcastError, OptionsError};
@@ -45,9 +45,6 @@ mod hd;
 mod implementation;
 
 pub use hd::{parse_same_as, SameAs};
-
-/// How often to poll for the deployment receipt.
-const RECEIPT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// How `safe create` deploys: the Safe's setup, fees, and the HD wallet that
 /// owns it. Leaves out `--rpc-url` and the signer.
@@ -542,7 +539,7 @@ async fn deployment_tx(
             .estimate_gas(request)
             .await
             .map_err(|e| eyre!("cannot estimate the deployment ({from} may need ETH): {e}"))?;
-        estimate + estimate / 5
+        with_gas_margin(estimate)
     };
     let estimated = outer_fees(
         provider,
