@@ -1,13 +1,15 @@
 use alloy::eips::eip1559::{BaseFeeParams, Eip1559Estimation};
 use alloy::eips::BlockId;
 use alloy::network::AnyNetwork;
+use alloy::primitives::Address;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use color_eyre::eyre::Result;
+use safe_rs::rotation::RotationConfig;
 use safe_rs::simulation::session::READ_CALL_GAS;
 use safe_rs::{ethereum_spec_at, ForkSession, ParentHeader, SimBlockEnv, SpecId};
 use url::Url;
 
-use crate::cli::{EvmSpec, SimArgs};
+use crate::cli::{EvmSpec, SimArgs, DEFAULT_BLOCK_TIME};
 
 pub mod approvals;
 pub mod call;
@@ -81,6 +83,25 @@ pub async fn latest_sim_spec(
     }
     let latest = ParentHeader::fetch(provider, BlockId::latest()).await?;
     Ok(sim_spec(None, chain_id, latest.timestamp + block_time))
+}
+
+/// The rotation config of a command without simulation flags (`safe create
+/// --rotate`, `safe wallet sync` and `sweep`): the spec of the block after the
+/// latest one, [`DEFAULT_BLOCK_TIME`] seconds apart, and `timeout` seconds
+/// per receipt.
+pub(crate) async fn head_rotation_config(
+    provider: &HttpProvider,
+    chain_id: u64,
+    multi_send_call_only: Option<Address>,
+    timeout: u64,
+) -> Result<RotationConfig> {
+    let spec = latest_sim_spec(provider, chain_id, None, DEFAULT_BLOCK_TIME).await?;
+    Ok(rotation::rotation_config(
+        multi_send_call_only,
+        spec,
+        DEFAULT_BLOCK_TIME,
+        timeout,
+    ))
 }
 
 /// EIP-1559 fees for an outer transaction: the node estimate, with any

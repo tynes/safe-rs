@@ -4,7 +4,7 @@
 //! resolves into a [`CreateContext`], so it flattens into another CLI's
 //! command without clashing with that CLI's own flags.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,8 +15,7 @@ use alloy::providers::Provider;
 use clap::{Args, Parser};
 use color_eyre::eyre::eyre;
 use safe_rs::{
-    fetch_proxy_creation_code, is_safe_with, predict_safe_address, sign_outer_tx, submit_and_wait,
-    OuterTxParams, SignedOuterTx, Submission,
+    is_safe_with, sign_outer_tx, submit_and_wait, OuterTxParams, SignedOuterTx, Submission,
 };
 
 pub use implementation::{
@@ -31,7 +30,7 @@ use crate::cli::{FeeArgs, SafeSetupArgs};
 use crate::cli::{GasPayerArgs, RpcArgs, SignerArgs};
 use crate::cli::{HdArgs, SweepArgs};
 use crate::commands::{http_provider, outer_fees, with_gas_margin, RECEIPT_POLL_INTERVAL};
-use crate::console::{Console, Reports};
+use crate::console::Console;
 pub use crate::error::CreateError;
 use crate::error::{BroadcastError, OptionsError};
 use crate::log::{Logger, NoopLogger};
@@ -117,60 +116,58 @@ impl CreateOpts {
     /// signer, the rotating keys need `--rotate` (without a signer), and
     /// `--same-as`, `--no-sweep` and `--sweep-reserve` need `--rotate`.
     pub fn validate(&self, has_signer: bool) -> Result<(), OptionsError> {
-        {
-            let setup = &self.setup;
-            let defaults = SafeSetupArgs::default();
-            if self.same_as.is_some() {
-                let set = [
-                    (!setup.owners.is_empty(), "--owner"),
-                    (setup.threshold != defaults.threshold, "--threshold"),
-                    (setup.salt_nonce != defaults.salt_nonce, "--salt-nonce"),
-                    (
-                        setup.safe_version != defaults.safe_version,
-                        "--safe-version",
-                    ),
-                    (setup.singleton.is_some(), "--singleton"),
-                    (setup.factory.is_some(), "--factory"),
-                    (setup.fallback_handler.is_some(), "--fallback-handler"),
-                ];
-                if let Some((_, with)) = set.into_iter().find(|(set, _)| *set) {
-                    return Err(OptionsError::Conflict {
-                        flag: "--same-as",
-                        with,
-                    });
-                }
-            }
-            if self.sweep.no_sweep && self.sweep.sweep_reserve.is_some() {
+        let setup = &self.setup;
+        let defaults = SafeSetupArgs::default();
+        if self.same_as.is_some() {
+            let set = [
+                (!setup.owners.is_empty(), "--owner"),
+                (setup.threshold != defaults.threshold, "--threshold"),
+                (setup.salt_nonce != defaults.salt_nonce, "--salt-nonce"),
+                (
+                    setup.safe_version != defaults.safe_version,
+                    "--safe-version",
+                ),
+                (setup.singleton.is_some(), "--singleton"),
+                (setup.factory.is_some(), "--factory"),
+                (setup.fallback_handler.is_some(), "--fallback-handler"),
+            ];
+            if let Some((_, with)) = set.into_iter().find(|(set, _)| *set) {
                 return Err(OptionsError::Conflict {
-                    flag: "--sweep-reserve",
-                    with: "--no-sweep",
+                    flag: "--same-as",
+                    with,
                 });
             }
-            if !self.rotate && self.hd.is_set() && !has_signer {
-                return Err(OptionsError::CreateHdWithoutRotate);
+        }
+        if self.sweep.no_sweep && self.sweep.sweep_reserve.is_some() {
+            return Err(OptionsError::Conflict {
+                flag: "--sweep-reserve",
+                with: "--no-sweep",
+            });
+        }
+        if !self.rotate && self.hd.is_set() && !has_signer {
+            return Err(OptionsError::CreateHdWithoutRotate);
+        }
+        if self.rotate {
+            if !self.hd.is_set() {
+                return Err(OptionsError::RotateWithoutKeys);
             }
-            if self.rotate {
-                if !self.hd.is_set() {
-                    return Err(OptionsError::RotateWithoutKeys);
-                }
-                if has_signer {
-                    return Err(OptionsError::SignerWithHd);
-                }
-                if !self.implementation.is_standard() {
-                    return Err(OptionsError::Conflict {
-                        flag: "a custom Safe implementation",
-                        with: "--rotate",
-                    });
-                }
-            } else if self.same_as.is_some() {
-                return Err(OptionsError::HdOnly { flag: "--same-as" });
-            } else if self.sweep.no_sweep {
-                return Err(OptionsError::HdOnly { flag: "--no-sweep" });
-            } else if self.sweep.sweep_reserve.is_some() {
-                return Err(OptionsError::HdOnly {
-                    flag: "--sweep-reserve",
+            if has_signer {
+                return Err(OptionsError::SignerWithHd);
+            }
+            if !self.implementation.is_standard() {
+                return Err(OptionsError::Conflict {
+                    flag: "a custom Safe implementation",
+                    with: "--rotate",
                 });
             }
+        } else if self.same_as.is_some() {
+            return Err(OptionsError::HdOnly { flag: "--same-as" });
+        } else if self.sweep.no_sweep {
+            return Err(OptionsError::HdOnly { flag: "--no-sweep" });
+        } else if self.sweep.sweep_reserve.is_some() {
+            return Err(OptionsError::HdOnly {
+                flag: "--sweep-reserve",
+            });
         }
         Ok(())
     }
@@ -253,6 +250,13 @@ impl CreateContext {
     fn console(&self) -> Console {
         Console::new(self.logger.clone(), self.prompt.clone())
     }
+
+    /// Logs to and asks what `console` does.
+    pub(crate) fn with_console(mut self, console: &Console) -> Self {
+        self.logger = console.logger().clone();
+        self.prompt = console.prompt().clone();
+        self
+    }
 }
 
 impl fmt::Debug for CreateContext {
@@ -326,54 +330,98 @@ impl CreateOutcome {
 
 impl Report for CreateOutcome {
     fn human(&self) -> String {
-        match document(self) {
-            Some(Document::Plain(doc)) => doc.human(),
-            Some(Document::Hd(doc)) => doc.human(),
-            None => format!("Aborted: Safe {} was not deployed", self.safe()),
-        }
+        document(self).map_or_else(
+            || format!("Aborted: Safe {} was not deployed", self.safe()),
+            |doc| doc.human(),
+        )
     }
 }
 
-/// What `safe create` prints for an outcome, as it always has.
+/// What `safe create` prints for an outcome, as it always has: the HD
+/// document when an HD wallet key owns the Safe, else the plain one.
+#[derive(Serialize)]
+#[serde(untagged)]
 enum Document {
     Plain(CreateOutput),
     Hd(hd::HdCreateOutput),
 }
 
-fn document(outcome: &CreateOutcome) -> Option<Document> {
-    if let Some(doc) = hd::HdCreateOutput::from_outcome(outcome) {
-        return Some(Document::Hd(doc));
+impl Report for Document {
+    fn human(&self) -> String {
+        match self {
+            Self::Plain(doc) => doc.human(),
+            Self::Hd(doc) => doc.human(),
+        }
     }
-    let (safe_address, tx_hash, owners, threshold, already_deployed) = match outcome {
-        CreateOutcome::Computed {
-            safe,
-            owners,
-            threshold,
-            deployed,
-            ..
-        } => (*safe, None, owners, *threshold, *deployed),
-        CreateOutcome::AlreadyDeployed {
-            safe,
-            owners,
-            threshold,
-            ..
-        } => (*safe, None, owners, *threshold, true),
-        CreateOutcome::Deployed {
-            safe,
+}
+
+fn document(outcome: &CreateOutcome) -> Option<Document> {
+    let none = Vec::new();
+    let (safe, tx_hash, owners, threshold, already_deployed, owner_key, payer, sweep, warnings) =
+        match outcome {
+            CreateOutcome::Computed {
+                safe,
+                owners,
+                threshold,
+                deployed,
+                owner_key,
+                payer,
+            } => (
+                *safe, None, owners, *threshold, *deployed, *owner_key, *payer, None, &none,
+            ),
+            CreateOutcome::AlreadyDeployed {
+                safe,
+                owners,
+                threshold,
+                owner_key,
+                payer,
+                sweep,
+                warnings,
+            } => (
+                *safe, None, owners, *threshold, true, *owner_key, *payer, *sweep, warnings,
+            ),
+            CreateOutcome::Deployed {
+                safe,
+                tx_hash,
+                owners,
+                threshold,
+                payer,
+                owner_key,
+                sweep,
+                warnings,
+            } => (
+                *safe,
+                Some(*tx_hash),
+                owners,
+                *threshold,
+                false,
+                *owner_key,
+                Some(*payer),
+                *sweep,
+                warnings,
+            ),
+            CreateOutcome::Aborted { .. } => return None,
+        };
+    Some(match (owner_key, payer) {
+        (Some(owner), Some(payer)) => Document::Hd(hd::HdCreateOutput {
+            safe_address: safe,
             tx_hash,
-            owners,
+            owner,
+            owners: owners.clone(),
             threshold,
-            ..
-        } => (*safe, Some(*tx_hash), owners, *threshold, false),
-        CreateOutcome::Aborted { .. } => return None,
-    };
-    Some(Document::Plain(CreateOutput {
-        safe_address,
-        tx_hash,
-        owners: owners.clone(),
-        threshold,
-        already_deployed,
-    }))
+            already_deployed,
+            payer,
+            sweep,
+            warnings: warnings.clone(),
+        }),
+        _ => Document::Plain(CreateOutput {
+            safe_address: safe,
+            tx_hash,
+            owners: owners.clone(),
+            threshold,
+            already_deployed,
+        }),
+    })
 }
 
 /// Deploys a Safe as `safe create` does, with every option in `opts`.
@@ -394,7 +442,7 @@ async fn create_with(
     console: &Console,
 ) -> Result<CreateOutcome, CreateError> {
     opts.validate(ctx.signer.is_some())?;
-    if opts.hd.is_set() {
+    if opts.uses_hd() {
         return Box::pin(hd::create(ctx, opts, console)).await;
     }
     let signer = ctx.signer.ok_or(CreateError::NoSigner)?;
@@ -414,17 +462,17 @@ async fn create_with(
     let safe = plan.safe;
     let mut details = String::from("Computing Safe address...\n");
     if !opts.implementation.is_standard() {
-        details.push_str(&format!("  Implementation: {}\n", implementation.name()));
+        let _ = writeln!(details, "  Implementation: {}", implementation.name());
     }
-    details.push_str(&format!("  Factory: {}\n", plan.to));
-    details.push_str(&format!("  Singleton: {}\n", plan.singleton));
+    let _ = writeln!(details, "  Factory: {}", plan.to);
+    let _ = writeln!(details, "  Singleton: {}", plan.singleton);
     if opts.implementation.is_standard() {
-        details.push_str(&format!("  Salt Nonce: {}\n", setup.salt_nonce));
+        let _ = writeln!(details, "  Salt Nonce: {}", setup.salt_nonce);
     }
-    details.push_str(&format!("  Owners: {:?}\n", plan.owners));
-    details.push_str(&format!("  Threshold: {}\n", plan.threshold));
+    let _ = writeln!(details, "  Owners: {:?}", plan.owners);
+    let _ = writeln!(details, "  Threshold: {}", plan.threshold);
     if payer.address() != first {
-        details.push_str(&format!("  Payer: {}\n", payer.address()));
+        let _ = writeln!(details, "  Payer: {}", payer.address());
     }
     console.line(&details);
 
@@ -453,7 +501,7 @@ async fn create_with(
     }
 
     console.line(format!("Safe Address: {safe}\n"));
-    details.push_str(&format!("  Safe Address: {safe}"));
+    let _ = write!(details, "  Safe Address: {safe}");
     if !opts.no_confirm && !console.confirm("Deploy new Safe?", &details) {
         console.line("Aborted");
         return Ok(CreateOutcome::Aborted { safe });
@@ -486,41 +534,9 @@ async fn create_with(
     })
 }
 
-/// The Safe address `setup` deploys to, and the initializer that sets it up.
-pub(crate) async fn predict(
-    provider: &HttpProvider,
-    setup: &ResolvedSetup,
-) -> Result<(Address, Bytes), CreateError> {
-    let creation_code = fetch_proxy_creation_code(provider, setup.factory).await?;
-    Ok(predict_safe_address(
-        setup.factory,
-        setup.singleton,
-        &setup.owners,
-        setup.threshold,
-        setup.fallback_handler,
-        setup.salt_nonce,
-        &creation_code,
-    ))
-}
-
-/// The unsigned `createProxyWithNonce` transaction, sent by `from`, with the
-/// `--gas-limit` and fee overrides applied.
-pub(crate) async fn deployment(
-    provider: &HttpProvider,
-    chain_id: u64,
-    from: Address,
-    setup: &ResolvedSetup,
-    initializer: Bytes,
-    fees: &FeeArgs,
-) -> Result<OuterTxParams, CreateError> {
-    let input =
-        safe_rs::encode_create_proxy_with_nonce(setup.singleton, initializer, setup.salt_nonce);
-    deployment_tx(provider, chain_id, from, setup.factory, input, fees).await
-}
-
 /// The unsigned deployment transaction calling `to` with `input`, sent by
 /// `from`, with the `--gas-limit` and fee overrides applied.
-async fn deployment_tx(
+pub(crate) async fn deployment_tx(
     provider: &HttpProvider,
     chain_id: u64,
     from: Address,
@@ -604,11 +620,13 @@ pub(crate) async fn submit(
 /// `safe create`: resolves the signer, calls [`create`], and prints the
 /// outcome as `safe` does (JSON with `config.json`).
 pub async fn run(args: CreateArgs, config: &RunConfig) -> color_eyre::Result<()> {
-    let reports = Arc::new(Reports::default());
-    let console = config.console().with_reports(reports.clone());
-    let result = run_with(args, &console, config.json).await;
-    reports.print(config.json);
-    result
+    let json = config.json;
+    config
+        .console()
+        .printing(json, |console| async move {
+            run_with(args, &console, json).await
+        })
+        .await
 }
 
 pub(crate) async fn run_with(
@@ -630,15 +648,14 @@ pub(crate) async fn run_with(
     } else {
         Some(create_signer(&args.signer, console).await?)
     };
-    let mut ctx = CreateContext::new(args.rpc.rpc_url);
-    ctx.signer = signer;
-    ctx.logger = console.logger().clone();
-    ctx.prompt = console.prompt().clone();
+    let ctx = CreateContext {
+        signer,
+        ..CreateContext::new(args.rpc.rpc_url)
+    }
+    .with_console(console);
     let outcome = create_with(ctx, args.opts, console).await?;
-    match document(&outcome) {
-        Some(Document::Plain(doc)) => console.emit(&doc),
-        Some(Document::Hd(doc)) => console.emit(&doc),
-        None => {}
+    if let Some(doc) = document(&outcome) {
+        console.emit(&doc);
     }
     Ok(())
 }
@@ -648,6 +665,7 @@ mod tests {
     use super::*;
     use crate::cli::SafeVersion;
     use clap::CommandFactory;
+    use safe_rs::predict_safe_address;
 
     #[test]
     fn the_create_flags_are_consistent() {
@@ -757,7 +775,7 @@ mod tests {
             sweep: None,
             warnings: Vec::new(),
         };
-        let Some(Document::Plain(doc)) = document(&deployed) else {
+        let Some(doc @ Document::Plain(_)) = document(&deployed) else {
             panic!("a plain create prints the plain document");
         };
         let json = serde_json::to_value(&doc).unwrap();
@@ -774,5 +792,37 @@ mod tests {
             ]
         );
         assert!(document(&CreateOutcome::Aborted { safe }).is_none());
+
+        let hd = CreateOutcome::Deployed {
+            safe,
+            tx_hash: B256::repeat_byte(7),
+            owners: vec![owner],
+            threshold: 1,
+            payer: owner,
+            owner_key: Some(OwnerKey {
+                index: Some(1),
+                address: owner,
+            }),
+            sweep: None,
+            warnings: Vec::new(),
+        };
+        let Some(doc @ Document::Hd(_)) = document(&hd) else {
+            panic!("an HD create prints the HD document");
+        };
+        let json = serde_json::to_value(&doc).unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "already_deployed",
+                "owner",
+                "owners",
+                "payer",
+                "safe_address",
+                "threshold",
+                "tx_hash"
+            ]
+        );
     }
 }
