@@ -404,7 +404,7 @@ pub fn import_wallet(
     let wallet = write_keystore(&path, &phrase, password)?;
 
     if let Some(start) = start_index {
-        let mut store = open_state(wallet.id(), Some(&home)).map_err(classify)?;
+        let mut store = open_state(wallet.id(), &home).map_err(classify)?;
         store.state.note_used(start - 1);
         store.save()?;
     }
@@ -514,9 +514,9 @@ pub async fn wallet_address(
 ) -> Result<WalletAddress> {
     let home = ctx.home()?;
     let (index, address) = match index {
-        None | Some(0) => (0, wallet_id(hd, Some(&home)).await.map_err(classify)?),
+        None | Some(0) => (0, wallet_id(hd, &home).await.map_err(classify)?),
         Some(index) => {
-            let keys = open_keys(hd, Some(&home), &ctx.console())
+            let keys = open_keys(hd, &home, &ctx.console())
                 .await
                 .map_err(classify)?;
             (index, keys.address(index).await?)
@@ -539,7 +539,7 @@ pub fn signer(
     password: &PasswordArgs,
 ) -> Result<alloy::signers::local::PrivateKeySigner> {
     let home = ctx.home()?;
-    hd_key_signer(wallet, index, password, Some(&home), &ctx.console()).map_err(classify)
+    hd_key_signer(wallet, index, password, &home, &ctx.console()).map_err(classify)
 }
 
 fn exposure_label(exposure: Exposure) -> &'static str {
@@ -664,7 +664,7 @@ impl Report for WalletStatus {
 /// context's Safe, when it has one.
 pub async fn wallet_status(ctx: &WalletContext, hd: &HdArgs) -> Result<WalletStatus> {
     let home = ctx.home()?;
-    let wallet = wallet_id(hd, Some(&home)).await.map_err(classify)?;
+    let wallet = wallet_id(hd, &home).await.map_err(classify)?;
     let state = read_state(&home, wallet)?.unwrap_or_else(|| RotationState::new(wallet, 1));
     let only = ctx.safe.map(|safe| safe.to_string());
     let safes = state
