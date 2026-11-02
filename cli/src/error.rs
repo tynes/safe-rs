@@ -24,24 +24,24 @@ pub enum OptionsError {
         flag: &'static str,
         with: &'static str,
     },
-    /// `--rotate` with a signer from the host: the owner key comes from the HD
-    /// wallet or Ledger
+    /// `--rotate` with a signer from the host: the owner key comes from the
+    /// mnemonic wallet or Ledger
     #[error(
-        "with --rotate the owner key comes from the HD wallet or Ledger (--mnemonic or \
+        "with --rotate the owner key comes from the mnemonic wallet or Ledger (--mnemonic or \
          --ledger): send without a signer"
     )]
     RotateWithSigner,
     /// `--no-sweep` or `--sweep-reserve` without `--rotate`
     #[error("--no-sweep and --sweep-reserve only apply with --rotate")]
     SweepWithoutRotate,
-    /// Rotating owner keys ([`SendOpts::hd`](crate::args::SendOpts::hd))
+    /// Rotating owner keys ([`SendOpts::owner_keys`](crate::args::SendOpts::owner_keys))
     /// without `--rotate`, which would publish an owner key and leave it in
     /// charge of the Safe
     #[error(
         "the rotating owner keys need --rotate: sending without rotating would publish \
          an owner key and leave it in charge of the Safe"
     )]
-    HdWithoutRotate,
+    OwnerKeysWithoutRotate,
     /// An option that only applies to a send through a Safe, given for an EOA
     /// send
     #[error("{flag} only applies to a send through a Safe, not from an EOA")]
@@ -53,23 +53,23 @@ pub enum OptionsError {
     /// A signer with `create --rotate`, where the owner key comes from the
     /// wallet
     #[error(
-        "with --rotate the owner key comes from the HD wallet or Ledger (--mnemonic or \
+        "with --rotate the owner key comes from the mnemonic wallet or Ledger (--mnemonic or \
          --ledger): remove the other wallet options, and unset PRIVATE_KEY, ETH_KEYSTORE \
          and ETH_KEYSTORE_ACCOUNT"
     )]
-    SignerWithHd,
+    SignerWithOwnerKeys,
     /// Rotating owner keys for `create` without `--rotate`
     #[error(
         "the rotating owner keys need --rotate: `create --rotate` makes a Safe whose owner \
          key rotates"
     )]
-    CreateHdWithoutRotate,
-    /// `create --rotate` with no HD wallet or Ledger to take the owner keys from
+    CreateOwnerKeysWithoutRotate,
+    /// `create --rotate` with no mnemonic wallet or Ledger to take the owner keys from
     #[error("--rotate needs --mnemonic or --ledger to take the owner keys from")]
     RotateWithoutKeys,
     /// An option of `create` that only applies with `--rotate`
     #[error("{flag} needs --rotate")]
-    HdOnly { flag: &'static str },
+    RotateOnly { flag: &'static str },
 }
 
 /// A broadcast transaction that did not land: refused by the node, possibly
@@ -163,7 +163,7 @@ pub enum SendError {
         reason: String,
         /// The owner that signed and is now retired
         old_owner: Address,
-        /// Its HD wallet index, when the wallet derives it
+        /// Its mnemonic wallet index, when the wallet derives it
         old_owner_index: Option<u32>,
     },
     /// The `approveHash` transaction was mined and reverted
@@ -196,7 +196,7 @@ pub enum SendError {
         tx_hash: B256,
         /// The owner that signed and is still an owner
         old_owner: Address,
-        /// Its HD wallet index, when the wallet derives it
+        /// Its mnemonic wallet index, when the wallet derives it
         old_owner_index: Option<u32>,
     },
     /// An EOA transaction was mined and reverted
@@ -325,8 +325,8 @@ impl CreateError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum WalletError {
-    /// No HD wallet file by this name
-    #[error("no HD wallet at {path} (create one with `safe wallet new`)")]
+    /// No mnemonic wallet file by this name
+    #[error("no mnemonic wallet at {path} (create one with `safe wallet new`)")]
     NotFound { path: PathBuf },
     /// A wallet file is already there
     #[error("{} already exists", path.display())]
@@ -335,7 +335,7 @@ pub enum WalletError {
     #[error("Wrong keystore password (or corrupt keystore)")]
     WrongPassword,
     /// Another process holds the wallet's state
-    #[error("another safe command is using this HD wallet ({} is locked); wait for it to finish", path.display())]
+    #[error("another safe command is using this mnemonic wallet ({} is locked); wait for it to finish", path.display())]
     Locked { path: PathBuf },
     /// Not a valid BIP-39 phrase
     #[error("invalid recovery phrase: {0}")]

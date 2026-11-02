@@ -1,4 +1,4 @@
-//! `$SAFE_RS_HOME/config.toml` as the `safe` binary reads it, and HD wallet
+//! `$SAFE_RS_HOME/config.toml` as the `safe` binary reads it, and mnemonic wallet
 //! keys as signers. Nothing here reaches a chain: the RPC URL points at port 9
 //! (discard), and the signer is resolved before any request.
 #![allow(
@@ -95,8 +95,8 @@ fn an_invalid_config_file_is_refused_by_name() {
 }
 
 #[tokio::test]
-async fn every_hd_wallet_key_is_usable_as_a_signer() {
-    use safe_rs_cli::args::{HdArgs, PasswordArgs};
+async fn every_mnemonic_wallet_key_is_usable_as_a_signer() {
+    use safe_rs_cli::args::{OwnerKeysArgs, PasswordArgs};
     use safe_rs_cli::prompt::NoPrompt;
     use safe_rs_cli::wallet::{self, WalletContext};
 
@@ -109,17 +109,17 @@ async fn every_hd_wallet_key_is_usable_as_a_signer() {
         password: Some("correct horse".into()),
         ..PasswordArgs::default()
     };
-    let hd = HdArgs {
+    let owner_keys = OwnerKeysArgs {
         mnemonic: Some("trader".into()),
         password: password.clone(),
-        ..HdArgs::default()
+        ..OwnerKeysArgs::default()
     };
 
     let funding = wallet::signer(&ctx, "trader", 0, &password).unwrap();
     assert_eq!(funding.address(), created.funding_address);
     for index in [1, 3] {
         let signer = wallet::signer(&ctx, "trader", index, &password).unwrap();
-        let expected = wallet::wallet_address(&ctx, &hd, Some(index))
+        let expected = wallet::wallet_address(&ctx, &owner_keys, Some(index))
             .await
             .unwrap();
         assert_eq!(signer.address(), expected.address, "key {index}");
@@ -134,7 +134,9 @@ async fn every_hd_wallet_key_is_usable_as_a_signer() {
         ..Default::default()
     };
     let signer = args.resolve(std::sync::Arc::new(NoPrompt)).await.unwrap();
-    let expected = wallet::wallet_address(&ctx, &hd, Some(3)).await.unwrap();
+    let expected = wallet::wallet_address(&ctx, &owner_keys, Some(3))
+        .await
+        .unwrap();
     assert_eq!(signer.address(), expected.address);
 
     let wrong = PasswordArgs {

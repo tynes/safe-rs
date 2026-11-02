@@ -7,11 +7,11 @@ use foundry_wallets::wallet_raw::RawWalletOpts;
 use foundry_wallets::{WalletOpts, WalletSigner};
 use safe_rs::keystore::{decrypt_keystore, keystore_address};
 use safe_rs::rotation::{KeySource, Keyring, StateFile};
-use safe_rs::HdWallet;
+use safe_rs::MnemonicWallet;
 use zeroize::Zeroizing;
 
 use crate::any_signer::AnySigner;
-use crate::cli::{GasPayerArgs, HdArgs, PasswordArgs, SignerArgs};
+use crate::cli::{GasPayerArgs, OwnerKeysArgs, PasswordArgs, SignerArgs};
 use crate::console::Console;
 use crate::keys::CliKeys;
 use crate::paths;
@@ -25,8 +25,8 @@ pub(crate) const SIGNER_FLAGS_HELP: &str =
 /// or remote key first, then `--interactive`, `--private-key`, `--mnemonic`,
 /// and last `--keystore` / `--account`.
 ///
-/// `console`'s prompt asks for an `--interactive` key and a keystore or HD
-/// wallet password (unless `--password` or `--password-file` gives it): the
+/// `console`'s prompt asks for an `--interactive` key and a keystore or
+/// mnemonic wallet password (unless `--password` or `--password-file` gives it): the
 /// library never reads the terminal itself. With `--from`, the key must have
 /// that address.
 pub async fn create_signer(args: &SignerArgs, console: &Console) -> Result<AnySigner> {
@@ -97,7 +97,7 @@ async fn resolve(args: &SignerArgs, console: &Console) -> Result<AnySigner> {
 impl SignerArgs {
     /// The signer these flags name, as the `safe` commands resolve it:
     /// `--interactive` asks `prompt` for the key, `--keystore`, `--account`
-    /// and an HD wallet `--mnemonic` read the password from the password
+    /// and a mnemonic wallet `--mnemonic` read the password from the password
     /// flags or ask `prompt`, `--ledger` and `--trezor` connect to the device.
     pub async fn resolve(
         &self,
@@ -136,7 +136,7 @@ fn private_key_signer(key: &str) -> Result<AnySigner> {
     Ok(foundry_wallets::utils::create_private_key_signer(key.trim())?.into())
 }
 
-/// The phrase `--mnemonic` names, in this order: a `safe` HD wallet (the
+/// The phrase `--mnemonic` names, in this order: a `safe` mnemonic wallet (the
 /// path of a mnemonic keystore, or a name under the data directory, which a
 /// phrase of 12 or more words can never be), any other file (read as the
 /// phrase, as `cast` does), or else the phrase itself.
@@ -158,11 +158,11 @@ fn mnemonic_phrase(
         let wallet = paths::wallet_file(&paths::home()?, value.trim());
         if wallet.is_file() {
             let text = std::fs::read_to_string(&wallet)
-                .wrap_err_with(|| format!("cannot read HD wallet {}", wallet.display()))?;
+                .wrap_err_with(|| format!("cannot read mnemonic wallet {}", wallet.display()))?;
             return keystore_phrase(&wallet, &text, password, console);
         }
         bail!(
-            "--mnemonic {value}: no such file, and no HD wallet {} (create one with \
+            "--mnemonic {value}: no such file, and no mnemonic wallet {} (create one with \
              `safe wallet new`)",
             wallet.display()
         );
@@ -183,7 +183,7 @@ fn keystore_phrase(
         console,
     )?;
     let decrypted = decrypt_keystore(json, password.as_bytes())
-        .wrap_err_with(|| format!("cannot open HD wallet {}", path.display()))?;
+        .wrap_err_with(|| format!("cannot open mnemonic wallet {}", path.display()))?;
     match decrypted.mnemonic {
         Some(mnemonic) => Ok(mnemonic.phrase),
         None => bail!(
@@ -271,17 +271,17 @@ pub fn check_new_password(password: &str) -> Result<Vec<String>> {
 pub enum KeyChoice {
     /// A connected Ledger
     Ledger,
-    /// An HD wallet keystore file
+    /// A mnemonic wallet keystore file
     Phrase(PathBuf),
 }
 
 /// Which wallet the options name. `--ledger` wins, so a `mnemonic` left
 /// in the config file does not get in its way.
-pub fn key_choice(hd: &HdArgs, home: &Path) -> Result<KeyChoice> {
-    if hd.ledger {
+pub fn key_choice(owner_keys: &OwnerKeysArgs, home: &Path) -> Result<KeyChoice> {
+    if owner_keys.ledger {
         return Ok(KeyChoice::Ledger);
     }
-    let wallet = hd
+    let wallet = owner_keys
         .mnemonic
         .as_deref()
         .ok_or_else(|| eyre!("no wallet given: pass --mnemonic <NAME|PATH> or --ledger"))?;
@@ -296,22 +296,22 @@ fn read_wallet_file(path: &Path) -> Result<String> {
             color_eyre::eyre::Report::new(e)
         };
         report.wrap_err(format!(
-            "cannot read HD wallet {} (create one with `safe wallet new`)",
+            "cannot read mnemonic wallet {} (create one with `safe wallet new`)",
             path.display()
         ))
     })
 }
 
-/// Decrypts the HD wallet at `path`.
-fn load_phrase(path: &Path, password: &PasswordArgs, console: &Console) -> Result<HdWallet> {
+/// Decrypts the mnemonic wallet at `path`.
+fn load_phrase(path: &Path, password: &PasswordArgs, console: &Console) -> Result<MnemonicWallet> {
     let json = read_wallet_file(path)?;
     let password = read_password(
         password,
         &format!("Password for {}: ", path.display()),
         console,
     )?;
-    HdWallet::from_keystore_json(&json, password.as_bytes())
-        .wrap_err_with(|| format!("cannot open HD wallet {}", path.display()))
+    MnemonicWallet::from_keystore_json(&json, password.as_bytes())
+        .wrap_err_with(|| format!("cannot open mnemonic wallet {}", path.display()))
 }
 
 async fn connect_ledger() -> Result<CliKeys> {
@@ -320,21 +320,25 @@ async fn connect_ledger() -> Result<CliKeys> {
 
 /// The keys `--mnemonic` / `--ledger` chose. A phrase is decrypted (asking
 /// for its password); a Ledger is connected (never asking for a password).
-pub async fn open_keys(hd: &HdArgs, home: &Path, console: &Console) -> Result<CliKeys> {
-    match key_choice(hd, home)? {
+pub async fn open_keys(
+    owner_keys: &OwnerKeysArgs,
+    home: &Path,
+    console: &Console,
+) -> Result<CliKeys> {
+    match key_choice(owner_keys, home)? {
         KeyChoice::Ledger => connect_ledger().await,
         KeyChoice::Phrase(path) => Ok(CliKeys::Phrase(Box::new(load_phrase(
             &path,
-            &hd.password,
+            &owner_keys.password,
             console,
         )?))),
     }
 }
 
-/// The key at `m/44'/60'/0'/0/{index}` of the HD wallet `wallet` (a name
+/// The key at `m/44'/60'/0'/0/{index}` of the mnemonic wallet `wallet` (a name
 /// under `home` or a keystore path), decrypting the wallet with `password`
 /// or the prompt.
-pub fn hd_key_signer(
+pub fn mnemonic_key_signer(
     wallet: &str,
     index: u32,
     password: &PasswordArgs,
@@ -348,8 +352,8 @@ pub fn hd_key_signer(
 
 /// The wallet's funding address, which identifies it: read from the keystore
 /// without its password, or asked of the Ledger.
-pub async fn wallet_id(hd: &HdArgs, home: &Path) -> Result<Address> {
-    match key_choice(hd, home)? {
+pub async fn wallet_id(owner_keys: &OwnerKeysArgs, home: &Path) -> Result<Address> {
+    match key_choice(owner_keys, home)? {
         KeyChoice::Ledger => Ok(connect_ledger().await?.address(0).await?),
         KeyChoice::Phrase(path) => keystore_address(&read_wallet_file(&path)?)?
             .ok_or_else(|| eyre!("{} has no address field", path.display())),
@@ -361,7 +365,7 @@ pub fn open_state(wallet_id: Address, home: &Path) -> Result<StateFile> {
     let path = paths::state_file(home, wallet_id);
     StateFile::open(&path, wallet_id).map_err(|e| match e {
         safe_rs::Error::StateLocked(_) => color_eyre::eyre::Report::new(e).wrap_err(format!(
-            "another safe command is using this HD wallet ({} is locked); wait for it to finish",
+            "another safe command is using this mnemonic wallet ({} is locked); wait for it to finish",
             path.display()
         )),
         other => eyre!(other),
@@ -371,12 +375,12 @@ pub fn open_state(wallet_id: Address, home: &Path) -> Result<StateFile> {
 /// The wallet `--mnemonic` / `--ledger` chose, paired with its locked state.
 /// `home` defaults to the data directory.
 pub async fn open_wallet(
-    hd: &HdArgs,
+    owner_keys: &OwnerKeysArgs,
     home: Option<&Path>,
     console: &Console,
 ) -> Result<Keyring<CliKeys>> {
     let home = paths::home_or(home)?;
-    let keys = open_keys(hd, &home, console).await?;
+    let keys = open_keys(owner_keys, &home, console).await?;
     let store = open_state(keys.address(0).await?, &home)?;
     Ok(Keyring::open(keys, store).await?)
 }
@@ -386,25 +390,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ledger_wins_over_a_configured_hd_wallet() {
+    fn ledger_wins_over_a_configured_mnemonic_wallet() {
         let home = Path::new("/data");
         // As if the config file named a wallet and --ledger were passed.
-        let both = HdArgs {
+        let both = OwnerKeysArgs {
             mnemonic: Some("treasury".to_string()),
             ledger: true,
-            ..HdArgs::default()
+            ..OwnerKeysArgs::default()
         };
         assert_eq!(key_choice(&both, home).unwrap(), KeyChoice::Ledger);
-        let phrase = HdArgs {
+        let phrase = OwnerKeysArgs {
             mnemonic: Some("treasury".to_string()),
             ledger: false,
-            ..HdArgs::default()
+            ..OwnerKeysArgs::default()
         };
         assert_eq!(
             key_choice(&phrase, home).unwrap(),
             KeyChoice::Phrase(home.join("wallets/treasury.json"))
         );
-        assert!(key_choice(&HdArgs::default(), home).is_err());
+        assert!(key_choice(&OwnerKeysArgs::default(), home).is_err());
     }
 
     #[test]
@@ -465,7 +469,7 @@ mod tests {
         let signer = keystore_signer(&path, b"pw").unwrap();
         assert_eq!(
             signer.address(),
-            HdWallet::from_phrase(phrase).unwrap().id()
+            MnemonicWallet::from_phrase(phrase).unwrap().id()
         );
         assert!(keystore_signer(&path, b"nope").is_err());
         assert!(keystore_signer(&dir.path().join("missing.json"), b"pw").is_err());

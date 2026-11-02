@@ -1,4 +1,4 @@
-//! Where HD wallets and their rotation state live on disk.
+//! Where mnemonic wallets and their rotation state live on disk.
 //!
 //! Everything is under one directory: `$SAFE_RS_HOME`, or `~/.safe-rs`.
 //!

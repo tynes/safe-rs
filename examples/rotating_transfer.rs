@@ -8,7 +8,7 @@
 //! One-time owner keys example
 //!
 //! Sends ETH from a Safe and, in the same transaction, swaps the Safe's owner
-//! for the next unused key of an HD wallet. The old owner's remaining ETH is
+//! for the next unused key of a mnemonic wallet. The old owner's remaining ETH is
 //! then moved to the new owner, which pays for the next transaction.
 //!
 //! The Safe must be a threshold-1 Safe (v1.4.1 or v1.5.0) whose owner is a key
@@ -27,13 +27,13 @@
 //! - `RECIPIENT`: Address to send ETH to
 //! - `AMOUNT`: Amount to send (in wei)
 //!
-//! Run with `cargo run --features hd-wallet --example rotating_transfer`.
+//! Run with `cargo run --features mnemonic --example rotating_transfer`.
 
 use alloy::network::AnyNetwork;
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::providers::ProviderBuilder;
 use safe_rs::rotation::{RotatingSafe, RotationStatus};
-use safe_rs::{Call, HdWallet};
+use safe_rs::{Call, MnemonicWallet};
 use url::Url;
 
 #[tokio::main]
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Decrypt the phrase; every owner key is derived from it.
     let json = std::fs::read_to_string(&keystore)?;
-    let wallet = HdWallet::from_keystore_json(&json, password.as_bytes())?;
+    let wallet = MnemonicWallet::from_keystore_json(&json, password.as_bytes())?;
     println!("Wallet: {}", wallet.id());
 
     // Opening reads the owner list and brings the state file up to date. The

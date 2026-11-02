@@ -139,10 +139,10 @@ async fn a_host_implementation_refuses_setups_it_cannot_deploy() {
 }
 
 #[tokio::test]
-async fn a_host_implementation_is_refused_with_an_hd_wallet() {
+async fn a_host_implementation_is_refused_with_an_mnemonic_wallet() {
     let mut opts = CreateOpts::default().with_implementation(HostFactory::default());
     opts.rotate = true;
-    opts.hd.mnemonic = Some("demo".into());
+    opts.owner_keys.mnemonic = Some("demo".into());
     let ctx = CreateContext::new("http://127.0.0.1:9".parse().unwrap()).with_prompt(NoPrompt);
     let error = safe_rs_cli::create::create(ctx, opts).await.unwrap_err();
     assert!(
@@ -288,7 +288,7 @@ async fn a_policy_decides_from_the_plan_and_the_simulated_safe() {
 async fn a_policy_sees_a_rotation_plan() {
     use safe_rs_cli::args::{PasswordArgs, SendOpts};
     use safe_rs_cli::policy::{Plan, SafePolicy, SafeTxCheck};
-    use safe_rs_cli::safe_rs::{Bytes, Call, HdWallet};
+    use safe_rs_cli::safe_rs::{Bytes, Call, MnemonicWallet};
     use safe_rs_cli::wallet::{self, WalletContext};
     use safe_rs_cli::{SendContext, SendError, SendOutcome};
 
@@ -332,7 +332,7 @@ async fn a_policy_sees_a_rotation_plan() {
         .with_home(home.path().to_path_buf())
         .with_prompt(NoPrompt);
     wallet::import_wallet(&wallet_ctx, "demo", PHRASE, "pw", None).unwrap();
-    let owner = HdWallet::from_phrase(PHRASE)
+    let owner = MnemonicWallet::from_phrase(PHRASE)
         .unwrap()
         .owner_address(1)
         .unwrap();
@@ -346,10 +346,10 @@ async fn a_policy_sees_a_rotation_plan() {
             rotate: true,
             ..SendOpts::default()
         };
-        opts.hd.mnemonic = Some("demo".into());
+        opts.owner_keys.mnemonic = Some("demo".into());
         // The harness deploys MultiSendCallOnly at its own address.
         opts.multi_send_call_only = Some(h.addresses.multi_send_call_only);
-        opts.hd.password = PasswordArgs {
+        opts.owner_keys.password = PasswordArgs {
             password: Some("pw".into()),
             ..PasswordArgs::default()
         };

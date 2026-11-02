@@ -1,7 +1,7 @@
 //! Where owner keys come from, and the record of their addresses.
 //!
 //! A [`KeySource`] is one seed's keys at `m/44'/60'/0'/0/i`: a phrase held in
-//! memory ([`HdWallet`]) or a hardware wallet. Index 0 is the funding key and
+//! memory ([`MnemonicWallet`]) or a hardware wallet. Index 0 is the funding key and
 //! indices 1 and up are one-time owner keys.
 //!
 //! A [`Keyring`] pairs a source with its rotation state. It records every
@@ -21,7 +21,7 @@ use alloy::providers::Provider;
 
 use crate::envelope::{PreparedSafeTx, SignedSafeTx};
 use crate::error::{Error, Result};
-use crate::hd::HdWallet;
+use crate::mnemonic::MnemonicWallet;
 use crate::outer::{sign_outer_tx, OuterTxParams, SignedOuterTx};
 use crate::rotation::state::{Reserved, RotationState};
 use crate::rotation::store::StateFile;
@@ -65,7 +65,7 @@ pub trait KeySource: Send + Sync {
     ) -> impl Future<Output = Result<SignedOuterTx>> + Send;
 }
 
-impl KeySource for HdWallet {
+impl KeySource for MnemonicWallet {
     fn address(&self, index: u32) -> impl Future<Output = Result<Address>> + Send {
         std::future::ready(self.key_at(index).map(|key| key.address()))
     }
@@ -278,11 +278,11 @@ mod tests {
     const PHRASE: &str =
         "legal winner thank year wave sausage worth useful legal winner thank yellow";
 
-    fn wallet() -> HdWallet {
-        HdWallet::from_phrase(PHRASE).unwrap()
+    fn wallet() -> MnemonicWallet {
+        MnemonicWallet::from_phrase(PHRASE).unwrap()
     }
 
-    async fn open(dir: &tempfile::TempDir) -> Keyring<HdWallet> {
+    async fn open(dir: &tempfile::TempDir) -> Keyring<MnemonicWallet> {
         let store = StateFile::open(dir.path().join("state.json"), wallet().id()).unwrap();
         Keyring::open(wallet(), store).await.unwrap()
     }

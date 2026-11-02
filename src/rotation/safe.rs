@@ -1,6 +1,6 @@
 //! A Safe whose owner key is used once.
 //!
-//! [`RotatingSafe`] ties together an [`HdWallet`], the rotation state on disk
+//! [`RotatingSafe`] ties together an [`MnemonicWallet`], the rotation state on disk
 //! and a provider. Every transaction it sends is the caller's calls followed by
 //! a swap of the signing owner for the wallet's next unused key, and after the
 //! swap the old owner's remaining ETH is moved to the new one.
@@ -39,10 +39,10 @@ use crate::error::{Error, Result};
 use crate::exec::{
     simulate_approve_hash, simulate_exec_with_threshold, submit_and_wait, Submission,
 };
-use crate::hd::HdWallet;
 use crate::inspect::{
     read_approved_owners, read_safe_state, require_batch_target, ReadSafeStateOptions,
 };
+use crate::mnemonic::MnemonicWallet;
 use crate::outer::{
     decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx,
 };
@@ -336,9 +336,9 @@ impl Key {
 
 /// A Safe that rotates its owner with every transaction.
 ///
-/// Owner keys come from `K`: a phrase ([`HdWallet`], the default) or any other
+/// Owner keys come from `K`: a phrase ([`MnemonicWallet`], the default) or any other
 /// [`KeySource`], such as a hardware wallet.
-pub struct RotatingSafe<P, K = HdWallet> {
+pub struct RotatingSafe<P, K = MnemonicWallet> {
     provider: P,
     chain_id: u64,
     safe: Address,

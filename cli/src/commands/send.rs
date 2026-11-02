@@ -70,7 +70,7 @@ pub struct SendContext {
     pub sender: Sender,
     /// The owner key that signs the Safe transaction, and pays for gas unless
     /// a `--gas-payer-*` key is given. Leave it out with `--rotate`, where the
-    /// owner key comes from the HD wallet or Ledger, or to only add on-chain
+    /// owner key comes from the mnemonic wallet or Ledger, or to only add on-chain
     /// approvals collected in `--bundle` while a payer submits.
     ///
     /// For [`Sender::Eoa`], the account that sends and pays; required.
@@ -79,7 +79,7 @@ pub struct SendContext {
     pub logger: Arc<dyn Logger>,
     /// What asks for confirmation and passwords (default: the terminal)
     pub prompt: Arc<dyn Prompt>,
-    /// Where HD wallets and their state live, for `--rotate` (default:
+    /// Where mnemonic wallets and their state live, for `--rotate` (default:
     /// `$SAFE_RS_HOME` or `~/.safe-rs`)
     pub home: Option<PathBuf>,
     /// What the Safe transaction is held to (default: nothing)
@@ -136,7 +136,7 @@ impl SendContext {
         self
     }
 
-    /// Looks for HD wallets and their state under `home` instead of
+    /// Looks for mnemonic wallets and their state under `home` instead of
     /// `$SAFE_RS_HOME` or `~/.safe-rs`.
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.home = Some(home);
@@ -166,13 +166,13 @@ impl fmt::Debug for SendContext {
 }
 
 /// The resolved RPC, Safe and signer of one send. The Safe is optional for
-/// `safe send`, which falls back to the bundle's, the HD wallet's or the
+/// `safe send`, which falls back to the bundle's, the mnemonic wallet's or the
 /// signer's default Safe.
 pub struct Target {
     pub rpc_url: Url,
     pub safe: Option<Address>,
     pub signer: Option<AnySigner>,
-    /// The HD wallet directory, for `--rotate`
+    /// The mnemonic wallet directory, for `--rotate`
     pub home: Option<PathBuf>,
 }
 
@@ -181,7 +181,7 @@ pub async fn run(mut args: SendArgs, console: &Console) -> eyre::Result<()> {
     // With --rotate, --mnemonic or --ledger names where the rotating owner
     // keys come from.
     if args.opts.rotate {
-        args.opts.hd = args.signer.take_rotation_keys()?;
+        args.opts.owner_keys = args.signer.take_rotation_keys()?;
     }
     let calls = build_cli_calls(&args)?;
     if args.eoa.send_eoa {
@@ -1017,8 +1017,8 @@ pub async fn execute(
     })
 }
 
-/// `send --rotate`: the user's calls followed by a swap of the owner for the HD
-/// wallet's next unused key, then a sweep of the old key's ETH.
+/// `send --rotate`: the user's calls followed by a swap of the owner for the
+/// mnemonic wallet's next unused key, then a sweep of the old key's ETH.
 async fn run_rotating(
     target: Target,
     cli_calls: Vec<Call>,
@@ -1054,7 +1054,7 @@ async fn run_rotating(
     };
     // No calls: the transaction only rotates the owner.
     let payer = create_payer(&args.gas_payer, console).await?;
-    let ring = open_wallet(&args.hd, target.home.as_deref(), console).await?;
+    let ring = open_wallet(&args.owner_keys, target.home.as_deref(), console).await?;
     let safe = if let Some(safe) = target.safe.or(bundle_safe) {
         safe
     } else {

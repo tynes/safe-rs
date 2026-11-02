@@ -9,7 +9,7 @@ use safe_rs::{recover_signer, Call, Operation, PreparedSafeTx, SafeTxParams};
 use serde::{Deserialize, Serialize};
 
 /// Unified Safe transaction bundle file for calls, prepared Safe transaction,
-/// offchain owner signatures, and optional HD/Ledger rotation swaps.
+/// offchain owner signatures, and optional mnemonic/Ledger rotation swaps.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleFile {
     /// Ordered user calls (excluding any automatically appended rotation `swapOwner` calls,

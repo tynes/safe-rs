@@ -3,7 +3,7 @@
 //! [`LedgerKeys`] is a [`KeySource`] backed by the Ethereum app of a connected
 //! Ledger, at the same path every key source uses, `m/44'/60'/0'/0/i`. A
 //! Ledger seeded with a phrase therefore derives the same keys as that phrase
-//! in [`HdWallet`](crate::HdWallet), and shares its rotation state.
+//! in [`MnemonicWallet`](crate::MnemonicWallet), and shares its rotation state.
 //!
 //! The device is asked for each address once: the [`Keyring`] records them
 //! and looks ahead (see [`SETUP_LOOKAHEAD`] and [`SEND_LOOKAHEAD`]). Before a
@@ -31,7 +31,7 @@ use futures_util::lock::Mutex;
 
 use crate::envelope::{PreparedSafeTx, SignedSafeTx};
 use crate::error::{Error, Result};
-use crate::hd::key_path;
+use crate::mnemonic::key_path;
 use crate::outer::{sign_outer_tx, OuterTxParams, SignedOuterTx};
 use crate::rotation::{KeySource, REBUILD_MARGIN, SETUP_LOOKAHEAD};
 

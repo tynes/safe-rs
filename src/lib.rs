@@ -12,7 +12,7 @@
 //!   approvals ([`read_approved_owners`]) combine in a [`SignedSafeTx`]; the
 //!   builder's `execute()` signs with one key, so it needs threshold 1
 //! - One-time owner keys: every transaction swaps the signing owner for a
-//!   fresh key ([`rotation`]; the `hd-wallet` feature adds the encrypted
+//!   fresh key ([`rotation`]; the `mnemonic` feature adds the encrypted
 //!   phrase and `rotation::RotatingSafe`)
 //!
 //! ## Cargo features
@@ -23,9 +23,9 @@
 //!   still execute, with gas estimated over RPC, and revm is not compiled.
 //! - `keystore`: decrypting password-encrypted (V3) keystores with
 //!   `keystore::decrypt_keystore`.
-//! - `hd-wallet`: encrypted mnemonic keystores, HD keys and
+//! - `mnemonic`: encrypted mnemonic keystores, derived keys and
 //!   `rotation::RotatingSafe` (implies `simulation` and `keystore`).
-//! - `ledger`: owner keys on a Ledger device (implies `hd-wallet`).
+//! - `ledger`: owner keys on a Ledger device (implies `mnemonic`).
 //!
 //! ## Quick Start
 //!
@@ -78,8 +78,6 @@ pub mod envelope;
 pub mod eoa;
 pub mod error;
 pub mod exec;
-#[cfg(feature = "hd-wallet")]
-pub mod hd;
 pub mod inspect;
 #[cfg(feature = "simulation")]
 mod json;
@@ -87,6 +85,8 @@ mod json;
 pub mod keystore;
 #[cfg(feature = "ledger")]
 pub mod ledger;
+#[cfg(feature = "mnemonic")]
+pub mod mnemonic;
 pub mod outer;
 pub mod rotation;
 pub mod safe;
@@ -124,14 +124,14 @@ pub use exec::{
     simulate_approve_hash, simulate_exec, simulate_exec_with_threshold, ExecSimulation,
 };
 pub use exec::{submit_and_wait, Submission};
-#[cfg(feature = "hd-wallet")]
-pub use hd::HdWallet;
 pub use inspect::{
     has_module_guard, is_safe_with, prev_in_list, read_approved_owners, read_safe_state,
     require_batch_target, ModuleList, ReadSafeStateOptions, SafeState,
 };
 #[cfg(feature = "ledger")]
 pub use ledger::LedgerKeys;
+#[cfg(feature = "mnemonic")]
+pub use mnemonic::MnemonicWallet;
 pub use outer::{decode_signed_outer_tx, sign_outer_tx, sweep_value, OuterTxParams, SignedOuterTx};
 pub use rotation::{OwnerSwap, RotationPlan};
 pub use safe::{

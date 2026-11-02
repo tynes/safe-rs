@@ -28,7 +28,7 @@ use url::Url;
 use crate::any_signer::AnySigner;
 use crate::cli::{FeeArgs, SafeSetupArgs};
 use crate::cli::{GasPayerArgs, RpcArgs, SignerArgs};
-use crate::cli::{HdArgs, SweepArgs};
+use crate::cli::{OwnerKeysArgs, SweepArgs};
 use crate::commands::{http_provider, outer_fees, with_gas_margin, RECEIPT_POLL_INTERVAL};
 use crate::console::Console;
 pub use crate::error::CreateError;
@@ -40,12 +40,12 @@ use crate::prompt::{Prompt, TerminalPrompt};
 use crate::signers::{create_payer, create_signer};
 use crate::RunConfig;
 
-mod hd;
 mod implementation;
+mod rotating;
 
-pub use hd::{parse_same_as, SameAs};
+pub use rotating::{parse_same_as, SameAs};
 
-/// How `safe create` deploys: the Safe's setup, fees, and the HD wallet that
+/// How `safe create` deploys: the Safe's setup, fees, and the mnemonic wallet that
 /// owns it. Leaves out `--rpc-url` and the signer.
 ///
 /// [`Default`] matches the flag defaults.
@@ -65,7 +65,7 @@ pub struct CreateOpts {
     #[command(flatten)]
     pub fees: FeeArgs,
 
-    /// Deploy the same Safe an HD wallet created on another chain, given as
+    /// Deploy the same Safe a mnemonic wallet created on another chain, given as
     /// <CHAIN_ID>:<SAFE>. Reuses its first owner key and salt, so that key
     /// must be rotated right away
     #[arg(
@@ -81,11 +81,11 @@ pub struct CreateOpts {
     #[arg(long)]
     pub rotate: bool,
 
-    /// The HD wallet or Ledger the rotating owner keys come from. Not flags
+    /// The mnemonic wallet or Ledger the rotating owner keys come from. Not flags
     /// of its own: `--mnemonic` / `--ledger` (and the password) fill it under
     /// `--rotate`, see [`SignerArgs::take_rotation_keys`]
     #[arg(skip)]
-    pub hd: HdArgs,
+    pub owner_keys: OwnerKeysArgs,
 
     #[command(flatten)]
     pub sweep: SweepArgs,
@@ -144,15 +144,15 @@ impl CreateOpts {
                 with: "--no-sweep",
             });
         }
-        if !self.rotate && self.hd.is_set() && !has_signer {
-            return Err(OptionsError::CreateHdWithoutRotate);
+        if !self.rotate && self.owner_keys.is_set() && !has_signer {
+            return Err(OptionsError::CreateOwnerKeysWithoutRotate);
         }
         if self.rotate {
-            if !self.hd.is_set() {
+            if !self.owner_keys.is_set() {
                 return Err(OptionsError::RotateWithoutKeys);
             }
             if has_signer {
-                return Err(OptionsError::SignerWithHd);
+                return Err(OptionsError::SignerWithOwnerKeys);
             }
             if !self.implementation.is_standard() {
                 return Err(OptionsError::Conflict {
@@ -161,19 +161,19 @@ impl CreateOpts {
                 });
             }
         } else if self.same_as.is_some() {
-            return Err(OptionsError::HdOnly { flag: "--same-as" });
+            return Err(OptionsError::RotateOnly { flag: "--same-as" });
         } else if self.sweep.no_sweep {
-            return Err(OptionsError::HdOnly { flag: "--no-sweep" });
+            return Err(OptionsError::RotateOnly { flag: "--no-sweep" });
         } else if self.sweep.sweep_reserve.is_some() {
-            return Err(OptionsError::HdOnly {
+            return Err(OptionsError::RotateOnly {
                 flag: "--sweep-reserve",
             });
         }
         Ok(())
     }
 
-    /// Whether the owner comes from an HD wallet or Ledger (`--rotate`).
-    pub fn uses_hd(&self) -> bool {
+    /// Whether the owner comes from a mnemonic wallet or Ledger (`--rotate`).
+    pub fn rotates(&self) -> bool {
         self.rotate
     }
 }
@@ -206,7 +206,7 @@ pub struct CreateContext {
     pub logger: Arc<dyn Logger>,
     /// What asks for confirmation and passwords (default: the terminal)
     pub prompt: Arc<dyn Prompt>,
-    /// Where HD wallets and their state live (default: `$SAFE_RS_HOME` or
+    /// Where mnemonic wallets and their state live (default: `$SAFE_RS_HOME` or
     /// `~/.safe-rs`)
     pub home: Option<PathBuf>,
 }
@@ -241,7 +241,7 @@ impl CreateContext {
         self
     }
 
-    /// Looks for HD wallets and their state under `home`.
+    /// Looks for mnemonic wallets and their state under `home`.
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.home = Some(home);
         self
@@ -280,13 +280,13 @@ pub enum CreateOutcome {
         owners: Vec<Address>,
         threshold: u64,
         deployed: bool,
-        /// The HD wallet key that would own the Safe
+        /// The mnemonic wallet key that would own the Safe
         owner_key: Option<OwnerKey>,
         /// The account that would pay, with `--rotate`
         payer: Option<Address>,
     },
     /// A Safe with this setup already exists, so no deployment was sent. With
-    /// an HD wallet the Safe is still recorded in the wallet, and sweeps owed
+    /// a mnemonic wallet the Safe is still recorded in the wallet, and sweeps owed
     /// from earlier runs are sent.
     AlreadyDeployed {
         safe: Address,
@@ -308,7 +308,7 @@ pub enum CreateOutcome {
         threshold: u64,
         /// The account that sent and paid for the deployment
         payer: Address,
-        /// The HD wallet key that owns the Safe
+        /// The mnemonic wallet key that owns the Safe
         owner_key: Option<OwnerKey>,
         /// ETH moved from the funding key to the owner key
         sweep: Option<SweptEth>,
@@ -337,20 +337,20 @@ impl Report for CreateOutcome {
     }
 }
 
-/// What `safe create` prints for an outcome, as it always has: the HD
-/// document when an HD wallet key owns the Safe, else the plain one.
+/// What `safe create` prints for an outcome, as it always has: the
+/// rotating document when a mnemonic wallet key owns the Safe, else the plain one.
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Document {
     Plain(CreateOutput),
-    Hd(hd::HdCreateOutput),
+    Rotating(rotating::RotatingCreateOutput),
 }
 
 impl Report for Document {
     fn human(&self) -> String {
         match self {
             Self::Plain(doc) => doc.human(),
-            Self::Hd(doc) => doc.human(),
+            Self::Rotating(doc) => doc.human(),
         }
     }
 }
@@ -403,7 +403,7 @@ fn document(outcome: &CreateOutcome) -> Option<Document> {
             CreateOutcome::Aborted { .. } => return None,
         };
     Some(match (owner_key, payer) {
-        (Some(owner), Some(payer)) => Document::Hd(hd::HdCreateOutput {
+        (Some(owner), Some(payer)) => Document::Rotating(rotating::RotatingCreateOutput {
             safe_address: safe,
             tx_hash,
             owner,
@@ -442,8 +442,8 @@ async fn create_with(
     console: &Console,
 ) -> Result<CreateOutcome, CreateError> {
     opts.validate(ctx.signer.is_some())?;
-    if opts.uses_hd() {
-        return Box::pin(hd::create(ctx, opts, console)).await;
+    if opts.rotates() {
+        return Box::pin(rotating::create(ctx, opts, console)).await;
     }
     let signer = ctx.signer.ok_or(CreateError::NoSigner)?;
     let first = signer.address();
@@ -639,11 +639,11 @@ pub(crate) async fn run_with(
     // With --rotate, --mnemonic or --ledger names where the rotating owner
     // keys come from.
     if args.opts.rotate {
-        args.opts.hd = args.signer.take_rotation_keys()?;
+        args.opts.owner_keys = args.signer.take_rotation_keys()?;
     }
     // Checked before any key or password prompt.
     args.opts.validate(args.signer.is_set())?;
-    let signer = if args.opts.uses_hd() {
+    let signer = if args.opts.rotates() {
         None
     } else {
         Some(create_signer(&args.signer, console).await?)
@@ -793,7 +793,7 @@ mod tests {
         );
         assert!(document(&CreateOutcome::Aborted { safe }).is_none());
 
-        let hd = CreateOutcome::Deployed {
+        let rotating = CreateOutcome::Deployed {
             safe,
             tx_hash: B256::repeat_byte(7),
             owners: vec![owner],
@@ -806,8 +806,8 @@ mod tests {
             sweep: None,
             warnings: Vec::new(),
         };
-        let Some(doc @ Document::Hd(_)) = document(&hd) else {
-            panic!("an HD create prints the HD document");
+        let Some(doc @ Document::Rotating(_)) = document(&rotating) else {
+            panic!("a rotating create prints the rotating document");
         };
         let json = serde_json::to_value(&doc).unwrap();
         let mut keys: Vec<_> = json.as_object().unwrap().keys().collect();

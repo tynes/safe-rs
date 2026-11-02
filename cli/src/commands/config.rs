@@ -179,7 +179,7 @@ fn send_opts(args: ConfigArgs) -> SendOpts {
         multi_send_call_only: args.multi_send_call_only,
         no_confirm: args.no_confirm,
         rotate: false,
-        hd: crate::cli::HdArgs::default(),
+        owner_keys: crate::cli::OwnerKeysArgs::default(),
         sweep: crate::cli::SweepArgs::default(),
         gas_payer: args.gas_payer,
     }
