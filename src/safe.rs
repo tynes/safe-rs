@@ -40,6 +40,7 @@ pub const SAFE_SINGLETON_SLOT: U256 = U256::ZERO;
 /// `false` otherwise (including if the address has no code or no implementation slot).
 pub async fn is_safe<P: Provider<N>, N: Network>(provider: &P, address: Address) -> Result<bool> {
     let known = [
+        ChainAddresses::v1_5_0().safe_singleton,
         ChainAddresses::v1_4_1().safe_singleton,
         ChainAddresses::v1_3_0().safe_singleton,
     ];

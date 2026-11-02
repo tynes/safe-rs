@@ -999,6 +999,32 @@ async fn connect_batches_through_the_contracts_of_the_safe_version() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn is_safe_knows_the_canonical_v1_5_0_singleton() {
+    let h = LocalHarness::with_version("1.5.0").await;
+    let canonical = ChainAddresses::v1_5_0().safe_singleton;
+
+    // The harness deploys its singleton elsewhere; a Safe on it is unknown.
+    let off_canonical = h.deploy_safe(16).await;
+    assert!(!safe_rs::is_safe(&h.provider, off_canonical).await.unwrap());
+
+    // The same code at the canonical address, as on a chain with v1.5.0.
+    let code = h
+        .provider
+        .get_code_at(h.addresses.safe_singleton)
+        .await
+        .unwrap();
+    h.provider.anvil_set_code(canonical, code).await.unwrap();
+    let safe = h
+        .deploy_safe_on(canonical, &[h.owner.address()], 1, 16)
+        .await;
+    assert_eq!(
+        ISafe::new(safe, &h.provider).VERSION().call().await.unwrap(),
+        "1.5.0"
+    );
+    assert!(safe_rs::is_safe(&h.provider, safe).await.unwrap());
+}
+
 /// A nonce manager that counts the nonces it hands out.
 #[derive(Clone, Debug, Default)]
 struct CountingNonces(Arc<AtomicUsize>);
