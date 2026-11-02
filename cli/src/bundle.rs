@@ -21,7 +21,7 @@ pub struct BundleFile {
     /// Offchain owner signatures keyed by checksummed/hex Owner Address -> 65-byte 0x-hex signature
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub signatures: BTreeMap<Address, Bytes>,
-    /// Optional rotation swaps included in `tx.data`, keyed by old_owner -> BundleRotationSwap
+    /// Optional rotation swaps included in `tx.data`, at most one per `old_owner`
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rotations: Vec<BundleRotationSwap>,
 }
@@ -120,9 +120,9 @@ impl BundleFile {
         let _ = bundle.calls()?;
         if let Some(prepared) = bundle.prepared_tx()? {
             for (&owner, sig) in &bundle.signatures {
-                let recovered = recover_signer(prepared.safe_tx_hash, sig)
-                    .map_err(|e| eyre!("Invalid signature for {owner} in bundle: {e}"))?;
-                if recovered != owner {
+                if let Some(recovered) = wrong_signer(prepared.safe_tx_hash, owner, sig)
+                    .map_err(|e| eyre!("Invalid signature for {owner} in bundle: {e}"))?
+                {
                     bail!(
                         "Signature mismatch in bundle: key is {owner}, but signature recovered to {recovered}"
                     );
@@ -230,31 +230,40 @@ impl BundleFile {
         }
 
         // Validate existing signatures against prepared.safe_tx_hash
+        let hash = prepared.safe_tx_hash;
         for (&owner, sig) in &self.signatures {
-            let recovered = recover_signer(prepared.safe_tx_hash, sig)
-                .map_err(|e| eyre!("Invalid existing signature for {owner}: {e}"))?;
-            if recovered != owner {
+            if let Some(recovered) = wrong_signer(hash, owner, sig)
+                .map_err(|e| eyre!("Invalid existing signature for {owner}: {e}"))?
+            {
                 bail!(
-                    "Existing signature in bundle for {owner} recovered to {recovered} for hash {}",
-                    prepared.safe_tx_hash
+                    "Existing signature in bundle for {owner} recovered to {recovered} for hash {hash}"
                 );
             }
         }
 
         // Validate and insert new signatures
         for (&owner, sig) in new_sigs {
-            let recovered = recover_signer(prepared.safe_tx_hash, sig)
-                .map_err(|e| eyre!("Invalid signature for {owner}: {e}"))?;
-            if recovered != owner {
-                bail!(
-                    "Signature for {owner} recovered to {recovered} for hash {}",
-                    prepared.safe_tx_hash
-                );
+            if let Some(recovered) = wrong_signer(hash, owner, sig)
+                .map_err(|e| eyre!("Invalid signature for {owner}: {e}"))?
+            {
+                bail!("Signature for {owner} recovered to {recovered} for hash {hash}");
             }
             self.signatures.insert(owner, sig.clone());
         }
 
         Ok(())
+    }
+
+    /// [`merge`](Self::merge)s, then [`save`](Self::save)s the bundle to `path`.
+    pub fn merge_and_save(
+        &mut self,
+        path: &Path,
+        prepared: &PreparedSafeTx,
+        new_sigs: &BTreeMap<Address, Bytes>,
+        rotations: &[BundleRotationSwap],
+    ) -> Result<()> {
+        self.merge(prepared, new_sigs, rotations)?;
+        self.save(path)
     }
 
     /// Merges signatures (and rotation entries) from another `BundleFile` that shares the same `calls` and `tx`.
@@ -294,10 +303,15 @@ impl BundleFile {
     }
 }
 
-/// Parses bundle JSON content and returns its `Vec<Call>`
-#[cfg(test)]
-pub fn parse_bundle(content: &str) -> Result<Vec<Call>> {
-    BundleFile::parse(content)?.calls()
+/// Whether `sig` is a pre-validated signature (v = 1), which only counts with
+/// an on-chain `approveHash` by its owner.
+pub(crate) fn is_pre_validated(sig: &[u8]) -> bool {
+    sig.len() == 65 && sig[64] == 1
+}
+
+/// The address `sig` over `hash` recovers to, when it is not `owner`.
+fn wrong_signer(hash: B256, owner: Address, sig: &[u8]) -> safe_rs::Result<Option<Address>> {
+    recover_signer(hash, sig).map(|recovered| (recovered != owner).then_some(recovered))
 }
 
 #[cfg(test)]
@@ -308,6 +322,11 @@ mod tests {
     use safe_rs::SafeTxGasPolicy;
 
     const SAFE: Address = address!("0x1000000000000000000000000000000000000001");
+
+    /// Parses bundle JSON content and returns its `Vec<Call>`
+    fn parse_bundle(content: &str) -> Result<Vec<Call>> {
+        BundleFile::parse(content)?.calls()
+    }
 
     #[test]
     fn test_parse_bundle() {

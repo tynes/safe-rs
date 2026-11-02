@@ -12,9 +12,6 @@
 //! The CLI draws no conclusions of its own: what a policy allows is up to the
 //! host. Without a policy, none of this runs.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use alloy::primitives::{Address, U256};
 use safe_rs::{Call, ForkSession, ISafe, PreparedSafeTx, RotationPlan, SafeState};
 use url::Url;
@@ -22,7 +19,7 @@ use url::Url;
 use crate::cli::SendOpts;
 
 /// A boxed future, for [`SafePolicy::check_async`].
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub use crate::commands::create::BoxFuture;
 
 /// The Safe's owners, threshold and implementation, as a policy sees them
 /// after the transaction.
@@ -37,7 +34,8 @@ pub struct SafeSnapshot {
 }
 
 impl SafeSnapshot {
-    /// A snapshot, for testing a policy.
+    /// A snapshot of these parts, such as the owners a rotation must leave,
+    /// or one to test a policy with.
     pub fn new(safe: Address, owners: Vec<Address>, threshold: U256, singleton: Address) -> Self {
         Self {
             safe,

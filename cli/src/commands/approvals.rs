@@ -5,13 +5,12 @@ use safe_rs::{
     read_approved_owners, read_safe_state, recover_signer, ParentHeader, ReadSafeStateOptions,
 };
 
-use crate::bundle::BundleFile;
+use crate::bundle::{is_pre_validated, BundleFile};
 use crate::cli::ApprovalsArgs;
-use crate::commands::default_safe::safe_or_default;
+use crate::commands::default_safe::{optional_signer, safe_or_default};
 use crate::commands::http_provider;
 use crate::console::Console;
 use crate::output::SafeApprovalsOutput;
-use crate::signers::create_signer;
 
 pub async fn run(args: ApprovalsArgs, console: &Console) -> Result<()> {
     let bundle = args.bundle.as_deref().map(BundleFile::load).transpose()?;
@@ -38,11 +37,7 @@ pub async fn run(args: ApprovalsArgs, console: &Console) -> Result<()> {
     let explicit_safe = args.safe.safe.or(tx.as_ref().map(|tx| tx.safe));
     // The signer only picks the default Safe, so a keystore is not unlocked
     // when the Safe is already known.
-    let signer = if explicit_safe.is_none() && args.signer.is_set() {
-        Some(create_signer(&args.signer, console).await?)
-    } else {
-        None
-    };
+    let signer = optional_signer(&args.signer, explicit_safe.is_none(), console).await?;
 
     // Resolve the block to a hash first so every read sees the same state.
     let header = ParentHeader::fetch(&provider, args.block.unwrap_or(BlockId::latest())).await?;
@@ -74,7 +69,7 @@ pub async fn run(args: ApprovalsArgs, console: &Console) -> Result<()> {
         .filter(|(owner, sig)| {
             state.owners.contains(owner)
                 && !approved_onchain.contains(owner)
-                && sig.get(64) != Some(&1)
+                && !is_pre_validated(sig)
                 && recover_signer(safe_tx_hash, sig).is_ok_and(|signer| signer == **owner)
         })
         .map(|(&owner, _)| owner)
