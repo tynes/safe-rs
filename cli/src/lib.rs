@@ -94,7 +94,7 @@ use std::sync::Arc;
 use color_eyre::eyre::Result;
 
 pub use alloy::signers::local::PrivateKeySigner;
-pub use any_signer::AnySigner;
+pub use any_signer::{AnySigner, SignerKind};
 pub use cli::{Cli, Commands};
 pub use commands::info::{info, InfoError, SafeInfo};
 pub use commands::send::{send, EoaTx, SendContext, SendOutcome, Sender};
