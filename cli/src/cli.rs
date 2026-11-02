@@ -46,7 +46,8 @@ pub enum Commands {
     /// Deploy a new Safe deterministically (same address across chains)
     Create(Box<CreateArgs>),
 
-    /// Manage mnemonic wallets: the encrypted phrase that one-time owner keys come from
+    /// Manage wallets: the encrypted phrase or Ledger account that one-time
+    /// owner keys come from
     Wallet(WalletCliArgs),
 }
 
@@ -864,8 +865,9 @@ pub(crate) fn check_setup(owners: &[Address], threshold: u64) -> Result<(), Stri
 
 /// The key that signs: `cast`'s wallet options, one to one. The flags, short
 /// flags, aliases, value names, defaults and environment variables are those
-/// of `foundry_wallets::WalletOpts`, which `cast send` takes. The one addition
-/// is the `PRIVATE_KEY` environment variable on `--private-key`.
+/// of `foundry_wallets::WalletOpts`, which `cast send` takes. Two additions:
+/// the `PRIVATE_KEY` environment variable on `--private-key`, and `--wallet`,
+/// another name for `--mnemonic` that reads better for a Ledger wallet.
 ///
 /// Two flags read more than `cast` does: `--mnemonic` also opens a `safe`
 /// mnemonic wallet (a name under `~/.safe-rs/wallets` or the path of a mnemonic
@@ -896,9 +898,10 @@ pub struct SignerArgs {
     pub private_key: Option<String>,
 
     /// Use the mnemonic phrase or mnemonic file at the specified path. Also a
-    /// `safe` mnemonic wallet: a name under ~/.safe-rs/wallets, or the path of a
-    /// mnemonic keystore (unlocked with --password or --password-file)
-    #[arg(long, alias = "mnemonic-path")]
+    /// `safe` wallet: a name under ~/.safe-rs/wallets, or the path of its file.
+    /// A mnemonic keystore is unlocked with --password or --password-file; a
+    /// Ledger wallet (`safe wallet new --ledger`) signs on the device
+    #[arg(long, alias = "mnemonic-path", visible_alias = "wallet")]
     pub mnemonic: Option<String>,
 
     /// Use a BIP39 passphrase for the mnemonic
@@ -1040,8 +1043,12 @@ pub struct GasPayerArgs {
     )]
     pub gas_payer_private_key: Option<String>,
 
-    /// The gas payer's mnemonic phrase, mnemonic file or `safe` mnemonic wallet
-    #[arg(long, alias = "gas-payer-mnemonic-path")]
+    /// The gas payer's mnemonic phrase, mnemonic file or `safe` wallet
+    #[arg(
+        long,
+        alias = "gas-payer-mnemonic-path",
+        visible_alias = "gas-payer-wallet"
+    )]
     pub gas_payer_mnemonic: Option<String>,
 
     /// BIP39 passphrase for --gas-payer-mnemonic
@@ -1205,13 +1212,19 @@ pub struct PasswordArgs {
 /// [`take_rotation_keys`](SignerArgs::take_rotation_keys).
 #[derive(Args, Clone, Default)]
 pub struct OwnerKeysArgs {
-    /// The mnemonic wallet: a name under ~/.safe-rs/wallets, or the path of a
-    /// mnemonic keystore
-    #[arg(long, alias = "mnemonic-path", value_name = "NAME|PATH")]
+    /// The wallet: a name under ~/.safe-rs/wallets, or the path of its file (a
+    /// mnemonic keystore, or a Ledger wallet from `safe wallet new --ledger`)
+    #[arg(
+        long,
+        alias = "mnemonic-path",
+        visible_alias = "wallet",
+        value_name = "NAME|PATH"
+    )]
     pub mnemonic: Option<String>,
 
-    /// Take the owner keys from a connected Ledger (Ethereum app open)
-    /// instead of a mnemonic wallet file
+    /// Take the owner keys from a connected Ledger (Ethereum app open), at
+    /// the first Ledger Live account (m/44'/60'/0'/0/i), instead of a wallet
+    /// file
     #[arg(long, short)]
     pub ledger: bool,
 
@@ -1621,6 +1634,40 @@ mod tests {
 
         assert!(parse(&["wallet", "status", "--ledger"]).is_ok());
         assert!(parse(&["wallet", "status", "--mnemonic", "w"]).is_ok());
+    }
+
+    #[test]
+    fn ledger_wallets_are_made_with_a_path_and_named_with_wallet() {
+        let new = |extra: &[&str]| {
+            let mut args = vec!["wallet", "new", "cold"];
+            args.extend_from_slice(extra);
+            parse(&args)
+        };
+        let path = |cli: Cli| match cli.command {
+            Commands::Wallet(args) => match args.command {
+                WalletCommand::New(opts) => (opts.ledger, opts.path.map(|p| p.to_string())),
+                _ => panic!("expected wallet new"),
+            },
+            _ => panic!("expected wallet"),
+        };
+        assert_eq!(path(new(&["--ledger"]).unwrap()), (true, None));
+        assert_eq!(
+            path(new(&["--ledger", "--path", "m/44h/60h/1h/0/0"]).unwrap()),
+            (true, Some("m/44'/60'/1'/0/0".to_string()))
+        );
+        assert!(
+            new(&["--path", "m/44'/60'/1'/0/0"]).is_err(),
+            "a phrase wallet takes no path"
+        );
+        assert!(new(&["--ledger", "--path", "44'/60'"]).is_err());
+
+        let signer = |cli: Cli| match cli.command {
+            Commands::Send(args) => args.signer,
+            _ => panic!("expected send"),
+        };
+        let named = signer(send(&["--wallet", "cold"]).unwrap());
+        assert_eq!(named.mnemonic.as_deref(), Some("cold"));
+        assert!(parse(&["wallet", "status", "--wallet", "cold"]).is_ok());
     }
 
     /// The gas payer takes every wallet option, prefixed.

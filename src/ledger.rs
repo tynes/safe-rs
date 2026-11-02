@@ -1,9 +1,14 @@
 //! Owner keys on a Ledger device.
 //!
 //! [`LedgerKeys`] is a [`KeySource`] backed by the Ethereum app of a connected
-//! Ledger, at the same path every key source uses, `m/44'/60'/0'/0/i`. A
-//! Ledger seeded with a phrase therefore derives the same keys as that phrase
-//! in [`MnemonicWallet`](crate::MnemonicWallet), and shares its rotation state.
+//! Ledger. Its keys follow a [`KeyPath`]: key 0 is the path itself and key `i`
+//! adds `i` to its last component. The default, [`LedgerKeys::connect`], is the
+//! first Ledger Live account `m/44'/60'/0'/0/0`, whose keys `m/44'/60'/0'/0/i`
+//! are those of a phrase: a Ledger seeded with a phrase derives the same keys
+//! as that phrase in [`MnemonicWallet`](crate::MnemonicWallet), and shares its
+//! rotation state. [`LedgerKeys::connect_at`] starts elsewhere, such as another
+//! Ledger Live account (`m/44'/60'/1'/0/0`, keys `m/44'/60'/1'/0/i`), which is
+//! a separate wallet with its own state.
 //!
 //! The device is asked for each address once: the [`Keyring`] records them
 //! and looks ahead (see [`SETUP_LOOKAHEAD`] and [`SEND_LOOKAHEAD`]). Before a
@@ -31,7 +36,7 @@ use futures_util::lock::Mutex;
 
 use crate::envelope::{PreparedSafeTx, SignedSafeTx};
 use crate::error::{Error, Result};
-use crate::mnemonic::key_path;
+use crate::hd_path::KeyPath;
 use crate::outer::{sign_outer_tx, OuterTxParams, SignedOuterTx};
 use crate::rotation::{KeySource, REBUILD_MARGIN, SETUP_LOOKAHEAD};
 
@@ -48,23 +53,37 @@ fn device_error(e: impl std::fmt::Display) -> Error {
 #[derive(Debug, Clone)]
 pub struct LedgerKeys {
     transport: Arc<Mutex<Ledger>>,
+    path: KeyPath,
 }
 
 impl LedgerKeys {
-    /// Connects to the Ledger. It must be unlocked with the Ethereum app open,
+    /// Connects to the Ledger, with keys from the first Ledger Live account
+    /// (`m/44'/60'/0'/0/i`). It must be unlocked with the Ethereum app open,
     /// and not in use by another program.
     pub async fn connect() -> Result<Self> {
+        Self::connect_at(KeyPath::default()).await
+    }
+
+    /// Connects to the Ledger, with key 0 at `path` and key `i` at `path`
+    /// plus `i` in its last component.
+    pub async fn connect_at(path: KeyPath) -> Result<Self> {
         let transport = Ledger::init().await.map_err(device_error)?;
         Ok(Self {
             transport: Arc::new(Mutex::new(transport)),
+            path,
         })
+    }
+
+    /// The path of key 0.
+    pub fn path(&self) -> &KeyPath {
+        &self.path
     }
 
     /// The device's signer for key `index`. Creating it asks the device for
     /// the key's address, without a confirmation on the device.
     pub async fn signer(&self, index: u32) -> Result<LedgerSigner> {
         LedgerSigner::new_with_transport(
-            HDPath::Other(key_path(index)),
+            HDPath::Other(self.path.key(index)?),
             None,
             self.transport.clone(),
         )

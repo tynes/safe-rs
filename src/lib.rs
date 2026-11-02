@@ -78,6 +78,7 @@ pub mod envelope;
 pub mod eoa;
 pub mod error;
 pub mod exec;
+pub mod hd_path;
 pub mod inspect;
 #[cfg(feature = "simulation")]
 mod json;
@@ -124,6 +125,7 @@ pub use exec::{
     simulate_approve_hash, simulate_exec, simulate_exec_with_threshold, ExecSimulation,
 };
 pub use exec::{submit_and_wait, Submission};
+pub use hd_path::KeyPath;
 pub use inspect::{
     has_module_guard, is_safe_with, prev_in_list, read_approved_owners, read_safe_state,
     require_batch_target, ModuleList, ReadSafeStateOptions, SafeState,
