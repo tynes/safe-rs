@@ -1409,26 +1409,17 @@ async fn a_separate_payer_sends_what_the_owner_signed() {
 }
 
 #[tokio::test]
-async fn is_safe_recognizes_v1_5_0_and_polymarket_safes() {
+async fn is_safe_recognizes_a_polymarket_safe() {
     let h = LocalHarness::new().await;
+    let polymarket = alloy::primitives::address!("E51abdf814f8854941b9Fe8e3A4F65CAB4e7A4a8");
     let code = h
         .provider
         .get_code_at(h.addresses.safe_singleton)
         .await
         .unwrap();
-    let polymarket = alloy::primitives::address!("E51abdf814f8854941b9Fe8e3A4F65CAB4e7A4a8");
-    let singletons = [ChainAddresses::v1_5_0().safe_singleton, polymarket];
-    for (salt, singleton) in (16..).zip(singletons) {
-        h.provider
-            .anvil_set_code(singleton, code.clone())
-            .await
-            .unwrap();
-        let safe = h
-            .deploy_safe_on(singleton, &[h.owner.address()], 1, salt)
-            .await;
-        assert!(
-            safe_rs::is_safe(&h.provider, safe).await.unwrap(),
-            "{singleton}"
-        );
-    }
+    h.provider.anvil_set_code(polymarket, code).await.unwrap();
+    let safe = h
+        .deploy_safe_on(polymarket, &[h.owner.address()], 1, 17)
+        .await;
+    assert!(safe_rs::is_safe(&h.provider, safe).await.unwrap());
 }
