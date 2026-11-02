@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use alloy::eips::BlockId;
 use alloy::network::primitives::ReceiptResponse;
 use alloy::network::{AnyNetwork, Network, TransactionBuilder};
-use alloy::primitives::{Address, Bytes, TxHash, U256};
+use alloy::primitives::{address, Address, Bytes, TxHash, U256};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
@@ -26,8 +26,11 @@ use crate::types::{Call, CallBuilder, Operation};
 /// as the first declared variable in the proxy contract.
 pub const SAFE_SINGLETON_SLOT: U256 = U256::ZERO;
 
+/// The implementation contract of Polymarket's Safes on Polygon (`VERSION()` 1.3.0).
+const POLYMARKET_SAFE_SINGLETON: Address = address!("E51abdf814f8854941b9Fe8e3A4F65CAB4e7A4a8");
+
 /// Checks if an address is a Safe contract by reading the singleton storage slot
-/// and matching against known Safe singleton addresses.
+/// and matching against known Safe singleton addresses, including Polymarket's.
 ///
 /// Safe proxies store the implementation address at storage slot 0 (not ERC1967).
 ///
@@ -40,8 +43,10 @@ pub const SAFE_SINGLETON_SLOT: U256 = U256::ZERO;
 /// `false` otherwise (including if the address has no code or no implementation slot).
 pub async fn is_safe<P: Provider<N>, N: Network>(provider: &P, address: Address) -> Result<bool> {
     let known = [
+        ChainAddresses::v1_5_0().safe_singleton,
         ChainAddresses::v1_4_1().safe_singleton,
         ChainAddresses::v1_3_0().safe_singleton,
+        POLYMARKET_SAFE_SINGLETON,
     ];
     is_safe_with(provider, address, &known).await
 }
