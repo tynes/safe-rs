@@ -215,7 +215,8 @@ pub async fn run(mut args: SendArgs, console: &Console) -> eyre::Result<()> {
 /// transaction each, through the same path as [`SendContext::eoa`].
 async fn run_eoa(args: SendArgs, calls: Vec<Call>, console: &Console) -> eyre::Result<()> {
     // `--safe` and SAFE_ADDRESS look the same here; refuse both rather than
-    // send from the EOA when a Safe was asked for.
+    // send from the EOA when a Safe was asked for. A `safe` in config.toml
+    // is not a request: `ConfigFile::apply` drops it under --send-eoa.
     if args.safe.safe.is_some() {
         eyre::bail!(
             "--send-eoa sends from the signer's own account, not a Safe: remove --safe and \

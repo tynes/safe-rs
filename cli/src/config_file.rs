@@ -6,7 +6,7 @@
 //!
 //! ```toml
 //! rpc_url = "https://polygon.drpc.org"          # --rpc-url, ETH_RPC_URL
-//! safe = "0x…"                                  # --safe, SAFE_ADDRESS
+//! safe = "0x…"                                  # --safe, SAFE_ADDRESS (not --send-eoa)
 //! password_file = "/home/me/.safe-rs/password"  # --password-file, ETH_PASSWORD
 //! keystore = "/home/me/.foundry/keystores/me"   # --keystore, ETH_KEYSTORE
 //! account = "me"                                # --account, ETH_KEYSTORE_ACCOUNT
@@ -85,6 +85,9 @@ const SIGNER_FLAGS: [&str; 10] = [
     "gcp",
     "turnkey",
 ];
+
+/// The id of `--send-eoa`, which drops a configured Safe.
+const SEND_EOA: &str = "send_eoa";
 
 /// The wallet options that are switches, given when `true`.
 const SWITCHES: [&str; 6] = ["interactive", "ledger", "trezor", "aws", "gcp", "turnkey"];
@@ -206,14 +209,21 @@ fn apply_defaults(command: Command, defaults: &[(&'static str, String, bool)]) -
         }
         let value = value.clone();
         let is_signer = *is_signer;
+        let has = |flag: &str| command.get_arguments().any(|a| a.get_id() == flag);
         let others: Vec<&'static str> = SIGNER_FLAGS
             .iter()
             .copied()
             .filter(|flag| flag != id)
-            .filter(|flag| command.get_arguments().any(|a| a.get_id() == *flag))
+            .filter(|flag| has(flag))
             .collect();
+        // `--send-eoa` refuses a Safe, but only one the user gave: a
+        // configured Safe does not apply to it.
+        let skip_safe = *id == "safe" && has(SEND_EOA);
         command = command.mut_arg(*id, move |arg| {
             let arg = arg.required(false).default_value(value);
+            if skip_safe {
+                return arg.default_value_if(SEND_EOA, ArgPredicate::Equals("true".into()), None);
+            }
             if !is_signer {
                 return arg;
             }

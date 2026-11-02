@@ -82,6 +82,39 @@ fn the_configured_keystore_signs_unless_another_signer_is_given() {
 }
 
 #[test]
+fn send_eoa_ignores_the_configured_safe_but_refuses_a_given_one() {
+    const SAFE: &str = "0x2222222222222222222222222222222222222222";
+    const REFUSED: &str = "--send-eoa sends from the signer's own account";
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("safe = \"{SAFE}\"\n"),
+    )
+    .unwrap();
+
+    let configured = send_eoa(home.path(), &[], &["--private-key", KEY]);
+    assert!(!configured.status.success(), "the RPC is dead");
+    assert!(
+        !stderr(&configured).contains(REFUSED),
+        "the configured Safe should not apply to --send-eoa:\n{}",
+        stderr(&configured)
+    );
+
+    for (envs, args) in [
+        (&[("SAFE_ADDRESS", SAFE)][..], &["--private-key", KEY][..]),
+        (&[][..], &["--private-key", KEY, "--safe", SAFE][..]),
+    ] {
+        let given = send_eoa(home.path(), envs, args);
+        assert!(!given.status.success());
+        assert!(
+            stderr(&given).contains(REFUSED),
+            "{envs:?} {args:?} should be refused with --send-eoa:\n{}",
+            stderr(&given)
+        );
+    }
+}
+
+#[test]
 fn an_invalid_config_file_is_refused_by_name() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join("config.toml"), "rpc = 1\n").unwrap();
