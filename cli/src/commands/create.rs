@@ -30,7 +30,7 @@ use crate::cli::{FeeArgs, SafeSetupArgs};
 use crate::cli::{GasPayerArgs, RpcArgs, SignerArgs};
 use crate::cli::{HdArgs, SweepArgs};
 use crate::commands::{http_provider, outer_fees, with_gas_margin, RECEIPT_POLL_INTERVAL};
-use crate::console::{Console, Reports};
+use crate::console::Console;
 pub use crate::error::CreateError;
 use crate::error::{BroadcastError, OptionsError};
 use crate::log::{Logger, NoopLogger};
@@ -249,6 +249,13 @@ impl CreateContext {
 
     fn console(&self) -> Console {
         Console::new(self.logger.clone(), self.prompt.clone())
+    }
+
+    /// Logs to and asks what `console` does.
+    pub(crate) fn with_console(mut self, console: &Console) -> Self {
+        self.logger = console.logger().clone();
+        self.prompt = console.prompt().clone();
+        self
     }
 }
 
@@ -613,11 +620,13 @@ pub(crate) async fn submit(
 /// `safe create`: resolves the signer, calls [`create`], and prints the
 /// outcome as `safe` does (JSON with `config.json`).
 pub async fn run(args: CreateArgs, config: &RunConfig) -> color_eyre::Result<()> {
-    let reports = Arc::new(Reports::default());
-    let console = config.console().with_reports(reports.clone());
-    let result = run_with(args, &console, config.json).await;
-    reports.print(config.json);
-    result
+    let json = config.json;
+    config
+        .console()
+        .printing(json, |console| async move {
+            run_with(args, &console, json).await
+        })
+        .await
 }
 
 pub(crate) async fn run_with(
@@ -639,10 +648,11 @@ pub(crate) async fn run_with(
     } else {
         Some(create_signer(&args.signer, console).await?)
     };
-    let mut ctx = CreateContext::new(args.rpc.rpc_url);
-    ctx.signer = signer;
-    ctx.logger = console.logger().clone();
-    ctx.prompt = console.prompt().clone();
+    let ctx = CreateContext {
+        signer,
+        ..CreateContext::new(args.rpc.rpc_url)
+    }
+    .with_console(console);
     let outcome = create_with(ctx, args.opts, console).await?;
     if let Some(doc) = document(&outcome) {
         console.emit(&doc);

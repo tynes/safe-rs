@@ -2,6 +2,7 @@
 //! [`run`](crate::run) prints when it is done.
 
 use std::fmt::Display;
+use std::future::Future;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -57,6 +58,18 @@ impl Console {
     pub fn with_reports(mut self, reports: Arc<Reports>) -> Self {
         self.reports = Some(reports);
         self
+    }
+
+    /// Runs `command` with this console collecting its result documents,
+    /// then prints them (JSON with `json`), whether or not it failed.
+    pub async fn printing<T, F>(self, json: bool, command: impl FnOnce(Self) -> F) -> T
+    where
+        F: Future<Output = T>,
+    {
+        let reports = Arc::new(Reports::default());
+        let result = command(self.with_reports(reports.clone())).await;
+        reports.print(json);
+        result
     }
 
     pub fn logger(&self) -> &Arc<dyn Logger> {

@@ -28,7 +28,7 @@ use zeroize::Zeroizing;
 use crate::cli::{parse_ether_value, HdArgs, PasswordArgs, DEFAULT_TIMEOUT};
 use crate::commands::default_safe::recorded_safe;
 use crate::commands::{head_rotation_config, http_provider, HttpProvider};
-use crate::console::{Console, Reports};
+use crate::console::Console;
 pub use crate::error::WalletError;
 use crate::keys::CliKeys;
 use crate::log::{Logger, NoopLogger};
@@ -220,6 +220,13 @@ impl WalletContext {
 
     fn console(&self) -> Console {
         Console::new(self.logger.clone(), self.prompt.clone())
+    }
+
+    /// Logs to and asks what `console` does.
+    pub(crate) fn with_console(mut self, console: &Console) -> Self {
+        self.logger = console.logger().clone();
+        self.prompt = console.prompt().clone();
+        self
     }
 
     fn home(&self) -> Result<PathBuf> {
@@ -853,11 +860,11 @@ pub async fn run(
     ctx: &WalletContext,
     json: bool,
 ) -> color_eyre::Result<()> {
-    let reports = Arc::new(Reports::default());
-    let console = ctx.console().with_reports(reports.clone());
-    let result = run_in(command, ctx, &console).await;
-    reports.print(json);
-    result
+    ctx.console()
+        .printing(json, |console| async move {
+            run_in(command, ctx, &console).await
+        })
+        .await
 }
 
 pub(crate) async fn run_in(

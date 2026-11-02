@@ -105,7 +105,7 @@ pub use paths::{home, HOME_ENV};
 pub use safe_rs;
 pub use url::Url;
 
-use crate::console::{Console, Reports};
+use crate::console::Console;
 use crate::log::{ConsoleLogger, Level, Logger};
 use crate::prompt::{Prompt, TerminalPrompt};
 
@@ -192,26 +192,25 @@ impl RunConfig {
 /// Runs one `safe` command, then prints its result to stdout: JSON with
 /// `config.json`, else text (on stderr when stdout carries `--raw-out -`).
 pub async fn run(command: Commands, config: RunConfig) -> Result<()> {
-    let reports = Arc::new(Reports::default());
-    let console = config.console().with_reports(reports.clone());
     let json = config.json;
-    let result = match command {
-        Commands::Send(mut args) => {
-            args.opts.no_confirm |= json;
-            commands::send::run(*args, &console).await
+    let run = |console: Console| async move {
+        match command {
+            Commands::Send(mut args) => {
+                args.opts.no_confirm |= json;
+                commands::send::run(*args, &console).await
+            }
+            Commands::Call(args) => commands::call::run(args, &console).await,
+            Commands::Info(args) => commands::info::run(args, &console).await,
+            Commands::Approvals(args) => commands::approvals::run(args, &console).await,
+            Commands::Config(mut args) => {
+                args.no_confirm |= json;
+                commands::config::run(*args, &console).await
+            }
+            Commands::Create(args) => commands::create::run_with(*args, &console, json).await,
+            Commands::Wallet(args) => run_wallet(args, &console).await,
         }
-        Commands::Call(args) => commands::call::run(args, &console).await,
-        Commands::Info(args) => commands::info::run(args, &console).await,
-        Commands::Approvals(args) => commands::approvals::run(args, &console).await,
-        Commands::Config(mut args) => {
-            args.no_confirm |= json;
-            commands::config::run(*args, &console).await
-        }
-        Commands::Create(args) => commands::create::run_with(*args, &console, json).await,
-        Commands::Wallet(args) => run_wallet(args, &console).await,
     };
-    reports.print(json);
-    result
+    config.console().printing(json, run).await
 }
 
 /// `safe wallet`, with its `--rpc-url` and `--safe`. `SAFE_ADDRESS` picks the
@@ -233,10 +232,11 @@ async fn run_wallet(args: cli::WalletCliArgs, console: &Console) -> Result<()> {
             })?);
         }
     }
-    let mut ctx = wallet::WalletContext::new();
-    ctx.rpc_url = args.rpc_url;
-    ctx.safe = safe;
-    ctx.logger = console.logger().clone();
-    ctx.prompt = console.prompt().clone();
+    let ctx = wallet::WalletContext {
+        rpc_url: args.rpc_url,
+        safe,
+        ..wallet::WalletContext::new()
+    }
+    .with_console(console);
     wallet::run_in(args.command, &ctx, console).await
 }
