@@ -1029,24 +1029,24 @@ async fn run_rotating(
     let mut bundle_safe = None;
     let calls = if let Some(bundle_path) = &args.collect.bundle {
         if bundle_path.exists() {
-            let loaded = BundleFile::load(bundle_path)?;
+            let mut loaded = BundleFile::load(bundle_path)?;
             bundle_safe = loaded.tx.as_ref().map(|tx| tx.safe);
-            let loaded_calls = loaded.calls()?;
-            let cli_bundle_calls: Vec<BundleCall> =
-                cli_calls.iter().map(BundleCall::from).collect();
-            if !cli_calls.is_empty() && loaded.tx.is_some() && loaded.calls != cli_bundle_calls {
-                return Err(SendError::other(format!(
-                    "Bundle file {} already has a prepared Safe transaction whose calls differ from the CLI arguments",
-                    bundle_path.display()
-                )));
+            if !cli_calls.is_empty() {
+                let cli_bundle_calls: Vec<BundleCall> =
+                    cli_calls.iter().map(BundleCall::from).collect();
+                if loaded.tx.is_none() {
+                    // Saved before preparing, as `execute` does: `rotation::run`
+                    // reloads the bundle and saves its `tx` next to these calls.
+                    loaded.calls.extend(cli_bundle_calls);
+                    loaded.save(bundle_path)?;
+                } else if loaded.calls != cli_bundle_calls {
+                    return Err(SendError::other(format!(
+                        "Bundle file {} already has a prepared Safe transaction whose calls differ from the CLI arguments",
+                        bundle_path.display()
+                    )));
+                }
             }
-            if loaded.tx.is_none() && !cli_calls.is_empty() {
-                let mut combined = loaded_calls;
-                combined.extend(cli_calls);
-                combined
-            } else {
-                loaded_calls
-            }
+            loaded.calls()?
         } else {
             cli_calls
         }
