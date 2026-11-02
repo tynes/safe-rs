@@ -18,6 +18,8 @@ use crate::account::{Account, AccountSigner};
 use crate::chain::ChainConfig;
 use crate::error::{Error, Result};
 #[cfg(feature = "simulation")]
+use crate::exec::measure_gas_limit;
+#[cfg(feature = "simulation")]
 use crate::outer::OuterTxParams;
 use crate::safe::ExecutionResult;
 #[cfg(feature = "simulation")]
@@ -595,17 +597,17 @@ pub fn simulate_eoa_calls(
             gas
         } else {
             let max = session.max_tx_gas();
-            let mut scratch = state.checkpoint();
-            let measured = scratch.transact(SimTx::from_outer(&outer(max), TxChecks::MEASURE))?;
-            if !measured.success {
-                simulated.push(EoaTxSimulation {
-                    result: measured,
-                    nonce,
-                    gas_limit: max,
-                });
-                return Ok(simulated);
+            match measure_gas_limit(&mut state.checkpoint(), max, outer)? {
+                Ok(gas) => gas,
+                Err(result) => {
+                    simulated.push(EoaTxSimulation {
+                        result,
+                        nonce,
+                        gas_limit: max,
+                    });
+                    return Ok(simulated);
+                }
             }
-            (measured.gas_spent + measured.gas_spent / 5).min(max)
         };
         let result =
             state.transact_commit(SimTx::from_outer(&outer(gas_limit), TxChecks::STRICT))?;

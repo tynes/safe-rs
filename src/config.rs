@@ -22,13 +22,15 @@ use crate::contracts::ISafe;
 #[cfg(feature = "simulation")]
 use crate::envelope::{PreparedSafeTx, SafeTxGasPolicy, SignedSafeTx};
 use crate::error::{Error, Result};
+#[cfg(feature = "simulation")]
+use crate::exec::commit_approve_hash;
 use crate::inspect::{has_module_guard, prev_in_list, SafeState, SENTINEL};
 #[cfg(feature = "simulation")]
 use crate::inspect::{
     FALLBACK_HANDLER_STORAGE_SLOT, GUARD_STORAGE_SLOT, MODULE_GUARD_STORAGE_SLOT,
 };
 #[cfg(feature = "simulation")]
-use crate::simulation::{ForkSession, SimTx, SimulationResult, READ_CALL_GAS};
+use crate::simulation::{ForkSession, SimTx, SimulationResult};
 use crate::types::Call;
 
 /// The configuration changes requested in one Safe transaction.
@@ -662,16 +664,8 @@ fn followup_exec(session: &mut ForkSession, plan: &ConfigPlan) -> Result<Option<
         return Err(config_err("the planned Safe has no owners"));
     };
 
-    let gas = session.max_tx_gas();
-    let approve = SignedSafeTx::approve_hash_calldata(prepared.safe_tx_hash);
     for &owner in owners.iter().take(threshold) {
-        let approved = session.transact_commit(SimTx::relaxed(
-            owner,
-            safe,
-            U256::ZERO,
-            approve.clone(),
-            gas.min(READ_CALL_GAS),
-        ))?;
+        let approved = commit_approve_hash(session, safe, prepared.safe_tx_hash, owner)?;
         if let Some(reason) = failure_reason(approved) {
             return Ok(Some(format!(
                 "approveHash by owner {owner} failed: {reason}"
@@ -679,6 +673,7 @@ fn followup_exec(session: &mut ForkSession, plan: &ConfigPlan) -> Result<Option<
         }
     }
     let signed = SignedSafeTx::empty(prepared.clone()).with_simulated_co_owners(owners, threshold);
+    let gas = session.max_tx_gas();
     let mut result = session.transact(SimTx::relaxed(
         sender,
         safe,
