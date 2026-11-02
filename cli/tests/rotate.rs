@@ -95,14 +95,6 @@ impl Cli<'_> {
         if all.first() == Some(&"create") {
             all.push("--rotate");
         }
-        // A rotation alone is `send --rotate` with no calls, and its Safe is
-        // `--safe`.
-        if all.first() == Some(&"rotate") {
-            all.splice(0..1, ["send", "--rotate"]);
-            if all.get(2).is_some_and(|arg| arg.parse::<Address>().is_ok()) {
-                all.insert(2, "--safe");
-            }
-        }
         all.extend([
             "--mnemonic",
             "demo",
@@ -195,7 +187,7 @@ async fn rotate_discovers_only_an_unambiguous_recorded_safe() {
     store.save().unwrap();
     drop(store);
     let before = std::fs::read(&path).unwrap();
-    let missing = cli.wallet_command(&["rotate"]);
+    let missing = cli.wallet_command(&["send", "--rotate"]);
     assert!(!missing.ok);
     assert!(
         missing.stderr.contains("No Safe recorded"),
@@ -216,7 +208,7 @@ async fn rotate_discovers_only_an_unambiguous_recorded_safe() {
     store.save().unwrap();
     drop(store);
     let before = std::fs::read(&path).unwrap();
-    let ambiguous = cli.wallet_command(&["rotate"]);
+    let ambiguous = cli.wallet_command(&["send", "--rotate"]);
     assert!(!ambiguous.ok);
     assert!(
         ambiguous.stderr.contains("Multiple Safes"),
@@ -262,7 +254,7 @@ async fn rotate_discovers_only_an_unambiguous_recorded_safe() {
     store.save().unwrap();
     drop(store);
     let rotated = cli
-        .wallet_command(&["rotate", "--multi-send-call-only", &msco])
+        .wallet_command(&["send", "--rotate", "--multi-send-call-only", &msco])
         .json();
     assert_eq!(rotated["status"], "rotated");
     assert_eq!(
@@ -518,7 +510,14 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
 
     // --- A rotation with no other calls. ---
     let rotated = cli
-        .wallet_command(&["rotate", &safe_arg, "--multi-send-call-only", &msco])
+        .wallet_command(&[
+            "send",
+            "--rotate",
+            "--safe",
+            &safe_arg,
+            "--multi-send-call-only",
+            &msco,
+        ])
         .json();
     assert_eq!(rotated["status"], "rotated");
     assert_eq!(rotated["owner"]["index"], 4);
@@ -712,7 +711,14 @@ async fn an_existing_safe_moves_onto_the_wallet() {
     .json();
     h.fund(key(7), eth(1)).await;
     let rotated = cli
-        .wallet_command(&["rotate", &safe_arg, "--multi-send-call-only", &msco])
+        .wallet_command(&[
+            "send",
+            "--rotate",
+            "--safe",
+            &safe_arg,
+            "--multi-send-call-only",
+            &msco,
+        ])
         .json();
     assert_eq!(rotated["status"], "rotated");
     assert_eq!(rotated["old_owner"]["index"], 7);
@@ -988,7 +994,9 @@ async fn a_rotating_send_names_a_multisend_that_has_no_code() {
 
     // A rotation with no other calls is a direct self-call and needs no batch
     // contract.
-    let rotated = cli.wallet_command(&["rotate", &safe_arg]).json();
+    let rotated = cli
+        .wallet_command(&["send", "--rotate", "--safe", &safe_arg])
+        .json();
     assert_eq!(rotated["status"], "rotated");
     assert_eq!(rotated["old_owner"]["index"], 1);
     let owner = address(&rotated["owner"]["address"]);
@@ -1106,13 +1114,16 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     assert_eq!(balance(&h, key(1)).await, U256::ZERO);
     assert!(balance(&h, key(2)).await > U256::ZERO);
 
-    // 3. On-chain --approve-hash rotation via `safe rotate`:
-    //    Step A: HD wallet runs `safe rotate <SAFE> --approve-hash --bundle rot2.json`
+    // 3. On-chain --approve-hash rotation via `safe send --rotate`:
+    //    Step A: HD wallet runs
+    //    `safe send --rotate --safe <SAFE> --approve-hash --bundle rot2.json`
     let bundle2_path = dir.path().join("rot2.json");
     let bundle2_arg = bundle2_path.to_str().unwrap();
     let approved = cli
         .wallet_command(&[
-            "rotate",
+            "send",
+            "--rotate",
+            "--safe",
             &safe_arg,
             "--approve-hash",
             "--bundle",
@@ -1123,7 +1134,8 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     assert_eq!(address(&approved["approver"]), key(2));
     assert_eq!(h.owners(safe).await, vec![key(2), co_owner.address()]);
 
-    //    Step B: Co-owner signs the bundle `--sign-only`, then HD wallet executes `safe rotate`
+    //    Step B: Co-owner signs the bundle `--sign-only`, then HD wallet executes
+    //    `safe send --rotate`
     cli.run(&[
         "send",
         "--bundle",
@@ -1140,7 +1152,14 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     .json();
 
     let rotated = cli
-        .wallet_command(&["rotate", &safe_arg, "--bundle", bundle2_arg])
+        .wallet_command(&[
+            "send",
+            "--rotate",
+            "--safe",
+            &safe_arg,
+            "--bundle",
+            bundle2_arg,
+        ])
         .json();
     assert_eq!(rotated["status"], "rotated");
     assert_eq!(rotated["old_owner"]["index"], 2);

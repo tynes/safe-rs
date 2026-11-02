@@ -46,6 +46,7 @@ cargo install safe-rs-cli --locked --no-default-features
 | `aws-kms` | yes | `--aws`: a key in AWS KMS |
 | `gcp-kms` | yes | `--gcp`: a key in Google Cloud KMS |
 | `turnkey` | yes | `--turnkey`: a Turnkey key |
+| `tracing` | no | `log::TracingLogger`, for a host that already has a `tracing` subscriber |
 
 Or from a local clone:
 
@@ -112,7 +113,7 @@ safe send 0xRecipient --value 1000000000000000000 \
 ### Library
 
 ```rust
-use safe_rs::{Safe, contracts::IERC20};
+use safe_rs::{Account, CallBuilder, Safe, contracts::IERC20};
 use alloy::primitives::{address, U256};
 
 let safe = Safe::connect(provider, signer, safe_address).await?;
@@ -127,7 +128,7 @@ let result = safe
     .simulate().await?
     .execute().await?;
 
-println!("Transaction: {:?}", result.transaction_hash);
+println!("Transaction: {:?}", result.tx_hash);
 ```
 
 ## CLI Reference
@@ -181,19 +182,22 @@ safe send --bundle transactions.json --call-only --raw-out tx.json --safe 0xYour
 **Options:**
 | Flag | Description |
 |------|-------------|
+| `--value <amount>` | ETH to send with a single call (default 0; units accepted, such as `0.5ether`) |
+| `--call <to:sig:args>` | One call of a batch, as `0xAddr:sig(types):arg1,arg2` (repeatable) |
 | `--send-eoa` | Send each call from the signer's own account instead of a Safe (see above) |
 | `--simulate-only` | Simulate without signing or broadcasting |
 | `--skip-simulation` | Skip simulation (outer gas from `eth_estimateGas`) |
 | `--call-only` | Use MultiSendCallOnly (no delegatecall) |
 | `--nonce <n>` | Safe nonce to sign for; fails if the on-chain nonce differs |
 | `--safe-tx-gas <n>` | Explicit `safeTxGas` (default 0; non-zero lets a failed inner call consume the nonce) |
-| `--gas-limit <n>` | Outer gas limit (default: simulated gas + 20%) |
+| `--gas-limit <n>` | Outer gas limit (default: simulated or estimated gas + 20%) |
 | `--max-fee-per-gas <wei>` / `--max-priority-fee-per-gas <wei>` | Override the node's fee estimate (units accepted, such as `30gwei`) |
 | `--raw-out <path\|->` | Write the signed transaction as JSON before broadcasting (`-` = stdout; progress then goes to stderr) |
 | `--no-submit` | Sign but don't broadcast (implies `--raw-out -` unless set) |
 | `--timeout <secs>` | How long to wait for the receipt (default 120) |
 | `--trace` | Print call traces of the simulation |
 | `--block <n\|hash\|tag>` | Simulate on top of this block (default: latest) |
+| `--block-time <secs>` | Seconds between blocks, for the simulated block's timestamp (default 12) |
 | `--spec <cancun\|prague\|osaka\|amsterdam>` | EVM spec for simulation (default: the fork active at the simulated block on mainnet, Sepolia, Holesky and Hoodi; osaka elsewhere) |
 | `--multi-send <addr>` / `--multi-send-call-only <addr>` | MultiSend contracts to batch through (default: the canonical ones for the Safe's version) |
 | `--no-confirm` | Skip confirmation prompt |
@@ -395,13 +399,19 @@ safe create \
 |------|-------------|
 | `--owner <address>` | Additional owner (repeatable) |
 | `--threshold <n>` | Required signatures (default: 1) |
-| `--salt-nonce <n>` | Salt for deterministic address |
+| `--salt-nonce <n>` | Salt for deterministic address (default: 0) |
 | `--safe-version <version>` | Safe version: `1.5.0` (default) or `1.4.1` |
 | `--compute-only` | Show address without deploying |
 | `--fallback-handler <address>` | Custom fallback handler |
 | `--singleton <address>` / `--factory <address>` | Non-canonical Safe deployment |
+| `--gas-limit`, `--max-fee-per-gas`, `--max-priority-fee-per-gas`, `--timeout` | As for `send` |
+| `--no-confirm` / `--json` | Skip the confirmation prompt / output as JSON |
+| `--rotate` | The first owner is a key of the HD wallet `--mnemonic` or `--ledger` names (below) |
+| `--same-as <chain_id>:<safe>` | With `--rotate`: deploy the same Safe on another chain |
+| `--no-sweep` / `--sweep-reserve <wei>` | With `--rotate`: keep, or leave some of, the funding key's ETH |
+| Wallet options, `--gas-payer-*` | The deployer key, and an optional separate key that pays for gas (see [Wallet options](#wallet-options)) |
 
-With `--rotate --mnemonic <name>` (or `--rotate --ledger`) the Safe's first owner is a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--owner` and `--threshold` add co-owners, and `--safe-version` applies as usual. `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version, contracts, owners and threshold it was first created with.
+With `--rotate --mnemonic <name>` (or `--rotate --ledger`) the Safe's first owner is a wallet key that has never signed anything: the wallet's funding key sends the deployment, then its remaining ETH moves to the owner (`--no-sweep` to skip). `--owner` and `--threshold` add co-owners, and `--safe-version` applies as usual. With `--rotate`, `--same-as <chain_id>:<safe>` deploys the same Safe on another chain, with the version, contracts, owners and threshold it was first created with. It reuses the Safe's first owner key and salt, so rotate that key right away; the setup flags (`--owner`, `--threshold` and so on) are refused with it.
 
 ### `safe wallet`
 
@@ -413,8 +423,8 @@ safe wallet import <name> [--phrase-file F] [--start-index N]
 safe wallet list
 safe wallet address --mnemonic <name> [--index N]
 safe wallet status  --mnemonic <name> [--safe 0xYourSafe]
-safe wallet sync    --mnemonic <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL [--from-block N]
-safe wallet sweep   --mnemonic <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL
+safe wallet sync    --mnemonic <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL [--from-block N [--chunk N]] [--scan-limit N]
+safe wallet sweep   --mnemonic <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL [--sweep-reserve WEI] [--timeout SECS]
 ```
 
 `address`, `status`, `sync` and `sweep` take `--ledger` in place of `--mnemonic <name>`; `new` and `import` are for phrases only.
@@ -499,7 +509,7 @@ safe wallet status --mnemonic treasury
 To move an existing Safe onto a wallet, hand it to the wallet's next key with its current key, record it, and move the gas money there:
 
 ```bash
-safe wallet status --mnemonic treasury        # "next_index": the next unused key, say 1
+safe wallet status --mnemonic treasury        # "Next unused key": say 1
 NEXT=$(safe wallet address --mnemonic treasury --index 1)
 safe config --swap-owner 0xOldOwner:$NEXT --safe 0xYourSafe --rpc-url $ETH_RPC_URL --interactive
 safe wallet sync --mnemonic treasury --safe 0xYourSafe --rpc-url $ETH_RPC_URL
@@ -568,7 +578,9 @@ account = "me"                         # --account, ETH_KEYSTORE_ACCOUNT
 mnemonic = "treasury"                  # --mnemonic (an HD wallet name)
 ```
 
-A CLI that embeds the commands applies it to its own command tree before parsing: `ConfigFile::load()?.apply(command)`.
+`safe` in `config.toml` fills `--safe` for `send`, `call`, `approvals` and `config`; `wallet sync` and `wallet sweep` read `SAFE_ADDRESS` but not the config file.
+
+A CLI that embeds the commands applies it to its own command tree before parsing: `ConfigFile::load()?.apply(command)`. A host whose signer flags are global, outside the subcommand, settles them with `config_file::settle_signer`.
 
 The keystore is Web3 Secret Storage v3, the format geth and Foundry use, with the `x-ethers` field ethers.js defines for a phrase. Foundry and geth open it as an ordinary keystore for the funding key (`cast wallet address --keystore ~/.safe-rs/wallets/<name>.json`); ethers.js and safe-rs also recover the phrase.
 
@@ -579,7 +591,7 @@ It is password → scrypt (N = 2^18) → AES-128-CTR for the funding key and AES
 ### Connecting to a Safe
 
 ```rust
-use safe_rs::Safe;
+use safe_rs::{Account, Safe};
 
 // Auto-detect chain configuration
 let safe = Safe::connect(provider, signer, safe_address).await?;
@@ -594,17 +606,12 @@ safe.verify_single_owner().await?;
 
 ### Building Transactions
 
-The `MulticallBuilder` provides a fluent API for constructing transactions:
+The `SafeBuilder` that `batch()` returns provides a fluent API for constructing transactions (`batch()` comes from the `Account` trait, `add` and `add_typed` from `CallBuilder`):
 
 ```rust
 // Raw call
 let builder = safe.batch()
-    .add(Call {
-        to: address,
-        value: U256::ZERO,
-        data: calldata.into(),
-        operation: Operation::Call,
-    });
+    .add(Call::new(address, U256::ZERO, calldata));
 
 // Typed call (recommended)
 let builder = safe.batch()
@@ -697,14 +704,10 @@ let params = OuterTxParams::exec_transaction(&signed, payer.address(), eoa_nonce
 
 ### Simulation-Only Mode
 
-For read-only operations or testing, you don't need to be an owner:
+`simulate()` broadcasts nothing, so it can check a transaction without executing it. It runs the real `execTransaction` on a fork, signed by the client's key, so that key must be one of the Safe's owners (with a threshold above 1, the other owners' approvals are filled in on the fork). A simulation that reverts still returns `Ok`: check `success`.
 
 ```rust
-use alloy::signers::local::PrivateKeySigner;
-
-// Use any signer for simulation
-let dummy = PrivateKeySigner::random();
-let safe = Safe::new(provider, dummy, safe_address, config);
+use safe_rs::{Account, CallBuilder};
 
 let builder = safe.batch()
     .add_typed(token, call)
@@ -712,7 +715,11 @@ let builder = safe.batch()
 
 // Inspect results without executing
 if let Some(result) = builder.simulation_result() {
-    println!("Would use {} gas", result.gas_used);
+    if result.success {
+        println!("Would use {} gas", result.gas_used);
+    } else {
+        println!("Would revert: {:?}", result.revert_reason);
+    }
 }
 ```
 
@@ -761,6 +768,8 @@ Without the feature, `safe_rs::rotation` still has the parts that need no key ma
 ### Querying Safe State
 
 ```rust
+use safe_rs::Account;
+
 let nonce = safe.nonce().await?;
 let threshold = safe.threshold().await?;
 let owners = safe.owners().await?;
@@ -771,9 +780,9 @@ let owners = safe.owners().await?;
 The `Eoa` client provides the same builder API as Safe multicall, but executes each call as a separate transaction. This is useful when you don't have a Safe but want the same batching workflow:
 
 ```rust
-use safe_rs::Eoa;
+use safe_rs::{Account, CallBuilder, Eoa};
 
-let eoa = Eoa::connect(provider, signer).await?;
+let eoa = Eoa::connect(provider, signer, rpc_url).await?;
 
 let result = eoa.batch()
     .add_typed(token, IERC20::transferCall { to: alice, amount: U256::from(100) })
@@ -917,10 +926,10 @@ Everything else, such as a bundle file that does not parse, is `Other`. The enum
 
 **Other notes:**
 - Use `safe_rs_cli::safe_rs` to build the calls, and `safe_rs_cli::Url` for the context. They come from the same versions the CLI uses.
-- The signer is an `AnySigner`: any key `cast` can sign with. `SignerArgs::resolve(prompt)` turns the wallet options into one, and `with_signer` also takes a `PrivateKeySigner`. A Ledger or Trezor signs Safe transactions (EIP-712 typed data) and transactions, but not a bare hash: `AnySigner::can_sign_hash()` says whether it can.
+- The signer is an `AnySigner`: any key `cast` can sign with. `SignerArgs::resolve(prompt).await` turns the wallet options into one (and `GasPayerArgs::resolve` the `--gas-payer-*` options), and `with_signer` also takes a `PrivateKeySigner`. A Ledger or Trezor signs Safe transactions (EIP-712 typed data) and transactions, but not a bare hash: `AnySigner::can_sign_hash()` says whether it can.
 - Always name the Safe for a Safe send. Without `--safe`, `safe send` falls back to the signer's default Safe, which is wrong for a Safe from another factory, so `SendContext` requires one.
 - With `--rotate`, the owner key comes from `--mnemonic` or `--ledger`, so the context carries no signer.
-- The `safe` CLI's own `--rpc-url`, `--safe` and signer flags are in `safe_rs_cli::args` as `RpcArgs`, `SafeArgs` and `SignerArgs` (`WalletArgs` is a deprecated alias), for a CLI that wants those too. `safe_rs_cli::Commands` with `safe_rs_cli::run(command, RunConfig::terminal(json))` embeds the whole `safe` command tree as a subcommand; `RunConfig` picks its logger and prompt.
+- The `safe` CLI's own `--rpc-url`, `--safe` and signer flags are in `safe_rs_cli::args` as `RpcArgs`, `SafeArgs` and `SignerArgs` (`WalletArgs` is a deprecated alias), for a CLI that wants those too. `args::EoaArgs` is the `--send-eoa` flag group. `safe_rs_cli::info` reads what `safe info` shows, as a `SafeInfo`. `safe_rs_cli::Commands` with `safe_rs_cli::run(command, RunConfig::terminal(json))` embeds the whole `safe` command tree as a subcommand; `RunConfig` picks its logger and prompt.
 - `SendOpts` takes these flag names, so your command can't define them too:
   - `--bundle`, `--merge-bundle`, `--approve-hash`, `--sign-only`, `--call-only`
   - `--simulate-only`, `--skip-simulation`, `--trace`, `--block`, `--spec`, `--block-time`
@@ -932,22 +941,23 @@ Everything else, such as a bundle file that does not parse, is `Other`. The enum
 - `SignerArgs` takes `cast`'s wallet options (see [Wallet options](#wallet-options)). With `--rotate`, the `safe` commands move `--mnemonic` or `--ledger` and the password into `SendOpts::hd` / `CreateOpts::hd` as the source of the rotating keys (`SignerArgs::take_rotation_keys`); set `hd` yourself when you build the options in code.
 - To catch a flag-name clash, parse a sample command line in a test. `Command::debug_assert()` alone misses a clash between a global flag and one of these, and clap panics at parse time instead.
 
-**Checking Safe transactions with a host policy.** A host sets a `policy::SafePolicy` with `SendContext::with_policy` or `RunConfig::with_policy`. Before a Safe transaction leaves the machine, whether by broadcast, `--approve-hash`, a bundle, `--sign-only` or `--no-submit`, the CLI calls the policy's `check` and then its `check_async`. `--simulate-only` runs them too. If either returns `false`, the CLI stops with `SendError::PolicyRefused`. Both checks default to `true`, so implement only the ones you need.
+**Checking Safe transactions with a host policy.** A host sets a `policy::SafePolicy` with `SendContext::with_policy` or `RunConfig::with_policy`. Before a Safe transaction leaves the machine, whether by broadcast, `--approve-hash`, a bundle, `--sign-only` or `--no-submit`, the CLI calls the policy's `check` and then its `check_async`. `--simulate-only` runs them too. If either returns `false`, the CLI stops with `SendError::PolicyRefused`, naming the policy by its `name()`. `name` is the one method to implement; both checks default to `true`, so implement only the ones you need.
 
 Each check gets a `policy::SafeTxCheck` with everything that was planned:
+- `rpc_url` and `chain_id`: the chain the transaction is for
 - `plan`: `Plan::Send(&SendOpts)` for `send` and `safe config`, or `Plan::Rotation(&RotationPlan)` for `send --rotate`
 - `calls`: the calls asked for
 - `prepared`: the Safe transaction
 - `before`: the Safe's `SafeState`
 - `after`: its owners, threshold and implementation after the simulated transaction, or the owners a rotation must leave. This is `None` with `--skip-simulation`.
 
-The CLI decides nothing itself, and without a policy none of this runs.
+The CLI decides nothing itself, and without a policy none of this runs. `policy::SafeSnapshot::new` builds an `after` for testing a policy.
 
 ## Reusing `safe create` and `safe wallet` in your own CLI
 
 The same pattern covers deploying Safes and managing HD wallets:
 
-- `safe_rs_cli::create::CreateOpts` holds the `safe create` flags without `--rpc-url` or the signer: the setup (`SafeSetupArgs`: `--owner`, `--threshold`, `--salt-nonce`, `--safe-version`, `--singleton`, `--factory`, `--fallback-handler`), `--compute-only`, `--no-confirm`, the fee flags, `--rotate`, `--same-as`, the sweep flags and the `--gas-payer-*` options (`hd.mnemonic` or `hd.ledger` names where the rotating keys come from). Build a `CreateContext::new(rpc_url).with_signer(key)` (no signer with `--rotate`) and call `create::create(ctx, opts)`. It returns a `CreateOutcome` (`Computed`, `AlreadyDeployed`, `Deployed` or `Aborted`, each with the Safe's address) or a `CreateError`. `CreateError::may_be_pending()` is true when the deployment may still be mined, and `CreateError::safe()` gives the address it was deploying to.
+- `safe_rs_cli::create::CreateOpts` holds the `safe create` flags without `--rpc-url` or the signer: the setup (`SafeSetupArgs`: `--owner`, `--threshold`, `--salt-nonce`, `--safe-version`, `--singleton`, `--factory`, `--fallback-handler`), `--compute-only`, `--no-confirm`, the fee flags, `--rotate`, `--same-as`, the sweep flags and the `--gas-payer-*` options (`hd.mnemonic` or `hd.ledger` names where the rotating keys come from). Build a `CreateContext::new(rpc_url).with_signer(key)` (no signer with `--rotate`; `with_home` for another data directory) and call `create::create(ctx, opts)`. A host whose Safes come from its own factory sets `CreateOpts::with_implementation` with a `create::SafeImplementation` (not with `--rotate`). It returns a `CreateOutcome` (`Computed`, `AlreadyDeployed`, `Deployed` or `Aborted`, each with the Safe's address) or a `CreateError`. `CreateError::may_be_pending()` is true when the deployment may still be mined, and `CreateError::safe()` gives the address it was deploying to.
 - `safe_rs_cli::wallet` has `WalletCommand`, the `safe wallet` subcommands, to mount with `#[command(subcommand)]`, and one function per subcommand: `new_wallet`, `import_wallet`, `list_wallets`, `wallet_address`, `wallet_status`, `sync_wallet` and `sweep_wallet`. Each takes a `WalletContext` (`with_rpc_url`, `with_safe`, `with_home`, logger and prompt) and returns a typed outcome or a `WalletError`, such as `NotFound`, `WrongPassword`, `Locked`, or `Sweep` with what was moved and what is still owed. `wallet::run` runs a parsed `WalletCommand` and prints like `safe wallet`.
 
 Neither defines `--rpc-url`, `--private-key` or `--safe`, so your CLI's own global flags for those keep working. `cli/tests/embed_create.rs` is a host shaped this way.
@@ -1033,11 +1043,11 @@ All chains use the same contract addresses (deployed via CREATE2). A Safe's batc
 | Variable | Description |
 |----------|-------------|
 | `ETH_RPC_URL` | RPC endpoint URL |
-| `SAFE_ADDRESS` | Safe address for `send`, `call`, `wallet sync` and `wallet sweep` (default: the signer's default Safe) |
+| `SAFE_ADDRESS` | Safe address for `send`, `call`, `approvals`, `config`, `wallet sync` and `wallet sweep` (default: the signer's default Safe) |
 | `PRIVATE_KEY` | Signer private key (also picks the default Safe when no Safe is given) |
 | `ETH_KEYSTORE`, `ETH_KEYSTORE_ACCOUNT`, `ETH_PASSWORD`, `ETH_FROM` | `--keystore`, `--account`, `--password-file` and `--from`, as in `cast` |
 | `GAS_PAYER_PRIVATE_KEY`, `GAS_PAYER_ETH_KEYSTORE`, `GAS_PAYER_ETH_KEYSTORE_ACCOUNT`, `GAS_PAYER_ETH_PASSWORD`, `GAS_PAYER_ETH_FROM` | The same for the key that pays for gas instead of the owner key |
-| `SAFE_RS_HOME` | Where HD wallets and their state are stored (default `~/.safe-rs`) |
+| `SAFE_RS_HOME` | The data directory: HD wallets, their state and `config.toml` (default `~/.safe-rs`) |
 
 ## Examples
 

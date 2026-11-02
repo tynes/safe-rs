@@ -13,13 +13,12 @@ use safe_rs::{is_safe_with, sign_outer_tx};
 use serde::Serialize;
 
 use super::{
-    deployment, predict, submit, CreateContext, CreateError, CreateOpts, CreateOutcome, OwnerKey,
-    SweptEth,
+    deployment_tx, submit, CreateContext, CreateError, CreateOpts, CreateOutcome, OwnerKey,
+    StandardSafe, SweptEth,
 };
 use crate::any_signer::AnySigner;
-use crate::cli::{check_setup, ResolvedSetup};
-use crate::commands::rotation::rotation_config;
-use crate::commands::{http_provider, latest_sim_spec, HttpProvider};
+use crate::cli::{check_setup, owners_with, ResolvedSetup};
+use crate::commands::{head_rotation_config, http_provider, HttpProvider};
 use crate::console::Console;
 use crate::keys::CliKeys;
 use crate::output::Report;
@@ -64,88 +63,21 @@ pub fn parse_same_as(value: &str) -> Result<SameAs, String> {
 /// The result of `safe create --rotate`.
 #[derive(Serialize)]
 pub(super) struct HdCreateOutput {
-    safe_address: Address,
+    pub(super) safe_address: Address,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tx_hash: Option<TxHash>,
+    pub(super) tx_hash: Option<TxHash>,
     /// The wallet key that owns the Safe, and the address to send gas money to
-    owner: OwnerKey,
-    owners: Vec<Address>,
-    threshold: u64,
-    already_deployed: bool,
+    pub(super) owner: OwnerKey,
+    pub(super) owners: Vec<Address>,
+    pub(super) threshold: u64,
+    pub(super) already_deployed: bool,
     /// The account that deploys and pays
-    payer: Address,
+    pub(super) payer: Address,
     /// ETH moved from the funding key to the owner after deployment
     #[serde(skip_serializing_if = "Option::is_none")]
-    sweep: Option<SweptEth>,
+    pub(super) sweep: Option<SweptEth>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    warnings: Vec<String>,
-}
-
-impl HdCreateOutput {
-    /// The document for an outcome with an HD owner key.
-    pub(super) fn from_outcome(outcome: &CreateOutcome) -> Option<Self> {
-        let doc = match outcome {
-            CreateOutcome::Computed {
-                safe,
-                owners,
-                threshold,
-                deployed,
-                owner_key: Some(owner),
-                payer: Some(payer),
-            } => Self {
-                safe_address: *safe,
-                tx_hash: None,
-                owner: *owner,
-                owners: owners.clone(),
-                threshold: *threshold,
-                already_deployed: *deployed,
-                payer: *payer,
-                sweep: None,
-                warnings: Vec::new(),
-            },
-            CreateOutcome::AlreadyDeployed {
-                safe,
-                owners,
-                threshold,
-                owner_key: Some(owner),
-                payer: Some(payer),
-                sweep,
-                warnings,
-            } => Self {
-                safe_address: *safe,
-                tx_hash: None,
-                owner: *owner,
-                owners: owners.clone(),
-                threshold: *threshold,
-                already_deployed: true,
-                payer: *payer,
-                sweep: *sweep,
-                warnings: warnings.clone(),
-            },
-            CreateOutcome::Deployed {
-                safe,
-                tx_hash,
-                owners,
-                threshold,
-                payer,
-                owner_key: Some(owner),
-                sweep,
-                warnings,
-            } => Self {
-                safe_address: *safe,
-                tx_hash: Some(*tx_hash),
-                owner: *owner,
-                owners: owners.clone(),
-                threshold: *threshold,
-                already_deployed: false,
-                payer: *payer,
-                sweep: *sweep,
-                warnings: warnings.clone(),
-            },
-            _ => return None,
-        };
-        Some(doc)
-    }
+    pub(super) warnings: Vec<String>,
 }
 
 impl Report for HdCreateOutput {
@@ -216,14 +148,8 @@ async fn peek_unused(
 
 /// The setup a recorded Safe was created with, for `--same-as`.
 fn setup_of(params: &CreationParams, owner: Address) -> ResolvedSetup {
-    let mut owners = vec![owner];
-    for &co_owner in &params.additional_owners {
-        if !owners.contains(&co_owner) {
-            owners.push(co_owner);
-        }
-    }
     ResolvedSetup {
-        owners,
+        owners: owners_with(owner, &params.additional_owners),
         threshold: params.threshold.max(1),
         salt_nonce: params.salt_nonce,
         singleton: params.singleton,
@@ -287,7 +213,9 @@ pub(super) async fn create(
             index: params.owner_index,
             address: ring.address(params.owner_index).await?,
         };
-        (owner, setup_of(&params, owner.address), false)
+        let setup = setup_of(&params, owner.address);
+        check_setup(&setup.owners, setup.threshold).map_err(CreateError::InvalidSetup)?;
+        (owner, setup, false)
     } else {
         let (owner, skipped) = peek_unused(&provider, &mut ring).await?;
         console.warnings(&skipped);
@@ -297,9 +225,9 @@ pub(super) async fn create(
             .map_err(CreateError::InvalidSetup)?;
         (owner, opts.setup.resolve(owner.address), true)
     };
-    check_setup(&setup.owners, setup.threshold).map_err(CreateError::InvalidSetup)?;
 
-    let (safe, initializer) = predict(&provider, &setup).await?;
+    let plan = StandardSafe::deployment(&provider, &setup).await?;
+    let safe = plan.safe;
     let key = binding_key(chain_id, safe);
     let already_deployed = is_safe_with(&provider, safe, &[setup.singleton]).await?;
     let owner_key = OwnerKey::from(owner);
@@ -357,7 +285,7 @@ pub(super) async fn create(
         None
     } else {
         let params =
-            deployment(&provider, chain_id, payer, &setup, initializer, &opts.fees).await?;
+            deployment_tx(&provider, chain_id, payer, plan.to, plan.input, &opts.fees).await?;
         let outer = match &explicit_payer {
             Some(key) => sign_outer_tx(key, params).await?,
             None => ring.sign_outer_tx(0, ring.id(), params).await?,
@@ -397,8 +325,7 @@ pub(super) async fn create(
     // Set up the Safe with the next keys at hand.
     ring.look_ahead(SETUP_LOOKAHEAD).await?;
 
-    let spec = latest_sim_spec(&provider, chain_id, None, 12).await?;
-    let mut config = rotation_config(None, spec, 12, opts.fees.timeout);
+    let mut config = head_rotation_config(&provider, chain_id, None, opts.fees.timeout).await?;
     config.sweep_reserve = opts.sweep.sweep_reserve;
     let mut rotating = RotatingSafe::with_keyring(provider, safe, ring, config).await?;
     let report = rotating.sweep_all().await?;

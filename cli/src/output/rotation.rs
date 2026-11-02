@@ -69,12 +69,13 @@ impl RotationPlanOutput {
 
 /// Everything a rotating transaction will do, for review before it is sent:
 /// the user's calls, the owner swap appended to them, who pays, and the sweep.
+/// `plan` is [`RotationPlanOutput::new`] of `tx`.
 pub fn rotation_summary(
     tx: &RotationTx,
+    plan: &RotationPlanOutput,
     user_calls: &[safe_rs::Call],
     sweep_enabled: bool,
 ) -> String {
-    let plan = RotationPlanOutput::new(tx);
     let prepared = &tx.plan.prepared;
     let mut s = format!("Safe: {}", prepared.safe);
     let _ = write!(s, "\nOwner: {}", plan.old_owner);

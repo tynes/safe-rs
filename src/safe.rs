@@ -70,8 +70,8 @@ pub struct ExecutionResult {
     pub success: bool,
 }
 
-/// Safe client for interacting with Safe v1.4.1 smart accounts, signing as
-/// owner `S` (a local key by default; see [`AccountSigner`])
+/// Safe client for interacting with Safe smart accounts (v1.5.0, v1.4.1 and
+/// v1.3.0), signing as owner `S` (a local key by default; see [`AccountSigner`])
 pub struct Safe<P, S = PrivateKeySigner> {
     /// The provider for RPC calls
     provider: P,
@@ -133,35 +133,30 @@ where
     /// Gets the threshold of the Safe
     pub async fn threshold(&self) -> Result<u64> {
         let safe = ISafe::new(self.address, &self.provider);
-        let threshold = safe.getThreshold().call().await.map_err(|e| Error::Fetch {
-            what: "threshold",
-            reason: e.to_string(),
-        })?;
+        let threshold = safe
+            .getThreshold()
+            .call()
+            .await
+            .map_err(Error::fetch("threshold"))?;
         Ok(threshold.to::<u64>())
     }
 
     /// Gets the owners of the Safe
     pub async fn owners(&self) -> Result<Vec<Address>> {
         let safe = ISafe::new(self.address, &self.provider);
-        let owners = safe.getOwners().call().await.map_err(|e| Error::Fetch {
-            what: "owners",
-            reason: e.to_string(),
-        })?;
-        Ok(owners)
+        safe.getOwners()
+            .call()
+            .await
+            .map_err(Error::fetch("owners"))
     }
 
     /// Checks if an address is an owner of the Safe
     pub async fn is_owner(&self, address: Address) -> Result<bool> {
         let safe = ISafe::new(self.address, &self.provider);
-        let is_owner = safe
-            .isOwner(address)
+        safe.isOwner(address)
             .call()
             .await
-            .map_err(|e| Error::Fetch {
-                what: "is_owner",
-                reason: e.to_string(),
-            })?;
-        Ok(is_owner)
+            .map_err(Error::fetch("is_owner"))
     }
 
     /// Verifies that the Safe is a strict 1-of-1 owned by `expected`: exactly one
@@ -427,12 +422,7 @@ where
         result.require_safe_success(self.safe.address, prepared.safe_tx_hash);
 
         // GS013 hides the inner revert reason; replay with tracing to recover it.
-        if !result.success
-            && result
-                .revert_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("GS013"))
-        {
+        if !result.success && result.revert_reason.as_deref().is_some_and(is_gs013_revert) {
             let traced = self
                 .simulator()
                 .with_tracing(true)
@@ -654,11 +644,7 @@ where
 
     async fn nonce(&self) -> Result<U256> {
         let safe = ISafe::new(self.address, &self.provider);
-        let nonce = safe.nonce().call().await.map_err(|e| Error::Fetch {
-            what: "nonce",
-            reason: e.to_string(),
-        })?;
-        Ok(nonce)
+        safe.nonce().call().await.map_err(Error::fetch("nonce"))
     }
 
     fn batch(&self) -> SafeBuilder<'_, P, S> {
@@ -722,14 +708,6 @@ mod tests {
         reason = "glob import shared by tests that use varying subsets"
     )]
     use super::*;
-    use alloy::primitives::address;
-
-    #[test]
-    fn test_call_params_single() {
-        // This would need a mock provider to test fully
-        // For now, just test that types compile correctly
-        let _addr = address!("0x1234567890123456789012345678901234567890");
-    }
 
     #[test]
     fn test_safe_singleton_slot_is_zero() {

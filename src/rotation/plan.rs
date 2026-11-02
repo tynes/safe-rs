@@ -213,12 +213,6 @@ pub fn plan_rotation(
     })
 }
 
-#[cfg(feature = "simulation")]
-fn read<C: SolCall>(post: &mut ForkSession, safe: Address, call: &C) -> Result<C::Return> {
-    let out = post.call(Address::ZERO, safe, call.abi_encode().into())?;
-    C::abi_decode_returns(&out).map_err(|e| Error::Abi(e.to_string()))
-}
-
 /// Checks the Safe in `post` (a session the plan's transaction was committed
 /// to) against the plan: owners are exactly the expected list, the threshold is
 /// unchanged and the nonce advanced by one.
@@ -229,21 +223,21 @@ fn read<C: SolCall>(post: &mut ForkSession, safe: Address, call: &C) -> Result<C
 #[cfg(feature = "simulation")]
 pub fn check_post_state(post: &mut ForkSession, plan: &RotationPlan) -> Result<()> {
     let safe = plan.safe();
-    let owners = read(post, safe, &ISafe::getOwnersCall {})?;
+    let owners = post.call_sol(safe, &ISafe::getOwnersCall {})?;
     if owners != plan.expected_owners {
         return Err(Error::Rotation(format!(
             "simulated owners {owners:?} differ from the planned {:?}",
             plan.expected_owners
         )));
     }
-    let threshold = read(post, safe, &ISafe::getThresholdCall {})?;
+    let threshold = post.call_sol(safe, &ISafe::getThresholdCall {})?;
     if threshold != plan.threshold {
         return Err(Error::Rotation(format!(
             "simulated threshold {threshold} differs from {}",
             plan.threshold
         )));
     }
-    let nonce = read(post, safe, &ISafe::nonceCall {})?;
+    let nonce = post.call_sol(safe, &ISafe::nonceCall {})?;
     let expected = plan.prepared.params.nonce + U256::from(1);
     if nonce != expected {
         return Err(Error::Rotation(format!(

@@ -12,7 +12,7 @@ default:
 test:
     cargo test --workspace --all-features
 
-# Run E2E tests with rate-limited Anvil config (requires ETH_RPC_URL)
+# Run E2E tests (requires ETH_RPC_URL)
 test-e2e:
     cargo test --test e2e -- --test-threads=1
 
@@ -51,13 +51,13 @@ fmt:
 fmt-check:
     cargo fmt -- --check
 
-# Build the project
+# Build the library and the CLI
 build:
-    cargo build
+    cargo build --workspace
 
 # Build release
 build-release:
-    cargo build --release
+    cargo build --workspace --release
 
 # Clean build artifacts
 clean:

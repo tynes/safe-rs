@@ -13,7 +13,7 @@ use crate::commands::default_safe::read_default_safe;
 use crate::commands::{http_provider, HttpProvider};
 use crate::console::Console;
 pub use crate::output::SafeInfoOutput as SafeInfo;
-use crate::signers::create_signer;
+use crate::signers::{create_signer, SIGNER_FLAGS_HELP};
 
 /// Why [`info`] failed.
 #[derive(Debug, thiserror::Error)]
@@ -66,8 +66,8 @@ pub async fn run(args: InfoArgs, console: &Console) -> Result<()> {
     }
     if !args.signer.is_set() {
         bail!(
-            "No Safe specified. Pass its address, or --private-key, --keystore or \
-             --interactive to use the signer's default Safe"
+            "No Safe specified. Pass its address, or {SIGNER_FLAGS_HELP} to use the signer's \
+             default Safe"
         );
     }
     let provider = http_provider(&args.rpc.rpc_url);

@@ -185,6 +185,16 @@ pub enum Error {
     WrongPassword,
 }
 
+impl Error {
+    /// A `map_err` adapter: [`Error::Fetch`] of `what`, with the error as the reason.
+    pub(crate) fn fetch<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Self {
+        move |e| Self::Fetch {
+            what,
+            reason: e.to_string(),
+        }
+    }
+}
+
 impl From<alloy::transports::RpcError<alloy::transports::TransportErrorKind>> for Error {
     fn from(err: alloy::transports::RpcError<alloy::transports::TransportErrorKind>) -> Self {
         Error::Provider(err.to_string())

@@ -177,3 +177,25 @@ async fn a_plain_create_needs_a_signer() {
     assert!(matches!(error, CreateError::NoSigner), "{error:?}");
     assert!(!error.may_be_pending());
 }
+
+/// A signer with an HD wallet left in the options (as a config-file
+/// `mnemonic` gives) but no `--rotate` is a plain create with that signer: it
+/// reaches the RPC (port 9, discard) rather than opening the wallet.
+#[tokio::test]
+async fn hd_keys_without_rotate_make_a_plain_create() {
+    let home = tempfile::tempdir().unwrap();
+    let ctx = CreateContext::new("http://127.0.0.1:9".parse().unwrap())
+        .with_prompt(NoPrompt)
+        .with_home(home.path().to_path_buf())
+        .with_signer(safe_rs_cli::PrivateKeySigner::random());
+    let mut opts = CreateOpts {
+        compute_only: true,
+        ..CreateOpts::default()
+    };
+    opts.hd.mnemonic = Some("demo".into());
+    let error = safe_rs_cli::create::create(ctx, opts).await.unwrap_err();
+    assert!(
+        matches!(error, CreateError::Safe(_) | CreateError::Rpc(_)),
+        "{error:?}"
+    );
+}

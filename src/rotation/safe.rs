@@ -281,6 +281,31 @@ fn provider_error(e: impl std::fmt::Display) -> Error {
     Error::Provider(e.to_string())
 }
 
+/// [`Error::Unconfirmed`] for a broadcast of the transaction with this hash,
+/// worded the same for a rotation and a sweep.
+struct Unconfirmed(B256);
+
+impl Unconfirmed {
+    fn error(&self, reason: String) -> Error {
+        Error::Unconfirmed {
+            tx_hash: self.0,
+            reason,
+        }
+    }
+
+    fn rejected(&self, reason: &str) -> Error {
+        self.error(format!("the node rejected it: {reason}"))
+    }
+
+    fn ambiguous(&self, reason: &str) -> Error {
+        self.error(format!("the broadcast outcome is unknown: {reason}"))
+    }
+
+    fn timed_out(&self) -> Error {
+        self.error("no receipt arrived in time; it may still be pending".to_string())
+    }
+}
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -444,10 +469,7 @@ where
             .block(block)
             .call()
             .await
-            .map_err(|e| Error::Fetch {
-                what: "owners",
-                reason: e.to_string(),
-            })
+            .map_err(Error::fetch("owners"))
     }
 
     /// Starts tracking a Safe from what the chain shows.
@@ -823,15 +845,7 @@ where
                 fees,
             )
         } else {
-            let mut exec_signed = signed.clone();
-            if exec_signed.signatures.len() > threshold {
-                exec_signed.signatures = signed
-                    .signatures
-                    .iter()
-                    .take(threshold)
-                    .map(|(&k, v)| (k, v.clone()))
-                    .collect();
-            }
+            let exec_signed = signed.first_signatures(threshold);
             OuterTxParams::exec_transaction(
                 &exec_signed,
                 payer.address(),
@@ -939,20 +953,11 @@ where
     pub async fn submit(&mut self, tx: RotationTx) -> Result<RotationOutcome> {
         self.arm(&tx)?;
         let sweep = self.sweep_alongside(&tx).await;
-        let unconfirmed = |reason: String| Error::Unconfirmed {
-            tx_hash: tx.outer.tx_hash,
-            reason,
-        };
+        let unconfirmed = Unconfirmed(tx.outer.tx_hash);
         match broadcast_raw(&self.provider, &tx.outer.raw, tx.outer.tx_hash).await {
             BroadcastOutcome::Accepted(_) | BroadcastOutcome::AlreadyKnown(_) => {}
-            BroadcastOutcome::Rejected { reason, .. } => {
-                return Err(unconfirmed(format!("the node rejected it: {reason}")))
-            }
-            BroadcastOutcome::Ambiguous { reason } => {
-                return Err(unconfirmed(format!(
-                    "the broadcast outcome is unknown: {reason}"
-                )))
-            }
+            BroadcastOutcome::Rejected { reason, .. } => return Err(unconfirmed.rejected(&reason)),
+            BroadcastOutcome::Ambiguous { reason } => return Err(unconfirmed.ambiguous(&reason)),
         }
         if let Some(sweep) = sweep {
             self.broadcast_alongside(&tx, &sweep).await?;
@@ -966,11 +971,7 @@ where
         .await?
         {
             ReceiptWait::Mined(receipt) => receipt,
-            ReceiptWait::TimedOut { .. } => {
-                return Err(unconfirmed(
-                    "no receipt arrived in time; it may still be pending".to_string(),
-                ))
-            }
+            ReceiptWait::TimedOut { .. } => return Err(unconfirmed.timed_out()),
         };
         self.finalize(&tx, &receipt).await
     }
@@ -1563,10 +1564,7 @@ where
         to: Address,
     ) -> Result<Option<SweepOutcome>> {
         let from = outer.params.from;
-        let unconfirmed = |reason: String| Error::Unconfirmed {
-            tx_hash: outer.tx_hash,
-            reason,
-        };
+        let unconfirmed = Unconfirmed(outer.tx_hash);
         match submit_and_wait(
             &self.provider,
             &outer,
@@ -1579,9 +1577,7 @@ where
                 let success = receipt.inner.inner.status();
                 self.finish_sweep(outer.tx_hash, amount, from, to, success)
             }
-            Submission::TimedOut { .. } => Err(unconfirmed(
-                "no receipt arrived in time; it may still be pending".to_string(),
-            )),
+            Submission::TimedOut { .. } => Err(unconfirmed.timed_out()),
             Submission::Rejected { reason, class } => {
                 // The node does not hold these bytes, so the next attempt may
                 // sign a different transfer. An underpriced replacement means
@@ -1593,11 +1589,9 @@ where
                         .set_signed_sweep(&self.key, from, None)?;
                     self.ring.store.save()?;
                 }
-                Err(unconfirmed(format!("the node rejected it: {reason}")))
+                Err(unconfirmed.rejected(&reason))
             }
-            Submission::Ambiguous { reason } => Err(unconfirmed(format!(
-                "the broadcast outcome is unknown: {reason}"
-            ))),
+            Submission::Ambiguous { reason } => Err(unconfirmed.ambiguous(&reason)),
         }
     }
 

@@ -9,11 +9,10 @@ use safe_rs::{
 };
 
 use crate::cli::{ConfigArgs, SendOpts};
-use crate::commands::default_safe::safe_or_default;
+use crate::commands::default_safe::{optional_signer, safe_or_default};
 use crate::commands::http_provider;
 use crate::commands::send::{self, ExecHooks, Target};
 use crate::console::Console;
-use crate::signers::create_signer;
 
 /// `safe config`.
 pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
@@ -28,11 +27,7 @@ pub async fn run(args: ConfigArgs, console: &Console) -> Result<()> {
         fallback_handler: args.fallback_handler,
         module_guard: args.module_guard,
     };
-    let signer = if args.signer.is_set() {
-        Some(create_signer(&args.signer, console).await?)
-    } else {
-        None
-    };
+    let signer = optional_signer(&args.signer, true, console).await?;
 
     // A co-signer signs the transaction frozen in the bundle instead of
     // planning again: the planned calls depend on the chain state they were

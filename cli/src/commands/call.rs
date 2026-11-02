@@ -5,22 +5,17 @@ use safe_rs::simulation::session::READ_CALL_GAS;
 use safe_rs::SimTx;
 
 use crate::cli::CallArgs;
-use crate::commands::default_safe::safe_or_default;
+use crate::commands::default_safe::{optional_signer, safe_or_default};
 use crate::commands::{fork_session, http_provider};
 use crate::console::Console;
 use crate::output::CallOutput;
 use crate::sig_parser::encode_function_call;
-use crate::signers::create_signer;
 
 pub async fn run(args: CallArgs, console: &Console) -> Result<()> {
     let provider = http_provider(&args.rpc.rpc_url);
     let data = encode_function_call(&args.sig, &args.args)?;
     let chain_id = provider.get_chain_id().await?;
-    let signer = if args.safe.safe.is_none() && args.signer.is_set() {
-        Some(create_signer(&args.signer, console).await?)
-    } else {
-        None
-    };
+    let signer = optional_signer(&args.signer, args.safe.safe.is_none(), console).await?;
     let safe = safe_or_default(
         &provider,
         args.safe.safe,

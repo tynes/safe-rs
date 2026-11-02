@@ -367,6 +367,20 @@ impl SignedSafeTx {
         Ok(())
     }
 
+    /// A copy with only the first `n` signatures in ascending owner order.
+    #[cfg(feature = "simulation")]
+    pub(crate) fn first_signatures(&self, n: usize) -> SignedSafeTx {
+        SignedSafeTx {
+            prepared: self.prepared.clone(),
+            signatures: self
+                .signatures
+                .iter()
+                .take(n)
+                .map(|(&owner, sig)| (owner, sig.clone()))
+                .collect(),
+        }
+    }
+
     /// Inserts a pre-validated (`v = 1`) signature for `owner`.
     pub fn add_prevalidated(&mut self, owner: Address) {
         self.signatures
