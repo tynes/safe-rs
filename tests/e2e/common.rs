@@ -3,11 +3,11 @@
 use alloy::network::{AnyNetwork, EthereumWallet};
 use alloy::node_bindings::{Anvil, AnvilInstance};
 use alloy::primitives::{Address, Bytes, U256};
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use safe_rs::{
-    compute_create2_address, encode_setup_call, ChainAddresses, ISafeProxyFactory, Safe,
+    fetch_proxy_creation_code, predict_safe_address, ChainAddresses, ISafeProxyFactory, Safe,
 };
 
 /// Macro to skip tests when ETH_RPC_URL is not set
@@ -43,27 +43,8 @@ sol! {
     }
 }
 
-/// Type alias for the wallet provider used in tests
-pub type TestProvider = alloy::providers::fillers::FillProvider<
-    alloy::providers::fillers::JoinFill<
-        alloy::providers::fillers::JoinFill<
-            alloy::providers::Identity,
-            alloy::providers::fillers::JoinFill<
-                alloy::providers::fillers::GasFiller,
-                alloy::providers::fillers::JoinFill<
-                    alloy::providers::fillers::BlobGasFiller,
-                    alloy::providers::fillers::JoinFill<
-                        alloy::providers::fillers::NonceFiller,
-                        alloy::providers::fillers::ChainIdFiller,
-                    >,
-                >,
-            >,
-        >,
-        alloy::providers::fillers::WalletFiller<EthereumWallet>,
-    >,
-    alloy::providers::RootProvider<AnyNetwork>,
-    AnyNetwork,
->;
+/// The wallet provider used in tests
+pub type TestProvider = DynProvider<AnyNetwork>;
 
 /// Test harness that spawns Anvil with forking and provides a provider + signer
 pub struct TestHarness {
@@ -113,7 +94,8 @@ impl TestHarness {
         let provider = ProviderBuilder::new()
             .network::<AnyNetwork>()
             .wallet(wallet)
-            .connect_http(anvil.endpoint_url());
+            .connect_http(anvil.endpoint_url())
+            .erased();
 
         Self {
             provider,
@@ -135,17 +117,15 @@ impl TestHarness {
         threshold: u64,
         salt_nonce: U256,
     ) -> Result<Address, Box<dyn std::error::Error>> {
-        let initializer = encode_setup_call(&owners, threshold, self.addresses.fallback_handler);
-
-        // Get proxy creation code for CREATE2 computation
-        let factory = ISafeProxyFactory::new(self.addresses.proxy_factory, &self.provider);
-        let creation_code = factory.proxyCreationCode().call().await?;
-
-        // Compute deterministic address
-        let safe_address = compute_create2_address(
+        // Compute the deterministic address
+        let creation_code =
+            fetch_proxy_creation_code(&self.provider, self.addresses.proxy_factory).await?;
+        let (safe_address, initializer) = predict_safe_address(
             self.addresses.proxy_factory,
             self.addresses.safe_singleton,
-            &initializer,
+            &owners,
+            threshold,
+            self.addresses.fallback_handler,
             salt_nonce,
             &creation_code,
         );
@@ -163,16 +143,13 @@ impl TestHarness {
             .wallet(wallet)
             .connect_http(self._anvil.endpoint_url());
 
-        let factory_with_wallet =
-            ISafeProxyFactory::new(self.addresses.proxy_factory, &wallet_provider);
-
         // Deploy the Safe
-        let pending_tx = factory_with_wallet
+        ISafeProxyFactory::new(self.addresses.proxy_factory, &wallet_provider)
             .createProxyWithNonce(self.addresses.safe_singleton, initializer, salt_nonce)
             .send()
+            .await?
+            .get_receipt()
             .await?;
-
-        let _receipt = pending_tx.get_receipt().await?;
 
         // Verify deployment
         let code: Bytes = self.provider.get_code_at(safe_address).await?;
@@ -199,10 +176,6 @@ impl TestHarness {
             .network::<AnyNetwork>()
             .wallet(wallet)
             .connect_http(self._anvil.endpoint_url());
-
-        // Debug: Print chain info
-        let chain_id = wallet_provider.get_chain_id().await?;
-        eprintln!("Deploying MockERC20 on chain_id: {}", chain_id);
 
         let deployer = MockERC20::deploy(&wallet_provider).await?;
         Ok(*deployer.address())
