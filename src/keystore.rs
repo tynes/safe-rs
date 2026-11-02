@@ -20,25 +20,25 @@
 //! decryption the key is re-derived from it and must match.
 //!
 //! The `keystore` feature reads keystores. Recovering the phrase and writing
-//! mnemonic keystores need `hd-wallet`; without it `x-ethers` is ignored, as
+//! mnemonic keystores need `mnemonic`; without it `x-ethers` is ignored, as
 //! geth and Foundry ignore it.
 
 use aes::cipher::{KeyIvInit, StreamCipher};
 use alloy::primitives::{hex, keccak256, Address};
 use alloy::signers::local::PrivateKeySigner;
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "mnemonic")]
 use rand::{CryptoRng, RngCore};
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "mnemonic")]
 use serde_json::json;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
-#[cfg(feature = "hd-wallet")]
-use crate::hd::{entropy_to_phrase, phrase_to_entropy, HdWallet, FUNDING_PATH};
+#[cfg(feature = "mnemonic")]
+use crate::mnemonic::{entropy_to_phrase, phrase_to_entropy, MnemonicWallet, FUNDING_PATH};
 
 type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "mnemonic")]
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
 /// The largest `N * r` accepted when reading: 1 GiB of scrypt memory.
@@ -82,7 +82,7 @@ pub struct Decrypted {
     /// The keystore's private key
     pub signer: PrivateKeySigner,
     /// The phrase, for a mnemonic keystore. Always `None` without the
-    /// `hd-wallet` feature, which recovering a phrase needs.
+    /// `mnemonic` feature, which recovering a phrase needs.
     pub mnemonic: Option<DecryptedMnemonic>,
 }
 
@@ -198,7 +198,7 @@ fn aes128_ctr(key: &[u8], iv: &[u8], data: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "mnemonic")]
 fn aes256_ctr(key: &[u8], counter: &[u8], data: &mut [u8]) -> Result<()> {
     Aes256Ctr::new_from_slices(key, counter)
         .map_err(|_| malformed("invalid AES-256-CTR key or counter length"))?
@@ -207,7 +207,7 @@ fn aes256_ctr(key: &[u8], counter: &[u8], data: &mut [u8]) -> Result<()> {
 }
 
 /// Decrypts a V3 keystore, with or without the `x-ethers` mnemonic field.
-/// Without the `hd-wallet` feature the field is ignored: the key is still
+/// Without the `mnemonic` feature the field is ignored: the key is still
 /// returned, and `mnemonic` is `None`.
 ///
 /// Fails with [`Error::WrongPassword`] if the MAC does not match, and with
@@ -253,17 +253,17 @@ pub fn decrypt_keystore(json: &str, password: &[u8]) -> Result<Decrypted> {
         }
     }
 
-    #[cfg(feature = "hd-wallet")]
+    #[cfg(feature = "mnemonic")]
     let mnemonic = match field(&root, "x-ethers") {
         Some(extension) => Some(decrypt_mnemonic(extension, &key, &signer)?),
         None => None,
     };
-    #[cfg(not(feature = "hd-wallet"))]
+    #[cfg(not(feature = "mnemonic"))]
     let mnemonic = None;
     Ok(Decrypted { signer, mnemonic })
 }
 
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "mnemonic")]
 fn decrypt_mnemonic(
     extension: &Value,
     key: &[u8; 64],
@@ -302,14 +302,14 @@ fn decrypt_mnemonic(
     // derives the key the MAC did authenticate.
     let mismatch = || malformed("the keystore's phrase does not derive its key");
     let phrase = entropy_to_phrase(&entropy).map_err(|_| mismatch())?;
-    let wallet = HdWallet::from_phrase(&phrase).map_err(|_| mismatch())?;
+    let wallet = MnemonicWallet::from_phrase(&phrase).map_err(|_| mismatch())?;
     if wallet.id() != signer.address() {
         return Err(mismatch());
     }
     Ok(DecryptedMnemonic { phrase, path })
 }
 
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "mnemonic")]
 fn uuid_v4(rng: &mut impl RngCore) -> String {
     let mut b = [0u8; 16];
     rng.fill_bytes(&mut b);
@@ -334,7 +334,7 @@ fn uuid_v4(rng: &mut impl RngCore) -> String {
 /// The password is used as the bytes given. Tools disagree on Unicode
 /// normalization (ethers applies NFKC, Foundry none), so a non-ASCII password
 /// may not open the file elsewhere.
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "mnemonic")]
 pub fn encrypt_mnemonic_keystore(
     phrase: &str,
     password: &[u8],
@@ -342,7 +342,7 @@ pub fn encrypt_mnemonic_keystore(
     rng: &mut (impl RngCore + CryptoRng),
 ) -> Result<String> {
     let entropy = phrase_to_entropy(phrase)?;
-    let wallet = HdWallet::from_phrase(phrase)?;
+    let wallet = MnemonicWallet::from_phrase(phrase)?;
     let address = wallet.id();
 
     let mut salt = [0u8; 32];
@@ -392,7 +392,7 @@ pub fn encrypt_mnemonic_keystore(
 }
 
 #[cfg(test)]
-#[cfg(feature = "hd-wallet")]
+#[cfg(feature = "mnemonic")]
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn a_mnemonic_keystore_round_trips() {
         let json = encrypted();
-        let wallet = HdWallet::from_phrase(PHRASE).unwrap();
+        let wallet = MnemonicWallet::from_phrase(PHRASE).unwrap();
         assert_eq!(keystore_address(&json).unwrap(), Some(wallet.id()));
 
         let decrypted = decrypt_keystore(&json, PASSWORD).unwrap();
@@ -619,7 +619,7 @@ mod tests {
         assert!(decrypted.mnemonic.is_none());
         assert_eq!(
             decrypted.signer.address(),
-            HdWallet::from_phrase(PHRASE).unwrap().id()
+            MnemonicWallet::from_phrase(PHRASE).unwrap().id()
         );
         assert!(!format!("{decrypted:?}").contains("junk"));
     }
@@ -634,7 +634,7 @@ mod tests {
         let signer = PrivateKeySigner::decrypt_keystore(&path, PASSWORD).unwrap();
         assert_eq!(
             signer.address(),
-            HdWallet::from_phrase(PHRASE).unwrap().id()
+            MnemonicWallet::from_phrase(PHRASE).unwrap().id()
         );
     }
 
@@ -694,9 +694,9 @@ mod tests {
     }
 }
 
-/// Without `hd-wallet`: keystores still decrypt, phrase or not, to their key.
+/// Without `mnemonic`: keystores still decrypt, phrase or not, to their key.
 #[cfg(test)]
-#[cfg(not(feature = "hd-wallet"))]
+#[cfg(not(feature = "mnemonic"))]
 mod plain_tests {
     use super::*;
 

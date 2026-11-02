@@ -54,11 +54,11 @@ default = ["simulation"]
 simulation = ["dep:alloy-chains", "dep:alloy-hardforks", "dep:foundry-fork-db", "dep:revm", "dep:revm-inspectors", "revm-inspectors/serde", "dep:chrono", "alloy/rpc-types-trace", "tokio/rt"]
 # Decrypting password-encrypted (V3) keystores: `keystore::decrypt_keystore`.
 keystore = ["dep:scrypt", "dep:aes", "dep:ctr", "dep:zeroize"]
-# Encrypted mnemonic keystores, HD key derivation and the rotating Safe client
+# Encrypted mnemonic keystores, key derivation and the rotating Safe client
 # (implies simulation, which every rotation runs, and keystore).
-hd-wallet = ["simulation", "keystore", "dep:chrono", "alloy/signer-mnemonic", "dep:rand"]
-# Owner keys on a Ledger device (implies hd-wallet).
-ledger = ["hd-wallet", "dep:alloy-signer-ledger", "dep:futures-util"]
+mnemonic = ["simulation", "keystore", "dep:chrono", "alloy/signer-mnemonic", "dep:rand"]
+# Owner keys on a Ledger device (implies mnemonic).
+ledger = ["mnemonic", "dep:alloy-signer-ledger", "dep:futures-util"]
 
 [dev-dependencies]
 async-trait = "0.1"
@@ -73,7 +73,7 @@ workspace = true
 
 [package.metadata.docs.rs]
 # Not `all-features`: `ledger` builds against libusb.
-features = ["hd-wallet"]
+features = ["mnemonic"]
 
 [[test]]
 name = "e2e"
@@ -93,7 +93,7 @@ required-features = ["ledger"]
 [[test]]
 name = "rotation"
 path = "tests/rotation.rs"
-required-features = ["hd-wallet"]
+required-features = ["mnemonic"]
 
 [[example]]
 name = "simple_transfer"
@@ -113,7 +113,7 @@ required-features = ["simulation"]
 [[example]]
 name = "rotating_transfer"
 path = "examples/rotating_transfer.rs"
-required-features = ["hd-wallet"]
+required-features = ["mnemonic"]
 
 [workspace.lints.clippy]
 # Enable pedantic lints for stricter code quality

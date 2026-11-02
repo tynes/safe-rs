@@ -130,8 +130,8 @@ fn defaults_match_the_flag_defaults() {
 #[test]
 fn debug_output_hides_secrets() {
     let mut opts = SendOpts::default();
-    opts.hd.password.password = Some("hunter2".into());
-    opts.hd.mnemonic = Some("test test test junk".into());
+    opts.owner_keys.password.password = Some("hunter2".into());
+    opts.owner_keys.mnemonic = Some("test test test junk".into());
     opts.gas_payer.gas_payer_private_key = Some("0xdeadbeef".into());
     opts.gas_payer.gas_payer_password = Some("hunter3".into());
     let debug = format!("{opts:?}");
@@ -190,8 +190,8 @@ async fn options_built_in_code_are_checked_like_flags() {
             "only apply with --rotate",
         ),
         (
-            |o| o.hd.ledger = true,
-            OptionsError::HdWithoutRotate,
+            |o| o.owner_keys.ledger = true,
+            OptionsError::OwnerKeysWithoutRotate,
             "need --rotate",
         ),
     ]);
@@ -280,7 +280,7 @@ async fn an_eoa_send_refuses_the_options_only_a_safe_has() {
     ];
     cases.extend::<[Case; 2]>([
         (|o| o.rotate = true, "--rotate"),
-        (|o| o.hd.ledger = true, "--ledger"),
+        (|o| o.owner_keys.ledger = true, "--ledger"),
     ]);
     for (set, flag) in cases {
         let mut opts = SendOpts::default();

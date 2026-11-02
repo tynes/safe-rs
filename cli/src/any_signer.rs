@@ -10,7 +10,6 @@ use alloy::primitives::{Address, ChainId, Signature, B256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use alloy::sol_types::{Eip712Domain, SolStruct};
-use alloy_signer_ledger::LedgerSigner;
 use async_trait::async_trait;
 use foundry_wallets::WalletSigner;
 
@@ -37,32 +36,18 @@ impl AnySigner {
         &self.0
     }
 
-    /// The local key, if it is one.
-    pub fn as_local(&self) -> Option<&PrivateKeySigner> {
-        match self.0.as_ref() {
-            WalletSigner::Local(key) => Some(key),
-            _ => None,
-        }
-    }
-
-    /// Whether the key is on a device (Ledger or Trezor), which asks before
-    /// each signature.
-    pub fn is_device(&self) -> bool {
-        matches!(
+    /// Whether the key signs a bare 32-byte hash. Hardware wallets (Ledger,
+    /// Trezor) refuse to; local and remote (KMS, Turnkey) keys do.
+    pub fn can_sign_hash(&self) -> bool {
+        !matches!(
             self.0.as_ref(),
             WalletSigner::Ledger(_) | WalletSigner::Trezor(_)
         )
     }
 
-    /// Whether the key signs a bare 32-byte hash. Hardware wallets refuse to;
-    /// local and remote (KMS, Turnkey) keys do.
-    pub fn can_sign_hash(&self) -> bool {
-        !self.is_device()
-    }
-
-    /// The kind of key, for messages: "local", "Ledger", "Trezor", "AWS KMS",
+    /// The kind of key, for `Debug`: "local", "Ledger", "Trezor", "AWS KMS",
     /// "GCP KMS" or "Turnkey".
-    pub fn kind(&self) -> &'static str {
+    fn kind(&self) -> &'static str {
         match self.0.as_ref() {
             WalletSigner::Local(_) => "local",
             WalletSigner::Ledger(_) => "Ledger",
@@ -86,12 +71,6 @@ impl From<WalletSigner> for AnySigner {
 impl From<PrivateKeySigner> for AnySigner {
     fn from(key: PrivateKeySigner) -> Self {
         WalletSigner::Local(key).into()
-    }
-}
-
-impl From<LedgerSigner> for AnySigner {
-    fn from(key: LedgerSigner) -> Self {
-        WalletSigner::Ledger(key).into()
     }
 }
 
@@ -173,11 +152,6 @@ mod tests {
         let key = PrivateKeySigner::random();
         let any = AnySigner::from(key.clone());
         assert_eq!(any.address(), key.address());
-        assert_eq!(
-            any.as_local().map(PrivateKeySigner::address),
-            Some(key.address())
-        );
-        assert!(!any.is_device());
         assert!(any.can_sign_hash());
         assert!(format!("{any:?}").contains("local"));
     }

@@ -3,12 +3,12 @@
 use alloy::primitives::Address;
 use safe_rs::rotation::KeySource;
 use safe_rs::LedgerKeys;
-use safe_rs::{HdWallet, OuterTxParams, PreparedSafeTx, SignedOuterTx, SignedSafeTx};
+use safe_rs::{MnemonicWallet, OuterTxParams, PreparedSafeTx, SignedOuterTx, SignedSafeTx};
 
 /// Owner keys from `--mnemonic` or `--ledger` under `--rotate`.
 pub enum CliKeys {
     /// A phrase decrypted from its keystore
-    Phrase(Box<HdWallet>),
+    Phrase(Box<MnemonicWallet>),
     /// A connected Ledger
     Ledger(LedgerKeys),
 }

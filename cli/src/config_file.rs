@@ -16,7 +16,7 @@
 //! Paths are used as written: `~` is not expanded.
 //!
 //! `keystore`, `account` and `mnemonic` pick the signer (or, under
-//! `--rotate`, the HD wallet) only when no other wallet option (such as
+//! `--rotate`, the mnemonic wallet) only when no other wallet option (such as
 //! `--private-key` / `PRIVATE_KEY` or `--ledger`) is given. Private keys,
 //! phrases and passwords never go here.
 
@@ -46,7 +46,7 @@ pub struct ConfigFile {
     pub password_file: Option<PathBuf>,
     pub keystore: Option<PathBuf>,
     pub account: Option<String>,
-    /// An HD wallet name or path. A phrase never goes here.
+    /// A mnemonic wallet name or path. A phrase never goes here.
     pub mnemonic: Option<String>,
 }
 
