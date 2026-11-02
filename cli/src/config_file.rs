@@ -5,13 +5,15 @@
 //! its environment variable is given:
 //!
 //! ```toml
-//! rpc_url = "https://polygon.drpc.org"   # --rpc-url, ETH_RPC_URL
-//! safe = "0x…"                           # --safe, SAFE_ADDRESS
-//! password_file = "~/.safe-rs/password"  # --password-file, ETH_PASSWORD
-//! keystore = "~/.foundry/keystores/me"   # --keystore, ETH_KEYSTORE
-//! account = "me"                         # --account, ETH_KEYSTORE_ACCOUNT
-//! mnemonic = "treasury"                  # --mnemonic
+//! rpc_url = "https://polygon.drpc.org"          # --rpc-url, ETH_RPC_URL
+//! safe = "0x…"                                  # --safe, SAFE_ADDRESS
+//! password_file = "/home/me/.safe-rs/password"  # --password-file, ETH_PASSWORD
+//! keystore = "/home/me/.foundry/keystores/me"   # --keystore, ETH_KEYSTORE
+//! account = "me"                                # --account, ETH_KEYSTORE_ACCOUNT
+//! mnemonic = "treasury"                         # --mnemonic
 //! ```
+//!
+//! Paths are used as written: `~` is not expanded.
 //!
 //! `keystore`, `account` and `mnemonic` pick the signer (or, under
 //! `--rotate`, the HD wallet) only when no other wallet option (such as

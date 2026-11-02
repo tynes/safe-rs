@@ -140,6 +140,9 @@ impl Signer for AnySigner {
         self.0.chain_id()
     }
 
+    /// Sets the chain ID only while this is the sole handle on the key: on
+    /// an [`AnySigner`] that has been cloned (the key is shared) it does
+    /// nothing.
     fn set_chain_id(&mut self, chain_id: Option<ChainId>) {
         if let Some(signer) = Arc::get_mut(&mut self.0) {
             signer.set_chain_id(chain_id);

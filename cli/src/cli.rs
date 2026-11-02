@@ -52,7 +52,7 @@ pub enum Commands {
 
 /// `safe wallet`: the subcommands, and the RPC and Safe that `sync` and
 /// `sweep` read. A CLI that embeds [`WalletCommand`] resolves those itself
-/// into a [`WalletContext`](crate::signers::WalletContext).
+/// into a [`WalletContext`](crate::wallet::WalletContext).
 #[derive(Args, Clone)]
 pub struct WalletCliArgs {
     /// RPC endpoint URL (sync and sweep)
@@ -344,7 +344,7 @@ pub struct CollectArgs {
 }
 
 /// Simulation of the outer transaction: `--simulate-only`, `--trace` and the
-/// [`SimArgs`] (`--block`, `--evm-spec`, `--block-time`).
+/// [`SimArgs`] (`--block`, `--spec`, `--block-time`).
 #[derive(Args, Clone, Debug, Default)]
 pub struct SimulateArgs {
     /// Only simulate, don't sign or broadcast the outer transaction
@@ -447,8 +447,9 @@ impl SendOpts {
     /// the rotation rules.
     ///
     /// `has_signer` is whether the caller brings the owner key (a host's
-    /// signer, or `--private-key`, `--keystore` or `--interactive`). With
-    /// `--rotate` the key comes from the HD wallet or Ledger instead.
+    /// signer, or any key option of [`SignerArgs`]: see
+    /// [`SignerArgs::is_set`]). With `--rotate` the key comes from the HD
+    /// wallet or Ledger instead.
     pub fn validate_safe(&self, has_signer: bool) -> Result<(), OptionsError> {
         self.validate()?;
         if self.rotate {
@@ -917,7 +918,7 @@ pub struct SignerArgs {
     )]
     pub mnemonic_index: u32,
 
-    /// Use the keystore in the given folder or file
+    /// Use the keystore file at the given path
     #[arg(long = "keystore", value_name = "PATH", env = "ETH_KEYSTORE")]
     pub keystore_path: Option<String>,
 

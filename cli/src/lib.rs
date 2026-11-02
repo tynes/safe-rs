@@ -178,7 +178,6 @@ impl RunConfig {
     }
 
     /// Checks every Safe transaction with `policy` before it leaves the machine.
-    /// rotation unless it allows it.
     #[must_use]
     pub fn with_policy(mut self, policy: impl policy::SafePolicy + 'static) -> Self {
         self.policy = Some(Arc::new(policy));
