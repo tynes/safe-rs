@@ -39,26 +39,72 @@ impl AnySigner {
     /// Whether the key signs a bare 32-byte hash. Hardware wallets (Ledger,
     /// Trezor) refuse to; local and remote (KMS, Turnkey) keys do.
     pub fn can_sign_hash(&self) -> bool {
-        !matches!(
-            self.0.as_ref(),
-            WalletSigner::Ledger(_) | WalletSigner::Trezor(_)
-        )
+        !self.kind().is_hardware()
     }
 
-    /// The kind of key, for `Debug`: "local", "Ledger", "Trezor", "AWS KMS",
-    /// "GCP KMS" or "Turnkey".
-    fn kind(&self) -> &'static str {
+    /// Which backend holds the key. Lets a host branch on the signer (say,
+    /// to warn before a Trezor prompt) without depending on foundry-wallets.
+    pub fn kind(&self) -> SignerKind {
         match self.0.as_ref() {
-            WalletSigner::Local(_) => "local",
-            WalletSigner::Ledger(_) => "Ledger",
-            WalletSigner::Trezor(_) => "Trezor",
+            WalletSigner::Local(_) => SignerKind::Local,
+            WalletSigner::Ledger(_) => SignerKind::Ledger,
+            WalletSigner::Trezor(_) => SignerKind::Trezor,
             #[cfg(feature = "aws-kms")]
-            WalletSigner::Aws(_) => "AWS KMS",
+            WalletSigner::Aws(_) => SignerKind::Aws,
             #[cfg(feature = "gcp-kms")]
-            WalletSigner::Gcp(_) => "GCP KMS",
+            WalletSigner::Gcp(_) => SignerKind::Gcp,
             #[cfg(feature = "turnkey")]
-            WalletSigner::Turnkey(_) => "Turnkey",
+            WalletSigner::Turnkey(_) => SignerKind::Turnkey,
         }
+    }
+}
+
+/// The backend an [`AnySigner`]'s key lives in, from [`AnySigner::kind`].
+///
+/// Every variant exists whatever features the crate is built with; `Aws`,
+/// `Gcp` and `Turnkey` are only returned when their feature is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SignerKind {
+    /// A key in memory: `--private-key`, `--keystore`, `--account`,
+    /// `--mnemonic` or `--interactive`.
+    Local,
+    /// A Ledger hardware wallet (`--ledger`).
+    Ledger,
+    /// A Trezor hardware wallet (`--trezor`).
+    Trezor,
+    /// An AWS KMS key (`--aws`).
+    Aws,
+    /// A GCP KMS key (`--gcp`).
+    Gcp,
+    /// A Turnkey key (`--turnkey`).
+    Turnkey,
+}
+
+impl SignerKind {
+    /// Whether the key is on a hardware wallet (Ledger or Trezor), which
+    /// asks for confirmation on the device and will not sign a bare hash.
+    pub fn is_hardware(self) -> bool {
+        matches!(self, Self::Ledger | Self::Trezor)
+    }
+
+    /// A short name: "local", "Ledger", "Trezor", "AWS KMS", "GCP KMS" or
+    /// "Turnkey".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Ledger => "Ledger",
+            Self::Trezor => "Trezor",
+            Self::Aws => "AWS KMS",
+            Self::Gcp => "GCP KMS",
+            Self::Turnkey => "Turnkey",
+        }
+    }
+}
+
+impl fmt::Display for SignerKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -77,7 +123,7 @@ impl From<PrivateKeySigner> for AnySigner {
 impl fmt::Debug for AnySigner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnySigner")
-            .field("kind", &self.kind())
+            .field("kind", &self.kind().name())
             .field("address", &self.address())
             .finish()
     }
@@ -152,8 +198,23 @@ mod tests {
         let key = PrivateKeySigner::random();
         let any = AnySigner::from(key.clone());
         assert_eq!(any.address(), key.address());
+        assert_eq!(any.kind(), SignerKind::Local);
         assert!(any.can_sign_hash());
         assert!(format!("{any:?}").contains("local"));
+    }
+
+    #[test]
+    fn only_hardware_kinds_are_hardware() {
+        assert!(SignerKind::Ledger.is_hardware());
+        assert!(SignerKind::Trezor.is_hardware());
+        for kind in [
+            SignerKind::Local,
+            SignerKind::Aws,
+            SignerKind::Gcp,
+            SignerKind::Turnkey,
+        ] {
+            assert!(!kind.is_hardware(), "{kind}");
+        }
     }
 
     #[tokio::test]
