@@ -64,7 +64,7 @@ jobs:
           cargo check -p safe-rs --lib --locked --no-default-features
           cargo check -p safe-rs --lib --locked
           cargo check -p safe-rs --lib --locked --no-default-features --features keystore
-          cargo check -p safe-rs --lib --locked --no-default-features --features hd-wallet
+          cargo check -p safe-rs --lib --locked --no-default-features --features mnemonic
           cargo check -p safe-rs --lib --locked --no-default-features --features ledger
           cargo check -p safe-rs-cli --bins --locked --no-default-features
 

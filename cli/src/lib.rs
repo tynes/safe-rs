@@ -1,5 +1,5 @@
 //! The `safe` CLI as a library, for other CLIs that send Safe transactions,
-//! create Safes and manage HD wallets.
+//! create Safes and manage mnemonic wallets.
 //!
 //! Each command follows one pattern:
 //!
@@ -135,8 +135,8 @@ pub mod args {
         GasPayerArgs, PasswordArgs, RawTxArgs, RpcArgs, SafeArgs, SafeSetupArgs, SafeVersion,
         SendOpts, SignerArgs, SimArgs, SimulateArgs, DEFAULT_BLOCK_TIME, DEFAULT_TIMEOUT,
     };
-    /// The HD wallet and sweep flags of `--rotate`.
-    pub use crate::cli::{HdArgs, SweepArgs};
+    /// The mnemonic wallet and sweep flags of `--rotate`.
+    pub use crate::cli::{OwnerKeysArgs, SweepArgs};
 }
 
 /// `safe create` and [`create`](create::create) for a CLI that deploys Safes.

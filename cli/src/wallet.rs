@@ -1,4 +1,4 @@
-//! `safe wallet`: HD wallets and the record of which of their keys are used,
+//! `safe wallet`: mnemonic wallets and the record of which of their keys are used,
 //! as functions a CLI can call and a [`WalletCommand`] it can mount.
 //!
 //! The subcommands leave out `--rpc-url` and `--safe`, which the caller puts
@@ -14,18 +14,18 @@ use alloy::providers::Provider;
 use clap::{Args, Subcommand};
 use color_eyre::eyre::{eyre, WrapErr};
 use rand::rngs::OsRng;
-use safe_rs::hd::{key_path, normalize_phrase};
 use safe_rs::keystore::{encrypt_mnemonic_keystore, keystore_address, ScryptParams};
+use safe_rs::mnemonic::{key_path, normalize_phrase};
 use safe_rs::rotation::store::write_private;
 use safe_rs::rotation::{
     Binding, Exposure, KeySource, RotatingSafe, RotationConfig, RotationState,
 };
-use safe_rs::HdWallet;
+use safe_rs::MnemonicWallet;
 use serde::Serialize;
 use url::Url;
 use zeroize::Zeroizing;
 
-use crate::cli::{parse_ether_value, HdArgs, PasswordArgs, DEFAULT_TIMEOUT};
+use crate::cli::{parse_ether_value, OwnerKeysArgs, PasswordArgs, DEFAULT_TIMEOUT};
 use crate::commands::default_safe::recorded_safe;
 use crate::commands::{head_rotation_config, http_provider, HttpProvider};
 use crate::console::Console;
@@ -37,7 +37,8 @@ pub use crate::output::{OwnerKey, SweptEth};
 use crate::paths;
 use crate::prompt::{Prompt, TerminalPrompt};
 use crate::signers::{
-    check_new_password, hd_key_signer, new_password, open_keys, open_state, open_wallet, wallet_id,
+    check_new_password, mnemonic_key_signer, new_password, open_keys, open_state, open_wallet,
+    wallet_id,
 };
 
 type Result<T, E = WalletError> = std::result::Result<T, E>;
@@ -45,13 +46,13 @@ type Result<T, E = WalletError> = std::result::Result<T, E>;
 /// `safe wallet`'s subcommands.
 #[derive(Subcommand, Clone, Debug)]
 pub enum WalletCommand {
-    /// Create an HD wallet from a new 24-word phrase and encrypt it to disk
+    /// Create a mnemonic wallet from a new 24-word phrase and encrypt it to disk
     New(WalletNewOpts),
 
-    /// Encrypt an existing BIP-39 phrase to disk as an HD wallet
+    /// Encrypt an existing BIP-39 phrase to disk as a mnemonic wallet
     Import(WalletImportOpts),
 
-    /// List the HD wallets on disk
+    /// List the mnemonic wallets on disk
     List,
 
     /// Print the wallet's funding address, or the address of one owner key
@@ -97,7 +98,7 @@ pub struct WalletImportOpts {
 #[derive(Args, Clone, Debug)]
 pub struct WalletAddressOpts {
     #[command(flatten)]
-    pub hd: HdArgs,
+    pub owner_keys: OwnerKeysArgs,
 
     /// Owner key index (default: the funding address, which needs no password)
     #[arg(long)]
@@ -108,7 +109,7 @@ pub struct WalletAddressOpts {
 #[derive(Args, Clone, Debug)]
 pub struct WalletStatusOpts {
     #[command(flatten)]
-    pub hd: HdArgs,
+    pub owner_keys: OwnerKeysArgs,
 }
 
 /// `sync` reads the context's Safe, or the wallet's sole recorded Safe on
@@ -116,10 +117,10 @@ pub struct WalletStatusOpts {
 #[derive(Args, Clone, Debug)]
 pub struct WalletSyncOpts {
     #[command(flatten)]
-    pub hd: HdArgs,
+    pub owner_keys: OwnerKeysArgs,
 
-    /// How many wallet indices to derive and compare (default: 1000 for an HD
-    /// wallet file, 52 for a Ledger, which answers one address at a time)
+    /// How many wallet indices to derive and compare (default: 1000 for a
+    /// mnemonic wallet file, 52 for a Ledger, which answers one address at a time)
     #[arg(long)]
     pub scan_limit: Option<u32>,
 
@@ -143,7 +144,7 @@ pub struct WalletSyncOpts {
 #[derive(Args, Clone, Debug)]
 pub struct WalletSweepOpts {
     #[command(flatten)]
-    pub hd: HdArgs,
+    pub owner_keys: OwnerKeysArgs,
 
     /// Wei to leave on the retired owner, or a number with a unit ("0.01ether")
     /// (default: what the chain charges outside gas)
@@ -155,13 +156,13 @@ pub struct WalletSweepOpts {
     pub timeout: u64,
 }
 
-/// What a CLI that manages HD wallets resolves itself: where the wallets
+/// What a CLI that manages mnemonic wallets resolves itself: where the wallets
 /// live, the chain and Safe `sync` and `sweep` read, and where progress and
 /// questions go.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct WalletContext {
-    /// Where HD wallets and their state live (default: `$SAFE_RS_HOME` or
+    /// Where mnemonic wallets and their state live (default: `$SAFE_RS_HOME` or
     /// `~/.safe-rs`, resolved when first needed)
     pub home: Option<PathBuf>,
     /// The chain `sync` and `sweep` read
@@ -323,7 +324,7 @@ impl fmt::Debug for WalletCreated {
 
 impl Report for WalletCreated {
     fn human(&self) -> String {
-        let mut s = format!("HD wallet \"{}\" saved to {}", self.name, self.path);
+        let mut s = format!("mnemonic wallet \"{}\" saved to {}", self.name, self.path);
         let _ = write!(s, "\n  Funding address: {}", self.funding_address);
         if let Some(phrase) = &self.phrase {
             let _ = write!(
@@ -339,14 +340,14 @@ impl Report for WalletCreated {
 }
 
 /// Encrypts `phrase` to `path`, after checking the result opens again.
-fn write_keystore(path: &Path, phrase: &str, password: &str) -> Result<HdWallet> {
+fn write_keystore(path: &Path, phrase: &str, password: &str) -> Result<MnemonicWallet> {
     let json = encrypt_mnemonic_keystore(
         phrase,
         password.as_bytes(),
         ScryptParams::default(),
         &mut OsRng,
     )?;
-    let wallet = HdWallet::from_keystore_json(&json, password.as_bytes())
+    let wallet = MnemonicWallet::from_keystore_json(&json, password.as_bytes())
         .wrap_err("the new keystore did not decrypt; nothing was written")?;
     write_private(path, json.as_bytes())?;
     Ok(wallet)
@@ -361,14 +362,14 @@ fn new_wallet_path(home: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Creates an HD wallet from a new 24-word phrase, encrypted with `password`.
+/// Creates a mnemonic wallet from a new 24-word phrase, encrypted with `password`.
 /// The phrase comes back once, in [`WalletCreated::phrase`].
 pub fn new_wallet(ctx: &WalletContext, name: &str, password: &str) -> Result<WalletCreated> {
     let console = ctx.console();
     let path = new_wallet_path(&ctx.home()?, name)?;
     let warnings = check_new_password(password)?;
     console.warnings(&warnings);
-    let (_, phrase) = HdWallet::generate()?;
+    let (_, phrase) = MnemonicWallet::generate()?;
     let wallet = write_keystore(&path, &phrase, password)?;
     Ok(WalletCreated {
         name: name.to_string(),
@@ -387,11 +388,11 @@ const IMPORT_WARNING: &str = "if this phrase was ever used in another wallet (Me
 /// Checks a phrase before anything else is asked for.
 pub fn check_phrase(phrase: &str) -> Result<Zeroizing<String>> {
     let phrase = normalize_phrase(phrase);
-    HdWallet::from_phrase(&phrase).map_err(|e| WalletError::InvalidPhrase(e.to_string()))?;
+    MnemonicWallet::from_phrase(&phrase).map_err(|e| WalletError::InvalidPhrase(e.to_string()))?;
     Ok(phrase)
 }
 
-/// Encrypts an existing BIP-39 phrase to disk as an HD wallet. With
+/// Encrypts an existing BIP-39 phrase to disk as a mnemonic wallet. With
 /// `start_index`, owner keys start there, above indices used elsewhere.
 pub fn import_wallet(
     ctx: &WalletContext,
@@ -446,9 +447,10 @@ struct WalletListOutput {
 impl Report for WalletListOutput {
     fn human(&self) -> String {
         if self.wallets.is_empty() {
-            return "No HD wallets yet. Create one with `safe wallet new <NAME>`.".to_string();
+            return "No mnemonic wallets yet. Create one with `safe wallet new <NAME>`."
+                .to_string();
         }
-        let mut s = String::from("HD wallets:");
+        let mut s = String::from("mnemonic wallets:");
         for wallet in &self.wallets {
             let _ = write!(s, "\n  {}", wallet.name);
             match wallet.funding_address {
@@ -465,7 +467,7 @@ impl Report for WalletListOutput {
     }
 }
 
-/// The HD wallets on disk, by name.
+/// The mnemonic wallets on disk, by name.
 pub fn list_wallets(ctx: &WalletContext) -> Result<Vec<WalletEntry>> {
     let home = ctx.home()?;
     let dir = paths::wallets_dir(&home);
@@ -498,7 +500,7 @@ pub fn list_wallets(ctx: &WalletContext) -> Result<Vec<WalletEntry>> {
     Ok(wallets)
 }
 
-/// One key of an HD wallet.
+/// One key of a mnemonic wallet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct WalletAddress {
@@ -518,14 +520,14 @@ impl Report for WalletAddress {
 /// address of owner key `index`.
 pub async fn wallet_address(
     ctx: &WalletContext,
-    hd: &HdArgs,
+    owner_keys: &OwnerKeysArgs,
     index: Option<u32>,
 ) -> Result<WalletAddress> {
     let home = ctx.home()?;
     let (index, address) = match index {
-        None | Some(0) => (0, wallet_id(hd, &home).await.map_err(classify)?),
+        None | Some(0) => (0, wallet_id(owner_keys, &home).await.map_err(classify)?),
         Some(index) => {
-            let keys = open_keys(hd, &home, &ctx.console())
+            let keys = open_keys(owner_keys, &home, &ctx.console())
                 .await
                 .map_err(classify)?;
             (index, keys.address(index).await?)
@@ -538,7 +540,7 @@ pub async fn wallet_address(
     })
 }
 
-/// The key at `m/44'/60'/0'/0/{index}` of the HD wallet `wallet` (a name
+/// The key at `m/44'/60'/0'/0/{index}` of the mnemonic wallet `wallet` (a name
 /// under the data directory, or a keystore path) as a signer. Asks `ctx`'s
 /// prompt for the password unless `password` gives it.
 pub fn signer(
@@ -548,7 +550,7 @@ pub fn signer(
     password: &PasswordArgs,
 ) -> Result<alloy::signers::local::PrivateKeySigner> {
     let home = ctx.home()?;
-    hd_key_signer(wallet, index, password, &home, &ctx.console()).map_err(classify)
+    mnemonic_key_signer(wallet, index, password, &home, &ctx.console()).map_err(classify)
 }
 
 fn exposure_label(exposure: Exposure) -> &'static str {
@@ -671,9 +673,12 @@ impl Report for WalletStatus {
 
 /// The wallet's record of used keys, read without taking its lock. Only the
 /// context's Safe, when it has one.
-pub async fn wallet_status(ctx: &WalletContext, hd: &HdArgs) -> Result<WalletStatus> {
+pub async fn wallet_status(
+    ctx: &WalletContext,
+    owner_keys: &OwnerKeysArgs,
+) -> Result<WalletStatus> {
     let home = ctx.home()?;
-    let wallet = wallet_id(hd, &home).await.map_err(classify)?;
+    let wallet = wallet_id(owner_keys, &home).await.map_err(classify)?;
     let state = read_state(&home, wallet)?.unwrap_or_else(|| RotationState::new(wallet, 1));
     let only = ctx.safe.map(|safe| safe.to_string());
     let safes = state
@@ -729,19 +734,19 @@ impl Report for WalletSync {
     }
 }
 
-/// The wallet `hd` names, locked, around the context's Safe (or the wallet's
+/// The wallet `owner_keys` names, locked, around the context's Safe (or the wallet's
 /// sole recorded Safe on the context's chain), with the rotation config
 /// `configure` adjusts.
 async fn open_rotating(
     ctx: &WalletContext,
-    hd: &HdArgs,
+    owner_keys: &OwnerKeysArgs,
     console: &Console,
     multi_send_call_only: Option<Address>,
     timeout: u64,
     configure: impl FnOnce(&mut RotationConfig),
 ) -> Result<(RotatingSafe<HttpProvider, CliKeys>, Address)> {
     let rpc_url = ctx.rpc_url()?;
-    let ring = open_wallet(hd, ctx.home.as_deref(), console)
+    let ring = open_wallet(owner_keys, ctx.home.as_deref(), console)
         .await
         .map_err(classify)?;
     let provider = http_provider(rpc_url);
@@ -763,7 +768,7 @@ pub async fn sync_wallet(ctx: &WalletContext, opts: WalletSyncOpts) -> Result<Wa
     let console = ctx.console();
     let (mut rotating, safe) = open_rotating(
         ctx,
-        &opts.hd,
+        &opts.owner_keys,
         &console,
         opts.multi_send_call_only,
         DEFAULT_TIMEOUT,
@@ -822,9 +827,16 @@ impl Report for WalletSweep {
 /// sent and the ones still owed.
 pub async fn sweep_wallet(ctx: &WalletContext, opts: WalletSweepOpts) -> Result<WalletSweep> {
     let console = ctx.console();
-    let (mut rotating, _) = open_rotating(ctx, &opts.hd, &console, None, opts.timeout, |config| {
-        config.sweep_reserve = opts.sweep_reserve;
-    })
+    let (mut rotating, _) = open_rotating(
+        ctx,
+        &opts.owner_keys,
+        &console,
+        None,
+        opts.timeout,
+        |config| {
+            config.sweep_reserve = opts.sweep_reserve;
+        },
+    )
     .await?;
     rotating.schedule_retired_sweeps().await?;
     let report = rotating.sweep_all().await?;
@@ -903,10 +915,10 @@ pub(crate) async fn run_in(
             wallets: list_wallets(ctx)?,
         }),
         WalletCommand::Address(opts) => {
-            console.emit(&wallet_address(ctx, &opts.hd, opts.index).await?);
+            console.emit(&wallet_address(ctx, &opts.owner_keys, opts.index).await?);
         }
         WalletCommand::Status(opts) => {
-            console.emit(&wallet_status(ctx, &opts.hd).await?);
+            console.emit(&wallet_status(ctx, &opts.owner_keys).await?);
         }
         WalletCommand::Sync(opts) => {
             console.emit(&sync_wallet(ctx, opts).await?);
@@ -995,34 +1007,36 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].funding_address, Some(imported.funding_address));
 
-        let hd = HdArgs {
+        let owner_keys = OwnerKeysArgs {
             mnemonic: Some("demo".to_string()),
-            ..HdArgs::default()
+            ..OwnerKeysArgs::default()
         };
-        let funding = wallet_address(&ctx, &hd, None).await.unwrap();
+        let funding = wallet_address(&ctx, &owner_keys, None).await.unwrap();
         assert_eq!(funding.address, imported.funding_address);
         // An owner key needs the password, which NoPrompt does not give.
-        let refused = wallet_address(&ctx, &hd, Some(1)).await.unwrap_err();
+        let refused = wallet_address(&ctx, &owner_keys, Some(1))
+            .await
+            .unwrap_err();
         assert!(refused.to_string().contains("no prompt"), "{refused}");
-        let wrong = HdArgs {
+        let wrong = OwnerKeysArgs {
             password: PasswordArgs {
                 password_file: None,
                 password: Some("nope".to_string()),
             },
-            ..hd.clone()
+            ..owner_keys.clone()
         };
         let refused = wallet_address(&ctx, &wrong, Some(1)).await.unwrap_err();
         assert!(matches!(refused, WalletError::WrongPassword), "{refused}");
 
-        let status = wallet_status(&ctx, &hd).await.unwrap();
+        let status = wallet_status(&ctx, &owner_keys).await.unwrap();
         assert_eq!(
             status.next_index, 3,
             "--start-index 3 leaves 1 and 2 unused"
         );
 
-        let missing = HdArgs {
+        let missing = OwnerKeysArgs {
             mnemonic: Some("missing".to_string()),
-            ..HdArgs::default()
+            ..OwnerKeysArgs::default()
         };
         let error = wallet_status(&ctx, &missing).await.unwrap_err();
         assert!(matches!(error, WalletError::NotFound { .. }), "{error}");

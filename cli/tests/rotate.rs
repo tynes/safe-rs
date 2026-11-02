@@ -1,4 +1,4 @@
-//! The `safe` binary end to end: an HD wallet, a Safe created with it, sends
+//! The `safe` binary end to end: a mnemonic wallet, a Safe created with it, sends
 //! that rotate the owner, and recovery of lost state.
 //!
 //! Runs against a fresh local Anvil chain with Safe v1.4.1 deployed from the
@@ -24,7 +24,7 @@ use alloy::providers::ext::AnvilApi;
 use alloy::providers::Provider;
 use common::LocalHarness;
 use safe_rs::rotation::{binding_key, OwnerRef, StateFile};
-use safe_rs::{ChainAddresses, HdWallet};
+use safe_rs::{ChainAddresses, MnemonicWallet};
 use serde_json::Value;
 
 /// A BIP-39 test vector, deliberately not Anvil's own phrase.
@@ -113,7 +113,7 @@ fn eth(amount: u64) -> U256 {
 }
 
 fn key(index: u32) -> Address {
-    HdWallet::from_phrase(PHRASE)
+    MnemonicWallet::from_phrase(PHRASE)
         .unwrap()
         .owner_address(index)
         .unwrap()
@@ -167,7 +167,7 @@ async fn rotate_discovers_only_an_unambiguous_recorded_safe() {
     let h = LocalHarness::new().await;
     let dir = tempfile::tempdir().unwrap();
     let cli = discovery_wallet(&h, dir.path());
-    let wallet = HdWallet::from_phrase(PHRASE).unwrap();
+    let wallet = MnemonicWallet::from_phrase(PHRASE).unwrap();
     let path = cli
         .home
         .join("state")
@@ -349,7 +349,7 @@ async fn a_safe_lives_on_one_time_keys_from_creation_to_recovery() {
     write(&cli.password_file, "correct horse battery staple\n");
     let phrase_file = dir.path().join("phrase");
     write(&phrase_file, &format!("{PHRASE}\n"));
-    let funding = HdWallet::from_phrase(PHRASE).unwrap().id();
+    let funding = MnemonicWallet::from_phrase(PHRASE).unwrap().id();
     let password = cli.password_file.to_str().unwrap().to_string();
     let singleton = h.addresses.safe_singleton.to_string();
     let factory = h.addresses.proxy_factory.to_string();
@@ -1006,13 +1006,13 @@ async fn a_rotating_send_names_a_multisend_that_has_no_code() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash() {
+async fn multi_owner_mnemonic_wallet_creation_and_rotation_via_bundle_and_approve_hash() {
     use alloy::signers::local::PrivateKeySigner;
 
     let h = LocalHarness::new().await;
     let dir = tempfile::tempdir().unwrap();
     let cli = discovery_wallet(&h, dir.path());
-    let funding = HdWallet::from_phrase(PHRASE).unwrap().id();
+    let funding = MnemonicWallet::from_phrase(PHRASE).unwrap().id();
     let co_owner = PrivateKeySigner::random();
     let co_owner_key = alloy::primitives::hex::encode_prefixed(co_owner.to_bytes());
     h.fund(funding, eth(1)).await;
@@ -1047,7 +1047,7 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     h.fund(safe, U256::from(1_000)).await;
 
     // 2. Offchain bundle rotation:
-    //    Step A: HD wallet runs `safe send --rotate --bundle rot.json` (1/2 signatures collected)
+    //    Step A: mnemonic wallet runs `safe send --rotate --bundle rot.json` (1/2 signatures collected)
     let recipient = Address::repeat_byte(0x61);
     let bundle_path = dir.path().join("rot.json");
     let bundle_arg = bundle_path.to_str().unwrap();
@@ -1092,7 +1092,7 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     assert_eq!(co_signed["signatures_collected"], 2);
     assert_eq!(co_signed["threshold"], 2);
 
-    //    Step C: HD wallet runs `safe send --rotate --bundle rot.json`: sees 2/2 signatures, executes,
+    //    Step C: mnemonic wallet runs `safe send --rotate --bundle rot.json`: sees 2/2 signatures, executes,
     //            rotates key(1) -> key(2), and sweeps ETH from key(1) -> key(2)!
     let executed = cli
         .wallet_command(&[
@@ -1115,7 +1115,7 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     assert!(balance(&h, key(2)).await > U256::ZERO);
 
     // 3. On-chain --approve-hash rotation via `safe send --rotate`:
-    //    Step A: HD wallet runs
+    //    Step A: mnemonic wallet runs
     //    `safe send --rotate --safe <SAFE> --approve-hash --bundle rot2.json`
     let bundle2_path = dir.path().join("rot2.json");
     let bundle2_arg = bundle2_path.to_str().unwrap();
@@ -1134,7 +1134,7 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     assert_eq!(address(&approved["approver"]), key(2));
     assert_eq!(h.owners(safe).await, vec![key(2), co_owner.address()]);
 
-    //    Step B: Co-owner signs the bundle `--sign-only`, then HD wallet executes
+    //    Step B: Co-owner signs the bundle `--sign-only`, then mnemonic wallet executes
     //    `safe send --rotate`
     cli.run(&[
         "send",
@@ -1167,4 +1167,116 @@ async fn multi_owner_hd_wallet_creation_and_rotation_via_bundle_and_approve_hash
     assert_eq!(h.owners(safe).await, vec![key(3), co_owner.address()]);
     assert_eq!(balance(&h, key(2)).await, U256::ZERO);
     assert!(balance(&h, key(3)).await > U256::ZERO);
+}
+
+/// `send <call> --rotate --bundle` on a bundle that lists calls but has no
+/// prepared transaction yet saves the CLI call into the bundle, so the
+/// co-owner and the final send prepare the same Safe transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rotating_send_adds_its_calls_to_an_unprepared_bundle() {
+    use alloy::signers::local::PrivateKeySigner;
+
+    let h = LocalHarness::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cli = discovery_wallet(&h, dir.path());
+    let funding = HdWallet::from_phrase(PHRASE).unwrap().id();
+    let co_owner = PrivateKeySigner::random();
+    let co_owner_key = alloy::primitives::hex::encode_prefixed(co_owner.to_bytes());
+    h.fund(funding, eth(1)).await;
+    h.fund(co_owner.address(), eth(1)).await;
+
+    let msco = h.addresses.multi_send_call_only.to_string();
+    let created = cli
+        .wallet_command(&[
+            "create",
+            "--owner",
+            &co_owner.address().to_string(),
+            "--threshold",
+            "2",
+            "--singleton",
+            &h.addresses.safe_singleton.to_string(),
+            "--factory",
+            &h.addresses.proxy_factory.to_string(),
+            "--fallback-handler",
+            &h.addresses.fallback_handler.to_string(),
+        ])
+        .json();
+    let safe = address(&created["safe_address"]);
+    let safe_arg = safe.to_string();
+    assert_eq!(h.owners(safe).await, vec![key(1), co_owner.address()]);
+    h.fund(safe, U256::from(1_000)).await;
+
+    // A bundle with one call and no prepared transaction.
+    let first = Address::repeat_byte(0x62);
+    let second = Address::repeat_byte(0x63);
+    let bundle_path = dir.path().join("calls.json");
+    let bundle_arg = bundle_path.to_str().unwrap();
+    write(
+        &bundle_path,
+        &format!(r#"{{"calls":[{{"to":"{first}","value":"10"}}]}}"#),
+    );
+
+    // The HD wallet adds a second call and signs 1 of 2.
+    let saved = cli
+        .wallet_command(&[
+            "send",
+            &second.to_string(),
+            "--value",
+            "25",
+            "--safe",
+            &safe_arg,
+            "--multi-send-call-only",
+            &msco,
+            "--rotate",
+            "--bundle",
+            bundle_arg,
+        ])
+        .json();
+    assert_eq!(saved["signatures_collected"], 1);
+    assert_eq!(saved["threshold"], 2);
+    let bundle: Value =
+        serde_json::from_str(&std::fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    let calls = bundle["calls"].as_array().unwrap();
+    let targets: Vec<Address> = calls.iter().map(|call| address(&call["to"])).collect();
+    assert_eq!(targets, vec![first, second]);
+
+    // The co-owner signs the same transaction. The batch goes through
+    // MultiSendCallOnly, the only batch contract the harness deploys.
+    let co_signed = cli
+        .run(&[
+            "send",
+            "--bundle",
+            bundle_arg,
+            "--sign-only",
+            "--safe",
+            &safe_arg,
+            "--call-only",
+            "--multi-send-call-only",
+            &msco,
+            "--private-key",
+            &co_owner_key,
+            "--rpc-url",
+            h.url().as_str(),
+            "--json",
+        ])
+        .json();
+    assert_eq!(co_signed["signatures_collected"], 2);
+
+    // The HD wallet executes both calls and rotates.
+    let executed = cli
+        .wallet_command(&[
+            "send",
+            "--bundle",
+            bundle_arg,
+            "--safe",
+            &safe_arg,
+            "--multi-send-call-only",
+            &msco,
+            "--rotate",
+        ])
+        .json();
+    assert_eq!(executed["status"], "rotated");
+    assert_eq!(h.owners(safe).await, vec![key(2), co_owner.address()]);
+    assert_eq!(balance(&h, first).await, U256::from(10));
+    assert_eq!(balance(&h, second).await, U256::from(25));
 }

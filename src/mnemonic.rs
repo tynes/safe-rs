@@ -10,7 +10,7 @@
 //! The leaves are not hardened, so the account's extended public key (the
 //! parent public key and chain code) must never be exported: with it, one
 //! recovered child private key yields all the others. Nothing here exposes it,
-//! and [`HdWallet`]'s `Debug` output shows only the funding address.
+//! and [`MnemonicWallet`]'s `Debug` output shows only the funding address.
 
 use alloy::primitives::Address;
 use alloy::signers::local::coins_bip39::{English, Entropy, Mnemonic, Wordlist};
@@ -114,28 +114,28 @@ pub fn phrase_to_entropy(phrase: &str) -> Result<Zeroizing<Vec<u8>>> {
 
 /// Keys derived from one BIP-39 phrase.
 #[derive(Clone)]
-pub struct HdWallet {
+pub struct MnemonicWallet {
     /// The key at `m/44'/60'/0'/0`, from which every index is one step away
     parent: MnemonicKey,
     funding: PrivateKeySigner,
 }
 
-impl std::fmt::Debug for HdWallet {
+impl std::fmt::Debug for MnemonicWallet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never print the parent key: its debug output is an extended key.
-        f.debug_struct("HdWallet")
+        f.debug_struct("MnemonicWallet")
             .field("funding", &self.funding.address())
             .finish_non_exhaustive()
     }
 }
 
-impl HdWallet {
+impl MnemonicWallet {
     /// Creates a wallet from a new random 24-word phrase and returns the phrase.
     pub fn generate() -> Result<(Self, Zeroizing<String>)> {
         Self::generate_with(&mut OsRng)
     }
 
-    /// Like [`HdWallet::generate`], with a caller-supplied random source.
+    /// Like [`MnemonicWallet::generate`], with a caller-supplied random source.
     pub fn generate_with(rng: &mut impl RngCore) -> Result<(Self, Zeroizing<String>)> {
         let mut entropy = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(entropy.as_mut_slice());
@@ -272,14 +272,14 @@ mod tests {
             let message = phrase_to_entropy(phrase).unwrap_err().to_string();
             assert!(!message.contains("abandon"), "{message}");
             assert!(!message.contains("zzzzzz"), "{message}");
-            assert!(HdWallet::from_phrase(phrase).is_err());
+            assert!(MnemonicWallet::from_phrase(phrase).is_err());
         }
         assert!(entropy_to_phrase(&[0u8; 17]).is_err());
     }
 
     #[test]
     fn derived_keys_match_the_standard_path() {
-        let wallet = HdWallet::from_phrase(TEST_PHRASE).unwrap();
+        let wallet = MnemonicWallet::from_phrase(TEST_PHRASE).unwrap();
         // The well-known first account of the test phrase.
         assert_eq!(
             wallet.id(),
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn owner_indices_are_bounded() {
-        let wallet = HdWallet::from_phrase(TEST_PHRASE).unwrap();
+        let wallet = MnemonicWallet::from_phrase(TEST_PHRASE).unwrap();
         assert!(wallet.owner(0).is_err(), "index 0 is the funding key");
         assert!(wallet.owner(MAX_INDEX).is_err(), "hardened range");
         assert!(wallet.owner(MAX_INDEX - 1).is_ok());
@@ -315,9 +315,9 @@ mod tests {
 
     #[test]
     fn generated_wallets_round_trip_through_their_phrase() {
-        let (wallet, phrase) = HdWallet::generate().unwrap();
+        let (wallet, phrase) = MnemonicWallet::generate().unwrap();
         assert_eq!(phrase.split(' ').count(), 24);
-        let again = HdWallet::from_phrase(&phrase).unwrap();
+        let again = MnemonicWallet::from_phrase(&phrase).unwrap();
         assert_eq!(again.id(), wallet.id());
         assert_eq!(
             again.owner_address(1).unwrap(),
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn debug_output_shows_only_the_funding_address() {
-        let wallet = HdWallet::from_phrase(TEST_PHRASE).unwrap();
+        let wallet = MnemonicWallet::from_phrase(TEST_PHRASE).unwrap();
         let debug = format!("{wallet:?}");
         assert!(debug.contains("funding"));
         assert!(!debug.contains("XPriv"));

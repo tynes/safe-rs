@@ -1,4 +1,4 @@
-//! `$SAFE_RS_HOME/config.toml` as the `safe` binary reads it, and HD wallet
+//! `$SAFE_RS_HOME/config.toml` as the `safe` binary reads it, and mnemonic wallet
 //! keys as signers. Nothing here reaches a chain: the RPC URL points at port 9
 //! (discard), and the signer is resolved before any request.
 #![allow(
@@ -82,6 +82,39 @@ fn the_configured_keystore_signs_unless_another_signer_is_given() {
 }
 
 #[test]
+fn send_eoa_ignores_the_configured_safe_but_refuses_a_given_one() {
+    const SAFE: &str = "0x2222222222222222222222222222222222222222";
+    const REFUSED: &str = "--send-eoa sends from the signer's own account";
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("safe = \"{SAFE}\"\n"),
+    )
+    .unwrap();
+
+    let configured = send_eoa(home.path(), &[], &["--private-key", KEY]);
+    assert!(!configured.status.success(), "the RPC is dead");
+    assert!(
+        !stderr(&configured).contains(REFUSED),
+        "the configured Safe should not apply to --send-eoa:\n{}",
+        stderr(&configured)
+    );
+
+    for (envs, args) in [
+        (&[("SAFE_ADDRESS", SAFE)][..], &["--private-key", KEY][..]),
+        (&[][..], &["--private-key", KEY, "--safe", SAFE][..]),
+    ] {
+        let given = send_eoa(home.path(), envs, args);
+        assert!(!given.status.success());
+        assert!(
+            stderr(&given).contains(REFUSED),
+            "{envs:?} {args:?} should be refused with --send-eoa:\n{}",
+            stderr(&given)
+        );
+    }
+}
+
+#[test]
 fn an_invalid_config_file_is_refused_by_name() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(home.path().join("config.toml"), "rpc = 1\n").unwrap();
@@ -95,8 +128,8 @@ fn an_invalid_config_file_is_refused_by_name() {
 }
 
 #[tokio::test]
-async fn every_hd_wallet_key_is_usable_as_a_signer() {
-    use safe_rs_cli::args::{HdArgs, PasswordArgs};
+async fn every_mnemonic_wallet_key_is_usable_as_a_signer() {
+    use safe_rs_cli::args::{OwnerKeysArgs, PasswordArgs};
     use safe_rs_cli::prompt::NoPrompt;
     use safe_rs_cli::wallet::{self, WalletContext};
 
@@ -109,17 +142,17 @@ async fn every_hd_wallet_key_is_usable_as_a_signer() {
         password: Some("correct horse".into()),
         ..PasswordArgs::default()
     };
-    let hd = HdArgs {
+    let owner_keys = OwnerKeysArgs {
         mnemonic: Some("trader".into()),
         password: password.clone(),
-        ..HdArgs::default()
+        ..OwnerKeysArgs::default()
     };
 
     let funding = wallet::signer(&ctx, "trader", 0, &password).unwrap();
     assert_eq!(funding.address(), created.funding_address);
     for index in [1, 3] {
         let signer = wallet::signer(&ctx, "trader", index, &password).unwrap();
-        let expected = wallet::wallet_address(&ctx, &hd, Some(index))
+        let expected = wallet::wallet_address(&ctx, &owner_keys, Some(index))
             .await
             .unwrap();
         assert_eq!(signer.address(), expected.address, "key {index}");
@@ -134,7 +167,9 @@ async fn every_hd_wallet_key_is_usable_as_a_signer() {
         ..Default::default()
     };
     let signer = args.resolve(std::sync::Arc::new(NoPrompt)).await.unwrap();
-    let expected = wallet::wallet_address(&ctx, &hd, Some(3)).await.unwrap();
+    let expected = wallet::wallet_address(&ctx, &owner_keys, Some(3))
+        .await
+        .unwrap();
     assert_eq!(signer.address(), expected.address);
 
     let wrong = PasswordArgs {

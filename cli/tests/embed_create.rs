@@ -39,7 +39,7 @@ enum HostCommand {
     },
     /// A command of the host's own
     Balance,
-    /// The account's HD wallets
+    /// The account's mnemonic wallets
     Wallet {
         #[command(subcommand)]
         command: safe_rs_cli::wallet::WalletCommand,
@@ -127,7 +127,7 @@ async fn options_built_in_code_are_checked_like_flags() {
     assert!(
         matches!(
             error,
-            CreateError::Options(OptionsError::HdOnly { flag: "--no-sweep" })
+            CreateError::Options(OptionsError::RotateOnly { flag: "--no-sweep" })
         ),
         "{error:?}"
     );
@@ -136,13 +136,16 @@ async fn options_built_in_code_are_checked_like_flags() {
         rotate: true,
         ..CreateOpts::default()
     };
-    opts.hd.ledger = true;
+    opts.owner_keys.ledger = true;
     let with_signer = ctx().with_signer(safe_rs_cli::PrivateKeySigner::random());
     let error = safe_rs_cli::create::create(with_signer, opts)
         .await
         .unwrap_err();
     assert!(
-        matches!(error, CreateError::Options(OptionsError::SignerWithHd)),
+        matches!(
+            error,
+            CreateError::Options(OptionsError::SignerWithOwnerKeys)
+        ),
         "{error:?}"
     );
 
@@ -157,12 +160,12 @@ async fn options_built_in_code_are_checked_like_flags() {
     );
 
     let mut opts = CreateOpts::default();
-    opts.hd.mnemonic = Some("demo".into());
+    opts.owner_keys.mnemonic = Some("demo".into());
     let error = safe_rs_cli::create::create(ctx(), opts).await.unwrap_err();
     assert!(
         matches!(
             error,
-            CreateError::Options(OptionsError::CreateHdWithoutRotate)
+            CreateError::Options(OptionsError::CreateOwnerKeysWithoutRotate)
         ),
         "{error:?}"
     );
@@ -178,11 +181,11 @@ async fn a_plain_create_needs_a_signer() {
     assert!(!error.may_be_pending());
 }
 
-/// A signer with an HD wallet left in the options (as a config-file
+/// A signer with a mnemonic wallet left in the options (as a config-file
 /// `mnemonic` gives) but no `--rotate` is a plain create with that signer: it
 /// reaches the RPC (port 9, discard) rather than opening the wallet.
 #[tokio::test]
-async fn hd_keys_without_rotate_make_a_plain_create() {
+async fn owner_keys_without_rotate_make_a_plain_create() {
     let home = tempfile::tempdir().unwrap();
     let ctx = CreateContext::new("http://127.0.0.1:9".parse().unwrap())
         .with_prompt(NoPrompt)
@@ -192,7 +195,7 @@ async fn hd_keys_without_rotate_make_a_plain_create() {
         compute_only: true,
         ..CreateOpts::default()
     };
-    opts.hd.mnemonic = Some("demo".into());
+    opts.owner_keys.mnemonic = Some("demo".into());
     let error = safe_rs_cli::create::create(ctx, opts).await.unwrap_err();
     assert!(
         matches!(error, CreateError::Safe(_) | CreateError::Rpc(_)),

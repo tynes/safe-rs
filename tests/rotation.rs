@@ -29,7 +29,7 @@ use safe_rs::rotation::{
     RotationStatus, StateFile, SEND_LOOKAHEAD, SETUP_LOOKAHEAD,
 };
 use safe_rs::{
-    broadcast_raw, sign_outer_tx, wait_for_receipt, BroadcastOutcome, Call, Error, HdWallet,
+    broadcast_raw, sign_outer_tx, wait_for_receipt, BroadcastOutcome, Call, Error, MnemonicWallet,
     Operation, OuterTxParams, ReceiptWait,
 };
 
@@ -38,8 +38,8 @@ const PHRASE: &str = "legal winner thank year wave sausage worth useful legal wi
 
 type Rotating = RotatingSafe<DynProvider<AnyNetwork>>;
 
-fn wallet() -> HdWallet {
-    HdWallet::from_phrase(PHRASE).unwrap()
+fn wallet() -> MnemonicWallet {
+    MnemonicWallet::from_phrase(PHRASE).unwrap()
 }
 
 fn eth(amount: u64) -> U256 {
@@ -1213,7 +1213,7 @@ async fn every_retired_key_that_holds_eth_is_swept_on_request() {
 /// A phrase wallet that counts how often each key's address is asked for:
 /// a stand-in for a hardware wallet, where every question is a round trip.
 struct CountingKeys {
-    inner: HdWallet,
+    inner: MnemonicWallet,
     asked: std::sync::Mutex<std::collections::BTreeMap<u32, u32>>,
 }
 

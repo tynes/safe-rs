@@ -24,7 +24,7 @@ use crate::keys::CliKeys;
 use crate::output::Report;
 use crate::signers::{create_payer, open_wallet};
 
-/// `--same-as <CHAIN_ID>:<SAFE>`: a Safe an HD wallet created on another chain.
+/// `--same-as <CHAIN_ID>:<SAFE>`: a Safe a mnemonic wallet created on another chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SameAs {
     pub chain_id: u64,
@@ -62,7 +62,7 @@ pub fn parse_same_as(value: &str) -> Result<SameAs, String> {
 
 /// The result of `safe create --rotate`.
 #[derive(Serialize)]
-pub(super) struct HdCreateOutput {
+pub(super) struct RotatingCreateOutput {
     pub(super) safe_address: Address,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) tx_hash: Option<TxHash>,
@@ -80,7 +80,7 @@ pub(super) struct HdCreateOutput {
     pub(super) warnings: Vec<String>,
 }
 
-impl Report for HdCreateOutput {
+impl Report for RotatingCreateOutput {
     fn human(&self) -> String {
         let mut s = format!("Safe Address: {}", self.safe_address);
         if self.already_deployed {
@@ -187,7 +187,7 @@ pub(super) async fn create(
     console: &Console,
 ) -> Result<CreateOutcome, CreateError> {
     let explicit_payer = create_payer(&opts.gas_payer, console).await?;
-    let mut ring = open_wallet(&opts.hd, ctx.home.as_deref(), console).await?;
+    let mut ring = open_wallet(&opts.owner_keys, ctx.home.as_deref(), console).await?;
     let provider = http_provider(&ctx.rpc_url);
     let chain_id = provider.get_chain_id().await?;
     let funded_by_wallet = explicit_payer.is_none();

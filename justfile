@@ -34,7 +34,7 @@ check-features:
     cargo clippy -p safe-rs --lib --no-default-features -- -D warnings
     cargo clippy -p safe-rs --lib -- -D warnings
     cargo clippy -p safe-rs --lib --no-default-features --features keystore -- -D warnings
-    cargo clippy -p safe-rs --lib --no-default-features --features hd-wallet -- -D warnings
+    cargo clippy -p safe-rs --lib --no-default-features --features mnemonic -- -D warnings
     cargo clippy -p safe-rs --lib --no-default-features --features ledger -- -D warnings
     cargo clippy -p safe-rs-cli --lib --bins -- -D warnings
     cargo clippy -p safe-rs-cli --lib --bins --no-default-features -- -D warnings
