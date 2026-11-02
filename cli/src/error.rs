@@ -125,7 +125,7 @@ pub enum SendError {
     #[error(transparent)]
     Options(#[from] OptionsError),
     /// Neither a signer nor a payer to send with
-    #[error("No wallet specified. Use --private-key, --keystore or --interactive")]
+    #[error("No wallet specified. Use {}", crate::signers::SIGNER_FLAGS_HELP)]
     NoSigner,
     /// No calls were given and the bundle holds none
     #[error("No calls specified")]
@@ -262,10 +262,7 @@ pub enum CreateError {
     #[error(transparent)]
     Options(#[from] OptionsError),
     /// No signer, and no `--rotate` keys to take the owner from
-    #[error(
-        "No wallet specified. Use --private-key, --keystore, --account, --mnemonic, --ledger, \
-         --trezor, --aws, --gcp, --turnkey or --interactive"
-    )]
+    #[error("No wallet specified. Use {}", crate::signers::SIGNER_FLAGS_HELP)]
     NoSigner,
     /// A zero-address owner, or a threshold outside 1..=owners
     #[error("{0}")]

@@ -1,20 +1,24 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use color_eyre::eyre::{bail, eyre, Result, WrapErr};
 use foundry_wallets::wallet_raw::RawWalletOpts;
 use foundry_wallets::{WalletOpts, WalletSigner};
-use safe_rs::keystore::decrypt_keystore;
+use safe_rs::keystore::{decrypt_keystore, keystore_address};
+use safe_rs::rotation::{KeySource, Keyring, StateFile};
+use safe_rs::HdWallet;
 use zeroize::Zeroizing;
 
 use crate::any_signer::AnySigner;
-use crate::cli::{GasPayerArgs, PasswordArgs, SignerArgs};
+use crate::cli::{GasPayerArgs, HdArgs, PasswordArgs, SignerArgs};
 use crate::console::Console;
+use crate::keys::CliKeys;
 use crate::paths;
-pub use hd::*;
 
 /// The flags that name a key, for the message when none is given.
-const SIGNER_FLAGS_HELP: &str = "--private-key, --keystore, --account, --mnemonic, --ledger, \
+pub(crate) const SIGNER_FLAGS_HELP: &str =
+    "--private-key, --keystore, --account, --mnemonic, --ledger, \
      --trezor, --aws, --gcp, --turnkey or --interactive";
 
 /// The signer the options name, as `cast` resolves them: a hardware wallet
@@ -65,7 +69,7 @@ async fn resolve(args: &SignerArgs, console: &Console) -> Result<AnySigner> {
         return private_key_signer(key);
     }
     if let Some(mnemonic) = &args.mnemonic {
-        let phrase = mnemonic_phrase(mnemonic, &args.password, None, console)?;
+        let phrase = mnemonic_phrase(mnemonic, &args.password, console)?;
         let signer = WalletSigner::from_mnemonic(
             &phrase,
             args.mnemonic_passphrase.as_deref(),
@@ -99,7 +103,7 @@ impl SignerArgs {
         &self,
         prompt: std::sync::Arc<dyn crate::prompt::Prompt>,
     ) -> Result<AnySigner> {
-        let console = Console::new(std::sync::Arc::new(crate::log::NoopLogger), prompt);
+        let console = Console::with_prompt(prompt);
         create_signer(self, &console).await
     }
 }
@@ -111,7 +115,7 @@ impl GasPayerArgs {
         &self,
         prompt: std::sync::Arc<dyn crate::prompt::Prompt>,
     ) -> Result<Option<AnySigner>> {
-        let console = Console::new(std::sync::Arc::new(crate::log::NoopLogger), prompt);
+        let console = Console::with_prompt(prompt);
         create_payer(self, &console).await
     }
 }
@@ -136,10 +140,9 @@ fn private_key_signer(key: &str) -> Result<AnySigner> {
 /// path of a mnemonic keystore, or a name under the data directory, which a
 /// phrase of 12 or more words can never be), any other file (read as the
 /// phrase, as `cast` does), or else the phrase itself.
-pub(crate) fn mnemonic_phrase(
+fn mnemonic_phrase(
     value: &str,
     password: &PasswordArgs,
-    home: Option<&Path>,
     console: &Console,
 ) -> Result<Zeroizing<String>> {
     let path = Path::new(value);
@@ -152,7 +155,7 @@ pub(crate) fn mnemonic_phrase(
         return Ok(normalize(&text));
     }
     if !value.trim().contains(char::is_whitespace) {
-        let wallet = paths::wallet_file(&paths::home_or(home)?, value.trim());
+        let wallet = paths::wallet_file(&paths::home()?, value.trim());
         if wallet.is_file() {
             let text = std::fs::read_to_string(&wallet)
                 .wrap_err_with(|| format!("cannot read HD wallet {}", wallet.display()))?;
@@ -231,173 +234,156 @@ pub fn read_password(
     Ok(console.secret(label)?)
 }
 
-/// Keys and state for the rotating owner keys: `--mnemonic` and `--ledger`
-/// under `--rotate`, and `safe wallet`.
-mod hd {
-    use std::path::{Path, PathBuf};
+// Keys and state for the rotating owner keys: `--mnemonic` and `--ledger`
+// under `--rotate`, and `safe wallet`. `home` is the data directory.
 
-    use alloy::primitives::Address;
-    use alloy::signers::local::PrivateKeySigner;
-    use color_eyre::eyre::{bail, eyre, Result, WrapErr};
-    use safe_rs::keystore::keystore_address;
-    use safe_rs::rotation::{KeySource, Keyring, StateFile};
-    use safe_rs::HdWallet;
-    use zeroize::Zeroizing;
-
-    use super::read_password;
-    use crate::cli::{HdArgs, PasswordArgs};
-    use crate::console::Console;
-    use crate::keys::CliKeys;
-    use crate::paths;
-
-    /// A password for a new keystore: asked twice unless supplied.
-    pub fn new_password(args: &PasswordArgs, console: &Console) -> Result<Zeroizing<String>> {
-        let supplied = args.password_file.is_some() || args.password.is_some();
-        let password = read_password(args, "New wallet password: ", console)?;
-        if !supplied {
-            let again = console.secret("Repeat password: ")?;
-            if *again != *password {
-                bail!("the passwords do not match");
-            }
+/// A password for a new keystore: asked twice unless supplied.
+pub fn new_password(args: &PasswordArgs, console: &Console) -> Result<Zeroizing<String>> {
+    let supplied = args.password_file.is_some() || args.password.is_some();
+    let password = read_password(args, "New wallet password: ", console)?;
+    if !supplied {
+        let again = console.secret("Repeat password: ")?;
+        if *again != *password {
+            bail!("the passwords do not match");
         }
-        Ok(password)
     }
+    Ok(password)
+}
 
-    /// Checks a new wallet password, returning the warnings it raises.
-    pub fn check_new_password(password: &str) -> Result<Vec<String>> {
-        if password.is_empty() {
-            bail!("the wallet password must not be empty");
-        }
-        let mut warnings = Vec::new();
-        if !password.is_ascii() {
-            warnings.push(
-                "the password has non-ASCII characters; other tools normalize them \
-                 differently and may not open this keystore"
-                    .to_string(),
-            );
-        }
-        Ok(warnings)
+/// Checks a new wallet password, returning the warnings it raises.
+pub fn check_new_password(password: &str) -> Result<Vec<String>> {
+    if password.is_empty() {
+        bail!("the wallet password must not be empty");
     }
-
-    /// The wallet `--mnemonic` / `--ledger` chose.
-    #[derive(Debug, PartialEq, Eq)]
-    pub enum KeyChoice {
-        /// A connected Ledger
-        Ledger,
-        /// An HD wallet keystore file
-        Phrase(PathBuf),
+    let mut warnings = Vec::new();
+    if !password.is_ascii() {
+        warnings.push(
+            "the password has non-ASCII characters; other tools normalize them \
+             differently and may not open this keystore"
+                .to_string(),
+        );
     }
+    Ok(warnings)
+}
 
-    /// Which wallet the options name. `--ledger` wins, so a `mnemonic` left
-    /// in the config file does not get in its way.
-    pub fn key_choice(hd: &HdArgs, home: &Path) -> Result<KeyChoice> {
-        if hd.ledger {
-            return Ok(KeyChoice::Ledger);
-        }
-        let wallet = hd
-            .mnemonic
-            .as_deref()
-            .ok_or_else(|| eyre!("no wallet given: pass --mnemonic <NAME|PATH> or --ledger"))?;
-        Ok(KeyChoice::Phrase(paths::wallet_file(home, wallet)))
+/// The wallet `--mnemonic` / `--ledger` chose.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyChoice {
+    /// A connected Ledger
+    Ledger,
+    /// An HD wallet keystore file
+    Phrase(PathBuf),
+}
+
+/// Which wallet the options name. `--ledger` wins, so a `mnemonic` left
+/// in the config file does not get in its way.
+pub fn key_choice(hd: &HdArgs, home: &Path) -> Result<KeyChoice> {
+    if hd.ledger {
+        return Ok(KeyChoice::Ledger);
     }
+    let wallet = hd
+        .mnemonic
+        .as_deref()
+        .ok_or_else(|| eyre!("no wallet given: pass --mnemonic <NAME|PATH> or --ledger"))?;
+    Ok(KeyChoice::Phrase(paths::wallet_file(home, wallet)))
+}
 
-    fn read_wallet_file(path: &Path) -> Result<String> {
-        std::fs::read_to_string(path).map_err(|e| {
-            let report = if e.kind() == std::io::ErrorKind::NotFound {
-                color_eyre::eyre::Report::new(crate::wallet::MissingWallet(path.to_path_buf()))
-            } else {
-                color_eyre::eyre::Report::new(e)
-            };
-            report.wrap_err(format!(
-                "cannot read HD wallet {} (create one with `safe wallet new`)",
-                path.display()
-            ))
-        })
-    }
+fn read_wallet_file(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).map_err(|e| {
+        let report = if e.kind() == std::io::ErrorKind::NotFound {
+            color_eyre::eyre::Report::new(crate::wallet::MissingWallet(path.to_path_buf()))
+        } else {
+            color_eyre::eyre::Report::new(e)
+        };
+        report.wrap_err(format!(
+            "cannot read HD wallet {} (create one with `safe wallet new`)",
+            path.display()
+        ))
+    })
+}
 
-    /// Decrypts the HD wallet at `path`.
-    fn load_phrase(path: &Path, password: &PasswordArgs, console: &Console) -> Result<HdWallet> {
-        let json = read_wallet_file(path)?;
-        let password = read_password(
-            password,
-            &format!("Password for {}: ", path.display()),
+/// Decrypts the HD wallet at `path`.
+fn load_phrase(path: &Path, password: &PasswordArgs, console: &Console) -> Result<HdWallet> {
+    let json = read_wallet_file(path)?;
+    let password = read_password(
+        password,
+        &format!("Password for {}: ", path.display()),
+        console,
+    )?;
+    HdWallet::from_keystore_json(&json, password.as_bytes())
+        .wrap_err_with(|| format!("cannot open HD wallet {}", path.display()))
+}
+
+async fn connect_ledger() -> Result<CliKeys> {
+    Ok(CliKeys::Ledger(safe_rs::LedgerKeys::connect().await?))
+}
+
+/// The keys `--mnemonic` / `--ledger` chose. A phrase is decrypted (asking
+/// for its password); a Ledger is connected (never asking for a password).
+pub async fn open_keys(hd: &HdArgs, home: &Path, console: &Console) -> Result<CliKeys> {
+    match key_choice(hd, home)? {
+        KeyChoice::Ledger => connect_ledger().await,
+        KeyChoice::Phrase(path) => Ok(CliKeys::Phrase(Box::new(load_phrase(
+            &path,
+            &hd.password,
             console,
-        )?;
-        HdWallet::from_keystore_json(&json, password.as_bytes())
-            .wrap_err_with(|| format!("cannot open HD wallet {}", path.display()))
+        )?))),
     }
+}
 
-    async fn connect_ledger() -> Result<CliKeys> {
-        Ok(CliKeys::Ledger(safe_rs::LedgerKeys::connect().await?))
-    }
+/// The key at `m/44'/60'/0'/0/{index}` of the HD wallet `wallet` (a name
+/// under `home` or a keystore path), decrypting the wallet with `password`
+/// or the prompt.
+pub fn hd_key_signer(
+    wallet: &str,
+    index: u32,
+    password: &PasswordArgs,
+    home: &Path,
+    console: &Console,
+) -> Result<PrivateKeySigner> {
+    let path = paths::wallet_file(home, wallet);
+    let wallet = load_phrase(&path, password, console)?;
+    Ok(wallet.key_at(index)?)
+}
 
-    /// The keys `--mnemonic` / `--ledger` chose. A phrase is decrypted (asking
-    /// for its password); a Ledger is connected (never asking for a password).
-    pub async fn open_keys(hd: &HdArgs, home: Option<&Path>, console: &Console) -> Result<CliKeys> {
-        match key_choice(hd, &paths::home_or(home)?)? {
-            KeyChoice::Ledger => connect_ledger().await,
-            KeyChoice::Phrase(path) => Ok(CliKeys::Phrase(Box::new(load_phrase(
-                &path,
-                &hd.password,
-                console,
-            )?))),
-        }
+/// The wallet's funding address, which identifies it: read from the keystore
+/// without its password, or asked of the Ledger.
+pub async fn wallet_id(hd: &HdArgs, home: &Path) -> Result<Address> {
+    match key_choice(hd, home)? {
+        KeyChoice::Ledger => Ok(connect_ledger().await?.address(0).await?),
+        KeyChoice::Phrase(path) => keystore_address(&read_wallet_file(&path)?)?
+            .ok_or_else(|| eyre!("{} has no address field", path.display())),
     }
+}
 
-    /// The key at `m/44'/60'/0'/0/{index}` of the HD wallet `wallet` (a name
-    /// under `home`, default the data directory, or a keystore path),
-    /// decrypting the wallet with `password` or the prompt.
-    pub fn hd_key_signer(
-        wallet: &str,
-        index: u32,
-        password: &PasswordArgs,
-        home: Option<&Path>,
-        console: &Console,
-    ) -> Result<PrivateKeySigner> {
-        let path = paths::wallet_file(&paths::home_or(home)?, wallet);
-        let wallet = load_phrase(&path, password, console)?;
-        Ok(wallet.key_at(index)?)
-    }
+/// Opens and locks the rotation state of the wallet whose key 0 is `wallet_id`.
+pub fn open_state(wallet_id: Address, home: &Path) -> Result<StateFile> {
+    let path = paths::state_file(home, wallet_id);
+    StateFile::open(&path, wallet_id).map_err(|e| match e {
+        safe_rs::Error::StateLocked(_) => color_eyre::eyre::Report::new(e).wrap_err(format!(
+            "another safe command is using this HD wallet ({} is locked); wait for it to finish",
+            path.display()
+        )),
+        other => eyre!(other),
+    })
+}
 
-    /// The wallet's funding address, which identifies it: read from the keystore
-    /// without its password, or asked of the Ledger.
-    pub async fn wallet_id(hd: &HdArgs, home: Option<&Path>) -> Result<Address> {
-        match key_choice(hd, &paths::home_or(home)?)? {
-            KeyChoice::Ledger => Ok(connect_ledger().await?.address(0).await?),
-            KeyChoice::Phrase(path) => keystore_address(&read_wallet_file(&path)?)?
-                .ok_or_else(|| eyre!("{} has no address field", path.display())),
-        }
-    }
-
-    /// Opens and locks the rotation state of the wallet whose key 0 is `wallet_id`.
-    pub fn open_state(wallet_id: Address, home: Option<&Path>) -> Result<StateFile> {
-        let path = paths::state_file(&paths::home_or(home)?, wallet_id);
-        StateFile::open(&path, wallet_id).map_err(|e| match e {
-            safe_rs::Error::StateLocked(_) => color_eyre::eyre::Report::new(e).wrap_err(format!(
-                "another safe command is using this HD wallet ({} is locked); wait for it to finish",
-                path.display()
-            )),
-            other => eyre!(other),
-        })
-    }
-
-    /// The wallet `--mnemonic` / `--ledger` chose, paired with its locked state.
-    pub async fn open_wallet(
-        hd: &HdArgs,
-        home: Option<&Path>,
-        console: &Console,
-    ) -> Result<Keyring<CliKeys>> {
-        let keys = open_keys(hd, home, console).await?;
-        let store = open_state(keys.address(0).await?, home)?;
-        Ok(Keyring::open(keys, store).await?)
-    }
+/// The wallet `--mnemonic` / `--ledger` chose, paired with its locked state.
+/// `home` defaults to the data directory.
+pub async fn open_wallet(
+    hd: &HdArgs,
+    home: Option<&Path>,
+    console: &Console,
+) -> Result<Keyring<CliKeys>> {
+    let home = paths::home_or(home)?;
+    let keys = open_keys(hd, &home, console).await?;
+    let store = open_state(keys.address(0).await?, &home)?;
+    Ok(Keyring::open(keys, store).await?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::HdArgs;
-    use safe_rs::HdWallet;
 
     #[test]
     fn ledger_wins_over_a_configured_hd_wallet() {

@@ -12,18 +12,14 @@
 //! The CLI draws no conclusions of its own: what a policy allows is up to the
 //! host. Without a policy, none of this runs.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use alloy::primitives::{Address, U256};
-use alloy::sol_types::SolCall;
 use safe_rs::{Call, ForkSession, ISafe, PreparedSafeTx, RotationPlan, SafeState};
 use url::Url;
 
 use crate::cli::SendOpts;
 
 /// A boxed future, for [`SafePolicy::check_async`].
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub use crate::commands::create::BoxFuture;
 
 /// The Safe's owners, threshold and implementation, as a policy sees them
 /// after the transaction.
@@ -38,7 +34,8 @@ pub struct SafeSnapshot {
 }
 
 impl SafeSnapshot {
-    /// A snapshot, for testing a policy.
+    /// A snapshot of these parts, such as the owners a rotation must leave,
+    /// or one to test a policy with.
     pub fn new(safe: Address, owners: Vec<Address>, threshold: U256, singleton: Address) -> Self {
         Self {
             safe,
@@ -60,18 +57,9 @@ impl SafeSnapshot {
 
     /// Reads the Safe from the simulated post-state.
     pub(crate) fn read(post: &mut ForkSession, safe: Address) -> safe_rs::Result<Self> {
-        fn call<C: SolCall>(
-            post: &mut ForkSession,
-            safe: Address,
-            call: &C,
-        ) -> safe_rs::Result<C::Return> {
-            let out = post.call(Address::ZERO, safe, call.abi_encode().into())?;
-            C::abi_decode_returns(&out).map_err(|e| safe_rs::Error::Abi(e.to_string()))
-        }
-        let owners = call(post, safe, &ISafe::getOwnersCall {})?;
-        let threshold = call(post, safe, &ISafe::getThresholdCall {})?;
-        let slot0 = call(
-            post,
+        let owners = post.call_sol(safe, &ISafe::getOwnersCall {})?;
+        let threshold = post.call_sol(safe, &ISafe::getThresholdCall {})?;
+        let slot0 = post.call_sol(
             safe,
             &ISafe::getStorageAtCall {
                 offset: U256::ZERO,

@@ -32,21 +32,18 @@ use common::{
 use safe_rs::inspect::{enumerate_modules, read_safe_state, ReadSafeStateOptions};
 use safe_rs::rotation::{check_post_state, plan_rotation};
 use safe_rs::{
-    broadcast_raw, decode_safe_outcome, sign_outer_tx, simulate_exec, submit_and_wait,
-    wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder, ChainAddresses, ChainConfig,
-    Eoa, Error, ForkSession, ForkSimulator, ISafe, Operation, OuterTxParams, ParentHeader,
-    PreparedSafeTx, ReceiptWait, Safe, SafeExecutionOutcome, SafeTxGasPolicy, SimTx,
-    SimulationResult, SpecId, Submission, TxChecks, WalletBuilder, WalletConfig,
+    broadcast_raw, decode_safe_outcome, receipt_logs, sign_outer_tx, simulate_exec,
+    submit_and_wait, wait_for_receipt, Account, BroadcastOutcome, Call, CallBuilder,
+    ChainAddresses, ChainConfig, Eoa, Error, ForkSession, ForkSimulator, ISafe, Operation,
+    OuterTxParams, ParentHeader, PreparedSafeTx, ReceiptWait, Safe, SafeExecutionOutcome,
+    SafeTxGasPolicy, SimTx, SimulationResult, SpecId, Submission, TxChecks, WalletBuilder,
+    WalletConfig,
 };
 use tokio::net::{TcpListener, TcpStream};
 
 /// Gas limit used for outer transactions in these tests (fixed so that failing
 /// transactions can still be mined).
 const OUTER_GAS: u64 = 600_000;
-
-fn logs(receipt: &alloy::network::AnyTransactionReceipt) -> Vec<alloy::primitives::Log> {
-    safe_rs::receipt_logs(receipt)
-}
 
 async fn session_at_latest(h: &LocalHarness) -> ForkSession {
     ForkSession::fork_next_block(
@@ -109,7 +106,7 @@ async fn raw_outer_tx_hash_matches_node_hash_and_executes() {
     let receipt = h.send(&outer).await;
     assert_eq!(receipt.transaction_hash, outer.tx_hash);
     assert!(receipt.inner.inner.status());
-    assert!(decode_safe_outcome(&logs(&receipt), safe, prepared.safe_tx_hash).is_success());
+    assert!(decode_safe_outcome(&receipt_logs(&receipt), safe, prepared.safe_tx_hash).is_success());
     assert_eq!(
         h.provider.get_balance(recipient).await.unwrap(),
         U256::from(123)
@@ -242,7 +239,7 @@ async fn strict_session_simulates_exact_signed_outer_tx() {
     let simulated = session.transact_commit(strict_tx(&outer)).unwrap();
     assert!(simulated.success);
     let receipt = h.send(&outer).await;
-    let mined_logs = logs(&receipt);
+    let mined_logs = receipt_logs(&receipt);
     assert_eq!(
         simulated.logs, mined_logs,
         "simulated logs must match the mined transaction"
@@ -327,7 +324,7 @@ async fn nonzero_safe_tx_gas_inner_failure_emits_execution_failure_and_bumps_non
     let receipt = h.send(&outer).await;
     assert!(receipt.inner.inner.status(), "outer transaction succeeds");
     assert_eq!(
-        decode_safe_outcome(&logs(&receipt), safe, prepared.safe_tx_hash),
+        decode_safe_outcome(&receipt_logs(&receipt), safe, prepared.safe_tx_hash),
         SafeExecutionOutcome::Failure {
             payment: U256::ZERO
         }
@@ -642,7 +639,7 @@ async fn broadcast_then_timeout_returns_hash_then_mined() {
     let ReceiptWait::Mined(receipt) = waited else {
         panic!("expected a receipt")
     };
-    assert!(decode_safe_outcome(&logs(&receipt), safe, prepared.safe_tx_hash).is_success());
+    assert!(decode_safe_outcome(&receipt_logs(&receipt), safe, prepared.safe_tx_hash).is_success());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -726,7 +723,10 @@ async fn builder_executes_exactly_the_simulated_safe_tx() {
         .await
         .unwrap()
         .unwrap();
-    assert!(decode_safe_outcome(&logs(&receipt), safe_address, prepared.safe_tx_hash).is_success());
+    assert!(
+        decode_safe_outcome(&receipt_logs(&receipt), safe_address, prepared.safe_tx_hash)
+            .is_success()
+    );
     assert_eq!(
         h.provider.get_balance(recipient).await.unwrap(),
         U256::from(15)
@@ -897,7 +897,10 @@ async fn builder_refuses_a_batch_whose_target_has_no_code() {
     .unwrap();
     let outer = h.sign_exec(&prepared, OUTER_GAS).await;
     let receipt = h.send(&outer).await;
-    assert!(decode_safe_outcome(&logs(&receipt), safe_address, prepared.safe_tx_hash).is_success());
+    assert!(
+        decode_safe_outcome(&receipt_logs(&receipt), safe_address, prepared.safe_tx_hash)
+            .is_success()
+    );
     assert_eq!(
         h.provider.get_balance(recipient).await.unwrap(),
         U256::from(25)
@@ -1204,7 +1207,9 @@ async fn rotation_swaps_the_sole_owner_after_the_user_calls() {
     check_post_state(&mut post, &plan).unwrap();
 
     let receipt = h.send(&outer).await;
-    assert!(decode_safe_outcome(&logs(&receipt), safe, plan.prepared.safe_tx_hash).is_success());
+    assert!(
+        decode_safe_outcome(&receipt_logs(&receipt), safe, plan.prepared.safe_tx_hash).is_success()
+    );
     assert_eq!(h.owners(safe).await, vec![next]);
     assert_eq!(
         h.provider.get_balance(recipient).await.unwrap(),
@@ -1347,7 +1352,7 @@ async fn a_separate_payer_sends_what_the_owner_signed() {
         panic!("expected a receipt, got {submission:?}")
     };
     assert_eq!(receipt.from, payer.address());
-    assert!(decode_safe_outcome(&logs(&receipt), safe, prepared.safe_tx_hash).is_success());
+    assert!(decode_safe_outcome(&receipt_logs(&receipt), safe, prepared.safe_tx_hash).is_success());
     assert_eq!(
         h.provider
             .get_transaction_count(h.owner.address())

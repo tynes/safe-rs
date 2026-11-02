@@ -40,6 +40,28 @@ pub struct OuterTxParams {
 }
 
 impl OuterTxParams {
+    /// A transaction to `to` with no value or calldata.
+    fn base(
+        chain_id: u64,
+        from: Address,
+        to: Address,
+        nonce: u64,
+        gas_limit: u64,
+        fees: Eip1559Estimation,
+    ) -> Self {
+        Self {
+            chain_id,
+            from,
+            nonce,
+            gas_limit,
+            max_fee_per_gas: fees.max_fee_per_gas,
+            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
+            to,
+            value: U256::ZERO,
+            input: Bytes::new(),
+        }
+    }
+
     /// The outer transaction that submits `signed` through `execTransaction` on
     /// its Safe, on the Safe transaction's chain, with no value.
     pub fn exec_transaction(
@@ -49,16 +71,17 @@ impl OuterTxParams {
         gas_limit: u64,
         fees: Eip1559Estimation,
     ) -> Self {
+        let prepared = &signed.prepared;
         Self {
-            chain_id: signed.prepared.chain_id,
-            from,
-            nonce,
-            gas_limit,
-            max_fee_per_gas: fees.max_fee_per_gas,
-            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
-            to: signed.prepared.safe,
-            value: U256::ZERO,
             input: signed.exec_calldata(),
+            ..Self::base(
+                prepared.chain_id,
+                from,
+                prepared.safe,
+                nonce,
+                gas_limit,
+                fees,
+            )
         }
     }
 
@@ -73,15 +96,8 @@ impl OuterTxParams {
         fees: Eip1559Estimation,
     ) -> Self {
         Self {
-            chain_id,
-            from,
-            nonce,
-            gas_limit,
-            max_fee_per_gas: fees.max_fee_per_gas,
-            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
-            to: safe,
-            value: U256::ZERO,
             input: SignedSafeTx::approve_hash_calldata(safe_tx_hash),
+            ..Self::base(chain_id, from, safe, nonce, gas_limit, fees)
         }
     }
 
@@ -96,15 +112,8 @@ impl OuterTxParams {
         fees: Eip1559Estimation,
     ) -> Self {
         Self {
-            chain_id,
-            from,
-            nonce,
-            gas_limit,
-            max_fee_per_gas: fees.max_fee_per_gas,
-            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
-            to,
             value,
-            input: Bytes::new(),
+            ..Self::base(chain_id, from, to, nonce, gas_limit, fees)
         }
     }
 
@@ -121,15 +130,9 @@ impl OuterTxParams {
         fees: Eip1559Estimation,
     ) -> Self {
         Self {
-            chain_id,
-            from,
-            nonce,
-            gas_limit,
-            max_fee_per_gas: fees.max_fee_per_gas,
-            max_priority_fee_per_gas: fees.max_priority_fee_per_gas,
-            to: call.to,
             value: call.value,
             input: call.data.clone(),
+            ..Self::base(chain_id, from, call.to, nonce, gas_limit, fees)
         }
     }
 
