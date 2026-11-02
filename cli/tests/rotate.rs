@@ -1179,7 +1179,7 @@ async fn a_rotating_send_adds_its_calls_to_an_unprepared_bundle() {
     let h = LocalHarness::new().await;
     let dir = tempfile::tempdir().unwrap();
     let cli = discovery_wallet(&h, dir.path());
-    let funding = HdWallet::from_phrase(PHRASE).unwrap().id();
+    let funding = MnemonicWallet::from_phrase(PHRASE).unwrap().id();
     let co_owner = PrivateKeySigner::random();
     let co_owner_key = alloy::primitives::hex::encode_prefixed(co_owner.to_bytes());
     h.fund(funding, eth(1)).await;
