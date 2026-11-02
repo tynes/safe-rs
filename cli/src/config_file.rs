@@ -6,7 +6,7 @@
 //!
 //! ```toml
 //! rpc_url = "https://polygon.drpc.org"          # --rpc-url, ETH_RPC_URL
-//! safe = "0x…"                                  # --safe, SAFE_ADDRESS
+//! safe = "0x…"                                  # --safe, SAFE_ADDRESS (not --send-eoa)
 //! password_file = "/home/me/.safe-rs/password"  # --password-file, ETH_PASSWORD
 //! keystore = "/home/me/.foundry/keystores/me"   # --keystore, ETH_KEYSTORE
 //! account = "me"                                # --account, ETH_KEYSTORE_ACCOUNT

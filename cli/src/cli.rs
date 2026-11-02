@@ -231,7 +231,8 @@ pub struct SendArgs {
 pub struct EoaArgs {
     /// Send each call from the signer's own account, one transaction per
     /// call, instead of through a Safe. Refuses --safe (and SAFE_ADDRESS) and
-    /// the options only a Safe has, such as --bundle, --nonce and --rotate
+    /// the options only a Safe has, such as --bundle, --nonce and --rotate;
+    /// a `safe` in config.toml is ignored
     #[arg(long)]
     pub send_eoa: bool,
 }

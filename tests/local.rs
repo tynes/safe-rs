@@ -1019,7 +1019,11 @@ async fn is_safe_knows_the_canonical_v1_5_0_singleton() {
         .deploy_safe_on(canonical, &[h.owner.address()], 1, 16)
         .await;
     assert_eq!(
-        ISafe::new(safe, &h.provider).VERSION().call().await.unwrap(),
+        ISafe::new(safe, &h.provider)
+            .VERSION()
+            .call()
+            .await
+            .unwrap(),
         "1.5.0"
     );
     assert!(safe_rs::is_safe(&h.provider, safe).await.unwrap());

@@ -150,7 +150,7 @@ safe send <to> <signature> [args...] --safe <address> --rpc-url <url>
 safe send 0xRecipient --value 0.5ether --rpc-url $ETH_RPC_URL --private-key $PRIVATE_KEY
 ```
 
-**From your own account:** `--send-eoa` sends the calls from the signer's own address instead of a Safe, one transaction per call. They are simulated together in order first, and nothing is sent unless all of them pass; after one confirmation they are broadcast one at a time, each after the one before it is mined. Simulation, the fee flags, `--timeout`, `--trace`, `--block`, `--spec` and `--no-confirm` work as for a Safe, and `--gas-limit` works with a single call. `--safe` (or `SAFE_ADDRESS`) and the options only a Safe has, such as `--bundle`, `--nonce`, `--no-submit`, `--rotate` and the `--gas-payer-*` options, are refused. A send of several calls is not atomic: if one fails after others were mined, the error lists the ones on chain.
+**From your own account:** `--send-eoa` sends the calls from the signer's own address instead of a Safe, one transaction per call. They are simulated together in order first, and nothing is sent unless all of them pass; after one confirmation they are broadcast one at a time, each after the one before it is mined. Simulation, the fee flags, `--timeout`, `--trace`, `--block`, `--spec` and `--no-confirm` work as for a Safe, and `--gas-limit` works with a single call. `--safe` (or `SAFE_ADDRESS`) and the options only a Safe has, such as `--bundle`, `--nonce`, `--no-submit`, `--rotate` and the `--gas-payer-*` options, are refused; a `safe` in `config.toml` is ignored. A send of several calls is not atomic: if one fails after others were mined, the error lists the ones on chain.
 
 ```bash
 safe send 0xRecipient --value 0.5ether --send-eoa --rpc-url $ETH_RPC_URL --private-key $PRIVATE_KEY
@@ -571,7 +571,7 @@ Under `~/.safe-rs` (or `$SAFE_RS_HOME`), all readable by you only:
 
 ```toml
 rpc_url = "https://polygon.drpc.org"   # --rpc-url, ETH_RPC_URL
-safe = "0x…"                           # --safe, SAFE_ADDRESS
+safe = "0x…"                           # --safe, SAFE_ADDRESS (not --send-eoa)
 password_file = "/home/me/.safe-rs/pw" # --password-file, ETH_PASSWORD
 keystore = "/home/me/.foundry/keystores/me"   # --keystore, ETH_KEYSTORE
 account = "me"                         # --account, ETH_KEYSTORE_ACCOUNT
