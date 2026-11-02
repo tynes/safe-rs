@@ -14,12 +14,14 @@ name = "safe"
 path = "src/main.rs"
 
 [dependencies]
-safe-rs = { path = "..", version = "0.13", default-features = false, features = ["simulation", "keystore", "hd-wallet", "ledger"] }
+safe-rs = { path = "..", version = "0.13", default-features = false, features = ["simulation", "keystore", "ledger"] }
+# Ledger signing of Safe transactions as EIP-712 typed data comes from
+# safe-rs's `ledger` feature, which turns on `alloy-signer-ledger/eip712` for
+# the Ledger signer foundry-wallets uses as well.
 clap = { version = "4", features = ["derive", "env", "string"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 alloy = "2.5"
 alloy-dyn-abi = "1.6"
-alloy-signer-ledger = { version = "2.5", default-features = false, features = ["eip712"] }
 # The signers `cast` and `forge` use: local keys, keystores, mnemonics,
 # Ledger, Trezor and (by feature) AWS KMS, GCP KMS and Turnkey. Ledger and
 # Trezor are always built, against libusb (built from source on Linux when the
