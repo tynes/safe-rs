@@ -704,14 +704,10 @@ let params = OuterTxParams::exec_transaction(&signed, payer.address(), eoa_nonce
 
 ### Simulation-Only Mode
 
-For read-only operations or testing, you don't need to be an owner:
+`simulate()` broadcasts nothing, so it can check a transaction without executing it. It runs the real `execTransaction` on a fork, signed by the client's key, so that key must be one of the Safe's owners (with a threshold above 1, the other owners' approvals are filled in on the fork). A simulation that reverts still returns `Ok`: check `success`.
 
 ```rust
-use alloy::signers::local::PrivateKeySigner;
-
-// Use any signer for simulation
-let dummy = PrivateKeySigner::random();
-let safe = Safe::new(provider, dummy, safe_address, config);
+use safe_rs::{Account, CallBuilder};
 
 let builder = safe.batch()
     .add_typed(token, call)
@@ -719,7 +715,11 @@ let builder = safe.batch()
 
 // Inspect results without executing
 if let Some(result) = builder.simulation_result() {
-    println!("Would use {} gas", result.gas_used);
+    if result.success {
+        println!("Would use {} gas", result.gas_used);
+    } else {
+        println!("Would revert: {:?}", result.revert_reason);
+    }
 }
 ```
 
