@@ -12,8 +12,9 @@
 //! then moved to the new owner, which pays for the next transaction.
 //!
 //! The Safe must be a threshold-1 Safe (v1.4.1 or v1.5.0) whose owner is a key
-//! of the wallet (see `safe create --hd-wallet` and `safe rotate
-//! --from-private-key` in the CLI), and that owner must hold ETH for gas.
+//! of the wallet (in the CLI, `safe create --rotate --mnemonic <name>` creates
+//! one and `safe wallet sync` records an existing one), and that owner must
+//! hold ETH for gas.
 //!
 //! # Usage
 //!

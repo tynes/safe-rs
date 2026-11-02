@@ -70,8 +70,8 @@ pub struct ExecutionResult {
     pub success: bool,
 }
 
-/// Safe client for interacting with Safe v1.4.1 smart accounts, signing as
-/// owner `S` (a local key by default; see [`AccountSigner`])
+/// Safe client for interacting with Safe smart accounts (v1.5.0, v1.4.1 and
+/// v1.3.0), signing as owner `S` (a local key by default; see [`AccountSigner`])
 pub struct Safe<P, S = PrivateKeySigner> {
     /// The provider for RPC calls
     provider: P,

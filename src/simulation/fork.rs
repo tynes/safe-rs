@@ -523,7 +523,7 @@ where
         Ok(evm::fork_db(self.provider.clone(), self.chain_id, block))
     }
 
-    /// Simulates a call from the Safe
+    /// Simulates a call from `from`
     pub async fn simulate_call(
         &self,
         from: Address,
