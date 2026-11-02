@@ -1,5 +1,6 @@
-//! `safe wallet`: mnemonic wallets and the record of which of their keys are used,
-//! as functions a CLI can call and a [`WalletCommand`] it can mount.
+//! `safe wallet`: named wallets (an encrypted phrase, or a Ledger account) and
+//! the record of which of their keys are used, as functions a CLI can call and
+//! a [`WalletCommand`] it can mount.
 //!
 //! The subcommands leave out `--rpc-url` and `--safe`, which the caller puts
 //! in a [`WalletContext`], so a CLI with its own global `--rpc-url` or
@@ -15,12 +16,12 @@ use clap::{Args, Subcommand};
 use color_eyre::eyre::{eyre, WrapErr};
 use rand::rngs::OsRng;
 use safe_rs::keystore::{encrypt_mnemonic_keystore, keystore_address, ScryptParams};
-use safe_rs::mnemonic::{key_path, normalize_phrase};
+use safe_rs::mnemonic::normalize_phrase;
 use safe_rs::rotation::store::write_private;
 use safe_rs::rotation::{
     Binding, Exposure, KeySource, RotatingSafe, RotationConfig, RotationState,
 };
-use safe_rs::MnemonicWallet;
+use safe_rs::{KeyPath, LedgerKeys, MnemonicWallet};
 use serde::Serialize;
 use url::Url;
 use zeroize::Zeroizing;
@@ -31,14 +32,15 @@ use crate::commands::{head_rotation_config, http_provider, HttpProvider};
 use crate::console::Console;
 pub use crate::error::WalletError;
 use crate::keys::CliKeys;
+use crate::ledger_wallet::LedgerWallet;
 use crate::log::{Logger, NoopLogger};
 use crate::output::Report;
 pub use crate::output::{OwnerKey, SweptEth};
 use crate::paths;
 use crate::prompt::{Prompt, TerminalPrompt};
 use crate::signers::{
-    check_new_password, mnemonic_key_signer, new_password, open_keys, open_state, open_wallet,
-    wallet_id,
+    check_new_password, key_choice, mnemonic_key_signer, new_password, open_keys, open_state,
+    open_wallet, wallet_id,
 };
 
 type Result<T, E = WalletError> = std::result::Result<T, E>;
@@ -46,13 +48,14 @@ type Result<T, E = WalletError> = std::result::Result<T, E>;
 /// `safe wallet`'s subcommands.
 #[derive(Subcommand, Clone, Debug)]
 pub enum WalletCommand {
-    /// Create a mnemonic wallet from a new 24-word phrase and encrypt it to disk
+    /// Create a wallet: a new 24-word phrase encrypted to disk, or with
+    /// --ledger, a name for an account on a connected Ledger
     New(WalletNewOpts),
 
     /// Encrypt an existing BIP-39 phrase to disk as a mnemonic wallet
     Import(WalletImportOpts),
 
-    /// List the mnemonic wallets on disk
+    /// List the wallets on disk
     List,
 
     /// Print the wallet's funding address, or the address of one owner key
@@ -72,6 +75,19 @@ pub enum WalletCommand {
 pub struct WalletNewOpts {
     /// Wallet name (stored as <name>.json under ~/.safe-rs/wallets)
     pub name: String,
+
+    /// Name an account on a connected Ledger (Ethereum app open) instead of
+    /// making a phrase. The keys stay on the device: the file records the
+    /// path and the funding address, and no password is asked for
+    #[arg(long, short)]
+    pub ledger: bool,
+
+    /// The Ledger wallet's funding key (key 0). Owner keys count up its last
+    /// number: m/44'/60'/1'/0/0 has owner keys m/44'/60'/1'/0/1, /2 and so on.
+    /// `h` may stand for `'`, as in m/44h/60h/1h/0/0 [default: the first
+    /// Ledger Live account, m/44'/60'/0'/0/0]
+    #[arg(long, value_name = "PATH", requires = "ledger")]
+    pub path: Option<KeyPath>,
 
     #[command(flatten)]
     pub password: PasswordArgs,
@@ -295,12 +311,27 @@ fn read_state(home: &Path, wallet_id: Address) -> Result<Option<RotationState>> 
     }
 }
 
-/// A wallet written by [`new_wallet`] or [`import_wallet`].
+/// What a wallet's keys are held in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum WalletKind {
+    /// A phrase in an encrypted mnemonic keystore
+    Mnemonic,
+    /// An account on a Ledger
+    Ledger,
+}
+
+/// A wallet written by [`new_wallet`], [`new_ledger_wallet`] or [`import_wallet`].
 #[derive(Clone, Serialize)]
 #[non_exhaustive]
 pub struct WalletCreated {
     pub name: String,
     pub path: String,
+    pub kind: WalletKind,
+    /// The derivation path of key 0, the funding key. Owner key `i` adds `i`
+    /// to its last number
+    pub key_path: String,
     /// The address to send gas money to before creating a Safe
     pub funding_address: Address,
     /// The recovery phrase, for a new wallet only: show it once
@@ -315,6 +346,8 @@ impl fmt::Debug for WalletCreated {
         f.debug_struct("WalletCreated")
             .field("name", &self.name)
             .field("path", &self.path)
+            .field("kind", &self.kind)
+            .field("key_path", &self.key_path)
             .field("funding_address", &self.funding_address)
             .field("phrase", &self.phrase.as_ref().map(|_| "<redacted>"))
             .field("warnings", &self.warnings)
@@ -324,6 +357,24 @@ impl fmt::Debug for WalletCreated {
 
 impl Report for WalletCreated {
     fn human(&self) -> String {
+        if self.kind == WalletKind::Ledger {
+            let mut s = format!("Ledger wallet \"{}\" saved to {}", self.name, self.path);
+            let _ = write!(s, "\n  Path: {}", self.key_path);
+            let _ = write!(s, "\n  Funding address: {}", self.funding_address);
+            if let Ok(first) = self
+                .key_path
+                .parse::<KeyPath>()
+                .and_then(|path| path.key(1))
+            {
+                let _ = write!(s, "\n  Owner keys count up from: {first}");
+            }
+            let _ = write!(
+                s,
+                "\n\nUse it with --wallet {} (or --mnemonic {}).",
+                self.name, self.name
+            );
+            return s;
+        }
         let mut s = format!("mnemonic wallet \"{}\" saved to {}", self.name, self.path);
         let _ = write!(s, "\n  Funding address: {}", self.funding_address);
         if let Some(phrase) = &self.phrase {
@@ -374,8 +425,50 @@ pub fn new_wallet(ctx: &WalletContext, name: &str, password: &str) -> Result<Wal
     Ok(WalletCreated {
         name: name.to_string(),
         path: path.display().to_string(),
+        kind: WalletKind::Mnemonic,
+        key_path: KeyPath::default().to_string(),
         funding_address: wallet.id(),
         phrase: Some(Zeroizing::new(phrase.to_string())),
+        warnings,
+    })
+}
+
+/// Names an account on a connected Ledger: asks the device for the address
+/// of `path` (default: the first Ledger Live account, `m/44'/60'/0'/0/0`) and
+/// records both. Owner key `i` is `path` with `i` added to its last number.
+pub async fn new_ledger_wallet(
+    ctx: &WalletContext,
+    name: &str,
+    path: Option<KeyPath>,
+) -> Result<WalletCreated> {
+    let console = ctx.console();
+    let home = ctx.home()?;
+    let file = new_wallet_path(&home, name)?;
+    let path = path.unwrap_or_default();
+    let keys = LedgerKeys::connect_at(path.clone()).await?;
+    let address = keys.address(0).await?;
+    let mut warnings = Vec::new();
+    if paths::state_file(&home, address).exists() {
+        warnings.push(format!(
+            "the keys of {path} are already on record ({}): this wallet continues from \
+             there, and shares that record with any other wallet of the same keys",
+            paths::state_file(&home, address).display()
+        ));
+    }
+    console.warnings(&warnings);
+    write_private(
+        &file,
+        LedgerWallet::new(path.clone(), address)
+            .to_json()
+            .as_bytes(),
+    )?;
+    Ok(WalletCreated {
+        name: name.to_string(),
+        path: file.display().to_string(),
+        kind: WalletKind::Ledger,
+        key_path: path.to_string(),
+        funding_address: address,
+        phrase: None,
         warnings,
     })
 }
@@ -421,6 +514,8 @@ pub fn import_wallet(
     Ok(WalletCreated {
         name: name.to_string(),
         path: path.display().to_string(),
+        kind: WalletKind::Mnemonic,
+        key_path: KeyPath::default().to_string(),
         funding_address: wallet.id(),
         phrase: None,
         warnings,
@@ -433,7 +528,11 @@ pub fn import_wallet(
 pub struct WalletEntry {
     pub name: String,
     pub path: String,
-    /// `None` when the file is not a readable keystore
+    /// `None` when the file is neither a readable keystore nor a Ledger wallet
+    pub kind: Option<WalletKind>,
+    /// The derivation path of key 0, when the file is readable
+    pub key_path: Option<String>,
+    /// `None` when the file is not readable
     pub funding_address: Option<Address>,
     /// Safes this wallet owns keys of
     pub safes: usize,
@@ -447,18 +546,27 @@ struct WalletListOutput {
 impl Report for WalletListOutput {
     fn human(&self) -> String {
         if self.wallets.is_empty() {
-            return "No mnemonic wallets yet. Create one with `safe wallet new <NAME>`."
+            return "No wallets yet. Create one with `safe wallet new <NAME>` (or \
+                    `safe wallet new <NAME> --ledger`)."
                 .to_string();
         }
-        let mut s = String::from("mnemonic wallets:");
+        let mut s = String::from("wallets:");
         for wallet in &self.wallets {
-            let _ = write!(s, "\n  {}", wallet.name);
+            let kind = match wallet.kind {
+                Some(WalletKind::Ledger) => " (Ledger)",
+                Some(WalletKind::Mnemonic) => " (mnemonic)",
+                None => "",
+            };
+            let _ = write!(s, "\n  {}{kind}", wallet.name);
+            if let Some(path) = &wallet.key_path {
+                let _ = write!(s, "\n    Path: {path}");
+            }
             match wallet.funding_address {
                 Some(address) => {
                     let _ = write!(s, "\n    Funding address: {address}");
                 }
                 None => {
-                    let _ = write!(s, "\n    (not a readable keystore)");
+                    let _ = write!(s, "\n    (neither a readable keystore nor a Ledger wallet)");
                 }
             }
             let _ = write!(s, "\n    Safes: {}", wallet.safes);
@@ -467,7 +575,30 @@ impl Report for WalletListOutput {
     }
 }
 
-/// The mnemonic wallets on disk, by name.
+/// What a wallet file is, the path of its key 0 and its funding address:
+/// all `None` when it is neither a Ledger wallet nor a readable keystore.
+fn read_entry(path: &Path) -> (Option<WalletKind>, Option<String>, Option<Address>) {
+    if let Some(ledger) = LedgerWallet::read(path).ok().flatten() {
+        return (
+            Some(WalletKind::Ledger),
+            Some(ledger.path.to_string()),
+            Some(ledger.address),
+        );
+    }
+    let address = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|json| keystore_address(&json).ok().flatten());
+    match address {
+        Some(address) => (
+            Some(WalletKind::Mnemonic),
+            Some(KeyPath::default().to_string()),
+            Some(address),
+        ),
+        None => (None, None, None),
+    }
+}
+
+/// The wallets on disk, by name.
 pub fn list_wallets(ctx: &WalletContext) -> Result<Vec<WalletEntry>> {
     let home = ctx.home()?;
     let dir = paths::wallets_dir(&home);
@@ -481,9 +612,7 @@ pub fn list_wallets(ctx: &WalletContext) -> Result<Vec<WalletEntry>> {
             let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            let funding_address = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|json| keystore_address(&json).ok().flatten());
+            let (kind, key_path, funding_address) = read_entry(&path);
             let safes = match funding_address {
                 Some(id) => read_state(&home, id)?.map_or(0, |state| state.safes.len()),
                 None => 0,
@@ -491,6 +620,8 @@ pub fn list_wallets(ctx: &WalletContext) -> Result<Vec<WalletEntry>> {
             wallets.push(WalletEntry {
                 name: name.to_string(),
                 path: path.display().to_string(),
+                kind,
+                key_path,
                 funding_address,
                 safes,
             });
@@ -500,7 +631,7 @@ pub fn list_wallets(ctx: &WalletContext) -> Result<Vec<WalletEntry>> {
     Ok(wallets)
 }
 
-/// One key of a mnemonic wallet.
+/// One key of a wallet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct WalletAddress {
@@ -516,14 +647,15 @@ impl Report for WalletAddress {
     }
 }
 
-/// The wallet's funding address (index 0, read without a password), or the
-/// address of owner key `index`.
+/// The wallet's funding address (index 0, read without a password or a
+/// device for a wallet file), or the address of owner key `index`.
 pub async fn wallet_address(
     ctx: &WalletContext,
     owner_keys: &OwnerKeysArgs,
     index: Option<u32>,
 ) -> Result<WalletAddress> {
     let home = ctx.home()?;
+    let key_path = key_choice(owner_keys, &home).map_err(classify)?.key_path();
     let (index, address) = match index {
         None | Some(0) => (0, wallet_id(owner_keys, &home).await.map_err(classify)?),
         Some(index) => {
@@ -536,7 +668,7 @@ pub async fn wallet_address(
     Ok(WalletAddress {
         index,
         address,
-        path: key_path(index),
+        path: key_path.key(index)?,
     })
 }
 
@@ -581,12 +713,18 @@ pub struct SafeStatus {
     pub safe: String,
     /// The key that signs for the Safe, and the address to send gas money to
     pub owner: OwnerKey,
+    /// The owner's derivation path, for a key of this wallet
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_path: Option<String>,
     /// Why the owner's public key must be assumed public, if it must
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exposed: Option<&'static str>,
     /// The key every signature by the owner rotates to
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_owner: Option<OwnerKey>,
+    /// The next owner's derivation path
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_owner_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_tx: Option<TxHash>,
     /// Retired keys whose ETH still has to be moved to the owner
@@ -598,17 +736,22 @@ pub struct SafeStatus {
 }
 
 impl SafeStatus {
-    fn new(key: &str, binding: &Binding) -> Self {
+    /// The status of the Safe at binding `key`, for a wallet whose key 0 is at
+    /// `key_path`.
+    fn new(key: &str, binding: &Binding, key_path: &KeyPath) -> Self {
         let (chain_id, safe) = match key.split_once(':') {
             Some((chain, safe)) => (chain.parse().ok(), safe.to_string()),
             None => (None, key.to_string()),
         };
+        let path_of = |index: Option<u32>| index.and_then(|index| key_path.key(index).ok());
         Self {
             chain_id,
             safe,
             owner: binding.current.into(),
+            owner_path: path_of(binding.current.index()),
             exposed: binding.exposed.map(exposure_label),
             next_owner: binding.reserved.map(Into::into),
+            next_owner_path: path_of(binding.reserved.map(|reserved| reserved.index)),
             pending_tx: binding.pending.as_ref().map(|p| p.outer_tx_hash),
             sweeps_owed_from: binding
                 .sweep_due
@@ -631,6 +774,9 @@ impl SafeStatus {
 pub struct WalletStatus {
     /// The wallet's funding address
     pub wallet: Address,
+    /// The derivation path of the funding key (key 0). Owner key `i` adds
+    /// `i` to its last number
+    pub key_path: String,
     /// The next key index that has never been handed out
     pub next_index: u32,
     pub safes: Vec<SafeStatus>,
@@ -639,6 +785,7 @@ pub struct WalletStatus {
 impl Report for WalletStatus {
     fn human(&self) -> String {
         let mut s = format!("Wallet: {}", self.wallet);
+        let _ = write!(s, "\nPath: {}", self.key_path);
         let _ = write!(s, "\nNext unused key: {}", self.next_index);
         if self.safes.is_empty() {
             let _ = write!(s, "\nNo Safes tracked yet.");
@@ -649,12 +796,18 @@ impl Report for WalletStatus {
                 .map_or_else(|| "?".to_string(), |id| id.to_string());
             let _ = write!(s, "\n\nSafe {} (chain {chain})", safe.safe);
             let _ = write!(s, "\n  Owner: {}", safe.owner);
+            if let Some(path) = &safe.owner_path {
+                let _ = write!(s, " at {path}");
+            }
             let _ = write!(s, "\n  Send gas money to: {}", safe.owner.address);
             if let Some(exposure) = safe.exposure {
                 let _ = write!(s, "\n  Exposed: {}", exposure_note(exposure));
             }
             if let Some(next) = &safe.next_owner {
                 let _ = write!(s, "\n  Next owner: {next}");
+                if let Some(path) = &safe.next_owner_path {
+                    let _ = write!(s, " at {path}");
+                }
             }
             if let Some(pending) = safe.pending_tx {
                 let _ = write!(s, "\n  Pending transaction: {pending}");
@@ -678,6 +831,7 @@ pub async fn wallet_status(
     owner_keys: &OwnerKeysArgs,
 ) -> Result<WalletStatus> {
     let home = ctx.home()?;
+    let key_path = key_choice(owner_keys, &home).map_err(classify)?.key_path();
     let wallet = wallet_id(owner_keys, &home).await.map_err(classify)?;
     let state = read_state(&home, wallet)?.unwrap_or_else(|| RotationState::new(wallet, 1));
     let only = ctx.safe.map(|safe| safe.to_string());
@@ -688,10 +842,11 @@ pub async fn wallet_status(
             only.as_ref()
                 .is_none_or(|safe| key.ends_with(safe.as_str()))
         })
-        .map(|(key, binding)| SafeStatus::new(key, binding))
+        .map(|(key, binding)| SafeStatus::new(key, binding, &key_path))
         .collect();
     Ok(WalletStatus {
         wallet,
+        key_path: key_path.to_string(),
         next_index: state.next_index,
         safes,
     })
@@ -885,6 +1040,9 @@ pub(crate) async fn run_in(
     console: &Console,
 ) -> color_eyre::Result<()> {
     match command {
+        WalletCommand::New(opts) if opts.ledger => {
+            console.emit(&new_ledger_wallet(ctx, &opts.name, opts.path).await?);
+        }
         WalletCommand::New(opts) => {
             // Checked before the password is asked for.
             new_wallet_path(&ctx.home()?, &opts.name)?;
@@ -964,10 +1122,12 @@ mod tests {
         state.mark_exposed(&key, Exposure::Signed).unwrap();
 
         let (key, binding) = state.safes.iter().next().unwrap();
+        let key_path: KeyPath = "m/44'/60'/1'/0/0".parse().unwrap();
         let output = WalletStatus {
             wallet,
+            key_path: key_path.to_string(),
             next_index: state.next_index,
-            safes: vec![SafeStatus::new(key, binding)],
+            safes: vec![SafeStatus::new(key, binding, &key_path)],
         };
         let human = output.human();
         assert!(
@@ -976,11 +1136,14 @@ mod tests {
         );
         assert!(human.contains("chain 10"), "{human}");
         assert!(human.contains("Exposed:"), "{human}");
+        assert!(human.contains("at m/44'/60'/1'/0/3"), "{human}");
 
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(json["safes"][0]["chain_id"], 10);
         assert_eq!(json["safes"][0]["owner"]["index"], 3);
         assert_eq!(json["safes"][0]["exposed"], "signed");
+        assert_eq!(json["safes"][0]["owner_path"], "m/44'/60'/1'/0/3");
+        assert_eq!(json["key_path"], "m/44'/60'/1'/0/0");
         assert_eq!(json["next_index"], 4);
     }
 

@@ -178,3 +178,61 @@ async fn every_mnemonic_wallet_key_is_usable_as_a_signer() {
     };
     assert!(wallet::signer(&ctx, "trader", 1, &wrong).is_err());
 }
+
+/// A Ledger wallet file (`safe wallet new --ledger`) is listed and read
+/// without the device: its funding address and path come from the file.
+#[tokio::test]
+async fn a_ledger_wallet_is_read_without_the_device() {
+    use safe_rs_cli::args::OwnerKeysArgs;
+    use safe_rs_cli::prompt::NoPrompt;
+    use safe_rs_cli::wallet::{self, WalletContext, WalletKind};
+
+    let home = tempfile::tempdir().unwrap();
+    let wallets = home.path().join("wallets");
+    std::fs::create_dir_all(&wallets).unwrap();
+    let funding: alloy::primitives::Address = "0x3333333333333333333333333333333333333333"
+        .parse()
+        .unwrap();
+    std::fs::write(
+        wallets.join("cold.json"),
+        format!(r#"{{"kind": "ledger", "path": "m/44'/60'/1'/0/0", "address": "{funding}"}}"#),
+    )
+    .unwrap();
+    let ctx = WalletContext::new()
+        .with_home(home.path().to_path_buf())
+        .with_prompt(NoPrompt);
+
+    let listed = wallet::list_wallets(&ctx).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].kind, Some(WalletKind::Ledger));
+    assert_eq!(listed[0].key_path.as_deref(), Some("m/44'/60'/1'/0/0"));
+    assert_eq!(listed[0].funding_address, Some(funding));
+
+    let owner_keys = OwnerKeysArgs {
+        mnemonic: Some("cold".into()),
+        ..OwnerKeysArgs::default()
+    };
+    let address = wallet::wallet_address(&ctx, &owner_keys, None)
+        .await
+        .unwrap();
+    assert_eq!(address.address, funding);
+    assert_eq!(address.path, "m/44'/60'/1'/0/0");
+    let status = wallet::wallet_status(&ctx, &owner_keys).await.unwrap();
+    assert_eq!(status.wallet, funding);
+    assert_eq!(status.key_path, "m/44'/60'/1'/0/0");
+    assert_eq!(status.next_index, 1);
+
+    // The binary lists it too, under --wallet's name.
+    let output = Command::new(env!("CARGO_BIN_EXE_safe"))
+        .args(["wallet", "address", "--wallet", "cold", "--json"])
+        .env("SAFE_RS_HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["path"], "m/44'/60'/1'/0/0");
+
+    // A Ledger wallet has no private key to hand out.
+    let refused = wallet::signer(&ctx, "cold", 1, &Default::default()).unwrap_err();
+    assert!(refused.to_string().contains("Ledger wallet"), "{refused}");
+}

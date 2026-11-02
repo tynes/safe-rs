@@ -2,7 +2,8 @@
 //!
 //! Everything is under one directory: `$SAFE_RS_HOME`, or `~/.safe-rs`.
 //!
-//! - `wallets/<name>.json`: the encrypted phrase (a mnemonic keystore)
+//! - `wallets/<name>.json`: the encrypted phrase (a mnemonic keystore), or a
+//!   Ledger wallet: the path of its key 0 and that key's address
 //! - `state/<funding address>.json`: which keys were used, and for which Safe
 
 use std::path::{Path, PathBuf};

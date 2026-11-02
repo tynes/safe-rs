@@ -80,6 +80,7 @@ pub mod config_file;
 mod console;
 mod error;
 mod keys;
+mod ledger_wallet;
 pub mod log;
 mod output;
 mod paths;

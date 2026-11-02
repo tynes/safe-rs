@@ -415,10 +415,11 @@ With `--rotate --mnemonic <name>` (or `--rotate --ledger`) the Safe's first owne
 
 ### `safe wallet`
 
-Manage mnemonic wallets: the encrypted phrase that one-time owner keys are derived from, and the record of which keys are used.
+Manage wallets: the encrypted phrase or Ledger account that one-time owner keys are derived from, and the record of which keys are used.
 
 ```bash
 safe wallet new <name>                        # new 24-word phrase, shown once
+safe wallet new <name> --ledger [--path PATH] # a name for an account on a Ledger
 safe wallet import <name> [--phrase-file F] [--start-index N]
 safe wallet list
 safe wallet address --mnemonic <name> [--index N]
@@ -427,11 +428,11 @@ safe wallet sync    --mnemonic <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL [
 safe wallet sweep   --mnemonic <name> --safe 0xYourSafe --rpc-url $ETH_RPC_URL [--sweep-reserve WEI] [--timeout SECS]
 ```
 
-`address`, `status`, `sync` and `sweep` take `--ledger` in place of `--mnemonic <name>`; `new` and `import` are for phrases only.
+`--wallet <name>` is another name for `--mnemonic <name>`, and either names a phrase wallet or a Ledger wallet. `address`, `status`, `sync` and `sweep` also take a bare `--ledger` (the first Ledger Live account) in place of a wallet name.
 
 | Command | What it does |
 |---------|--------------|
-| `new` | Creates a phrase, prints it once, and writes the keystore |
+| `new` | Creates a phrase, prints it once, and writes the keystore. With `--ledger`, names a Ledger account instead (see [On a Ledger](#on-a-ledger)) |
 | `import` | Encrypts an existing BIP-39 phrase. `--start-index` skips keys another wallet already used |
 | `address` | Prints the funding address (no password needed), or owner key `--index N` |
 | `status` | Shows, per Safe, the current owner key (the address to send gas money to), whether it is exposed, and any pending transaction or owed sweep |
@@ -446,10 +447,10 @@ The wallet options are `cast`'s, one to one: the same flags, short flags, aliase
 |------|-----|-------------|
 | `--private-key <key>` | `PRIVATE_KEY` | A raw private key (`PRIVATE_KEY` is the one addition to `cast`) |
 | `-i, --interactive` | | Prompt for a private key |
-| `--mnemonic <phrase\|path\|name>` | | A phrase, a file holding one, or a `safe` mnemonic wallet: a name under `~/.safe-rs/wallets` or the path of a mnemonic keystore. Alias `--mnemonic-path` |
+| `--mnemonic <phrase\|path\|name>` | | A phrase, a file holding one, or a `safe` wallet: a name under `~/.safe-rs/wallets` or the path of its file (a mnemonic keystore, or a Ledger wallet, which signs on the device). Aliases `--wallet`, `--mnemonic-path` |
 | `--mnemonic-passphrase <passphrase>` | | BIP-39 passphrase for `--mnemonic` |
 | `--mnemonic-index <n>` | | Key index for `--mnemonic`, `--ledger` or `--trezor` (default 0) |
-| `--mnemonic-derivation-path <path>` | | Derivation path for a mnemonic or hardware wallet. Alias `--hd-path` |
+| `--mnemonic-derivation-path <path>` | | Derivation path for a mnemonic or hardware wallet; `h` may stand for `'` (`m/44h/60h/0h/0/0`). Alias `--hd-path` |
 | `--keystore <path>` | `ETH_KEYSTORE` | A keystore file (Web3 Secret Storage v3, as written by `cast wallet import`) |
 | `--account <name>` | `ETH_KEYSTORE_ACCOUNT` | A keystore in `~/.foundry/keystores`, by name |
 | `--password <text>` | | Keystore or mnemonic wallet password. Visible in the process list: prefer the file or the prompt |
@@ -519,19 +520,26 @@ The old key signs that one transaction, as it would any other, and the wallet ro
 
 ### On a Ledger
 
-Pass `--ledger` instead of `--mnemonic <name>` to keep the rotating keys on a Ledger (with `--rotate` on `send` and `create`, and on `safe wallet`; elsewhere `--ledger` just signs with one key, as in `cast`). The rotating keys use the same path as a phrase, `m/44'/60'/0'/0/i`, so a Ledger seeded with a phrase has the same keys, and the same state, as that phrase.
+Give a Ledger account a name with `safe wallet new <name> --ledger`, then use the name wherever a wallet name goes: `--wallet <name>` (or `--mnemonic <name>`), with `--rotate` on `send` and `create`, on `safe wallet`, and as a plain signer elsewhere. The file `~/.safe-rs/wallets/<name>.json` holds no secret: the path of the wallet's funding key and the address the device gave for it, so a different device (or another seed or passphrase on it) is refused before anything is signed.
 
 ```bash
-safe wallet address --ledger                  # the funding address (key 0)
-safe create --rotate --ledger --rpc-url $ETH_RPC_URL   # records the next 20 keys from the device
+safe wallet new cold --ledger                 # funding key m/44'/60'/0'/0/0, the first Ledger Live account
+safe wallet new vault --ledger --path "m/44h/60h/1h/0/0"   # the second Ledger Live account: a separate wallet
+safe wallet address --wallet vault            # the funding address, read from the file
+safe create --rotate --wallet vault --rpc-url $ETH_RPC_URL   # records the next 20 keys from the device
 safe send 0xRecipient --value 1000000000000000000 \
-    --safe 0xYourSafe --rpc-url $ETH_RPC_URL --rotate --ledger
+    --safe 0xYourSafe --rpc-url $ETH_RPC_URL --rotate --wallet vault
+safe wallet status --wallet vault             # each Safe's owner key and its path
 ```
+
+- **Paths.** `--path` takes any derivation path, with `'` or `h` (or `H`) for a hardened step; the default is the first Ledger Live account, `m/44'/60'/0'/0/0`. That path is the funding key (key 0), and owner key `i` is the same path with `i` added to its last number: `vault` above has owner keys `m/44'/60'/1'/0/1`, `m/44'/60'/1'/0/2` and so on. Each Ledger Live account is therefore its own wallet, with its own keys and its own record of used keys.
+- **The record of used keys** is kept under the funding address (`~/.safe-rs/state/<address>.json`), as for a phrase. Two wallets with the same path on the same device are the same keys, and share it. The first Ledger Live account's keys, `m/44'/60'/0'/0/i`, are those of the device's phrase, so a phrase wallet of the same seed shares its record too.
+- **A bare `--ledger`** (no wallet name) still works as before: under `--rotate` and on `safe wallet` it uses the first Ledger Live account; elsewhere it signs with one key, as in `cast` (`--mnemonic-index N` is the Ledger Live path `m/44'/60'/N'/0/0`). With a Ledger wallet, `--mnemonic-index N` is owner key `N` of that wallet instead.
 
 - **The device is asked for each address once.** Setting up a Safe reads 20 keys ahead and records them; each send tops the record up so at least 5 unused keys stay ahead, and asks the device again only for the keys that sign. Searching for a Safe's owner (when adopting one, or `wallet sync`) looks at 52 keys rather than 1000; pass `--scan-limit` to `wallet sync` to look further.
 - **Each send asks for three confirmations** when the owner pays for gas: the Safe transaction, the transaction that submits it, and the transfer that moves the old key's ETH. With a `--gas-payer-*` key it is one. The CLI prints the EIP-712 domain hash to compare before the first prompt.
 - **What the device must allow:** the Ethereum app 1.6.0 or later (Safe transactions are signed as EIP-712 typed data and shown as a domain hash and a message hash), and blind signing turned on in its settings, because `execTransaction` calldata cannot be decoded on the device.
-- No password is asked for, and `--ledger` takes precedence over a `mnemonic` in `config.toml`.
+- No password is asked for. A bare `--ledger` takes precedence over a phrase wallet named by `mnemonic` in `config.toml`; `mnemonic = "cold"` naming a Ledger wallet makes it the default.
 
 Ledger and Trezor support is always built. On Linux it uses the system libusb if pkg-config finds it, and builds libusb from source otherwise.
 
@@ -575,7 +583,7 @@ safe = "0x…"                           # --safe, SAFE_ADDRESS (not --send-eoa)
 password_file = "/home/me/.safe-rs/pw" # --password-file, ETH_PASSWORD
 keystore = "/home/me/.foundry/keystores/me"   # --keystore, ETH_KEYSTORE
 account = "me"                         # --account, ETH_KEYSTORE_ACCOUNT
-mnemonic = "treasury"                  # --mnemonic (a mnemonic wallet name)
+mnemonic = "treasury"                  # --mnemonic / --wallet (a phrase or Ledger wallet name)
 ```
 
 `safe` in `config.toml` fills `--safe` for `send`, `call`, `approvals` and `config`; `wallet sync` and `wallet sweep` read `SAFE_ADDRESS` but not the config file.
@@ -753,7 +761,7 @@ Owner keys come from a `KeySource`: `MnemonicWallet` (the default type parameter
 use safe_rs::rotation::{KeySource, RotatingSafe, RotationConfig, StateFile};
 use safe_rs::LedgerKeys;
 
-let keys = LedgerKeys::connect().await?;
+let keys = LedgerKeys::connect().await?; // or connect_at("m/44'/60'/1'/0/0".parse()?)
 let store = StateFile::open(state_path, keys.address(0).await?)?;
 // A Ledger is searched for 52 keys rather than 1000: it answers one at a time.
 let mut safe =

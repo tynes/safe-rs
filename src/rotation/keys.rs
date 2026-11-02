@@ -1,7 +1,8 @@
 //! Where owner keys come from, and the record of their addresses.
 //!
-//! A [`KeySource`] is one seed's keys at `m/44'/60'/0'/0/i`: a phrase held in
-//! memory ([`MnemonicWallet`]) or a hardware wallet. Index 0 is the funding key and
+//! A [`KeySource`] is one family of keys, numbered from 0: a phrase held in
+//! memory ([`MnemonicWallet`], at `m/44'/60'/0'/0/i`) or a hardware wallet
+//! (at a [`KeyPath`](crate::KeyPath) plus `i`). Index 0 is the funding key and
 //! indices 1 and up are one-time owner keys.
 //!
 //! A [`Keyring`] pairs a source with its rotation state. It records every
@@ -36,7 +37,8 @@ pub const SEND_LOOKAHEAD: u32 = 5;
 /// record. Local derivation is fast; a device overrides this.
 pub const DEFAULT_SCAN_LIMIT: u32 = 1_000;
 
-/// One seed's keys at `m/44'/60'/0'/0/i`.
+/// One family of keys, numbered from 0: a phrase's keys at `m/44'/60'/0'/0/i`,
+/// or a device's at a [`KeyPath`](crate::KeyPath) plus `i`.
 ///
 /// Implementations only derive and sign; recording addresses, checking them
 /// and choosing indices is [`Keyring`]'s job.

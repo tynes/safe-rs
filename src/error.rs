@@ -176,6 +176,10 @@ pub enum Error {
     #[error("{0}")]
     Device(String),
 
+    /// A derivation path is malformed, or a key index runs past its end
+    #[error("Derivation path error: {0}")]
+    KeyPath(String),
+
     /// A recovery phrase is invalid. The message never contains the phrase.
     #[error("Recovery phrase error: {0}")]
     Mnemonic(String),

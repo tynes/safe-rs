@@ -7,13 +7,14 @@ use foundry_wallets::wallet_raw::RawWalletOpts;
 use foundry_wallets::{WalletOpts, WalletSigner};
 use safe_rs::keystore::{decrypt_keystore, keystore_address};
 use safe_rs::rotation::{KeySource, Keyring, StateFile};
-use safe_rs::MnemonicWallet;
+use safe_rs::{KeyPath, LedgerKeys, MnemonicWallet};
 use zeroize::Zeroizing;
 
 use crate::any_signer::AnySigner;
 use crate::cli::{GasPayerArgs, OwnerKeysArgs, PasswordArgs, SignerArgs};
 use crate::console::Console;
 use crate::keys::CliKeys;
+use crate::ledger_wallet::LedgerWallet;
 use crate::paths;
 
 /// The flags that name a key, for the message when none is given.
@@ -43,10 +44,17 @@ pub async fn create_signer(args: &SignerArgs, console: &Console) -> Result<AnySi
 }
 
 async fn resolve(args: &SignerArgs, console: &Console) -> Result<AnySigner> {
+    let ledger_wallet = match &args.mnemonic {
+        Some(value) => named_ledger_wallet(value)?,
+        None => None,
+    };
+    if let (true, Some(wallet)) = (args.ledger, &ledger_wallet) {
+        return ledger_wallet_signer(args, wallet).await;
+    }
     if args.ledger || args.trezor || args.aws || args.gcp || args.turnkey {
         let opts = WalletOpts {
             raw: RawWalletOpts {
-                hd_path: args.hd_path.clone(),
+                hd_path: args.hd_path.as_deref().map(normalize_hd_path),
                 mnemonic_index: args.mnemonic_index,
                 ..RawWalletOpts::default()
             },
@@ -67,6 +75,9 @@ async fn resolve(args: &SignerArgs, console: &Console) -> Result<AnySigner> {
     }
     if let Some(key) = &args.private_key {
         return private_key_signer(key);
+    }
+    if let Some(wallet) = &ledger_wallet {
+        return ledger_wallet_signer(args, wallet).await;
     }
     if let Some(mnemonic) = &args.mnemonic {
         let phrase = mnemonic_phrase(mnemonic, &args.password, console)?;
@@ -129,6 +140,58 @@ pub async fn create_payer(args: &GasPayerArgs, console: &Console) -> Result<Opti
         .await
         .wrap_err("cannot open the gas payer's key")
         .map(Some)
+}
+
+/// A derivation path with `'` for hardened components, which a device takes:
+/// `m/44h/60h/0h/0/0` becomes `m/44'/60'/0'/0/0`. Anything that does not
+/// parse as a path goes through as it is, for the device to judge.
+fn normalize_hd_path(path: &str) -> String {
+    path.parse::<KeyPath>()
+        .map_or_else(|_| path.to_string(), |path| path.to_string())
+}
+
+/// The Ledger wallet `--mnemonic <NAME|PATH>` names, if it names one: a file
+/// at that path, or a name under the data directory. A phrase never does.
+fn named_ledger_wallet(value: &str) -> Result<Option<LedgerWallet>> {
+    let value = value.trim();
+    if value.is_empty() || value.contains(char::is_whitespace) {
+        return Ok(None);
+    }
+    let path = Path::new(value);
+    if path.is_file() {
+        return LedgerWallet::read(path);
+    }
+    LedgerWallet::read(&paths::wallet_file(&paths::home()?, value))
+}
+
+/// One key of a Ledger wallet, as a signer: key `--mnemonic-index` (0, the
+/// funding key, by default), or the literal `--mnemonic-derivation-path`.
+/// The funding key is checked against the wallet's record, so the wrong
+/// device fails before anything is signed.
+async fn ledger_wallet_signer(args: &SignerArgs, wallet: &LedgerWallet) -> Result<AnySigner> {
+    if args.mnemonic_passphrase.is_some() {
+        bail!("--mnemonic-passphrase does not apply to a Ledger wallet: set it on the device");
+    }
+    let (hd_path, funding) = match &args.hd_path {
+        Some(path) => (normalize_hd_path(path), false),
+        None => (
+            wallet.path.key(args.mnemonic_index)?,
+            args.mnemonic_index == 0,
+        ),
+    };
+    let opts = WalletOpts {
+        raw: RawWalletOpts {
+            hd_path: Some(hd_path),
+            ..RawWalletOpts::default()
+        },
+        ledger: true,
+        ..WalletOpts::default()
+    };
+    let signer: AnySigner = Box::pin(opts.signer()).await?.into();
+    if funding {
+        wallet.check_device(signer.address())?;
+    }
+    Ok(signer)
 }
 
 /// A raw private key, with or without `0x`, as `cast` reads it.
@@ -269,17 +332,34 @@ pub fn check_new_password(password: &str) -> Result<Vec<String>> {
 /// The wallet `--mnemonic` / `--ledger` chose.
 #[derive(Debug, PartialEq, Eq)]
 pub enum KeyChoice {
-    /// A connected Ledger
-    Ledger,
+    /// A connected Ledger: at the first Ledger Live account for a bare
+    /// `--ledger`, or where a Ledger wallet file says
+    Ledger(Option<LedgerWallet>),
     /// A mnemonic wallet keystore file
     Phrase(PathBuf),
 }
 
-/// Which wallet the options name. `--ledger` wins, so a `mnemonic` left
-/// in the config file does not get in its way.
+impl KeyChoice {
+    /// The path of key 0, from which key `i` is `i` past the last number.
+    pub fn key_path(&self) -> KeyPath {
+        match self {
+            Self::Ledger(Some(wallet)) => wallet.path.clone(),
+            Self::Ledger(None) | Self::Phrase(_) => KeyPath::default(),
+        }
+    }
+}
+
+/// Which wallet the options name. A `--mnemonic` naming a Ledger wallet file
+/// is that Ledger wallet; otherwise `--ledger` wins, so a `mnemonic` left in
+/// the config file does not get in its way.
 pub fn key_choice(owner_keys: &OwnerKeysArgs, home: &Path) -> Result<KeyChoice> {
+    if let Some(wallet) = &owner_keys.mnemonic {
+        if let Some(ledger) = LedgerWallet::read(&paths::wallet_file(home, wallet))? {
+            return Ok(KeyChoice::Ledger(Some(ledger)));
+        }
+    }
     if owner_keys.ledger {
-        return Ok(KeyChoice::Ledger);
+        return Ok(KeyChoice::Ledger(None));
     }
     let wallet = owner_keys
         .mnemonic
@@ -314,8 +394,15 @@ fn load_phrase(path: &Path, password: &PasswordArgs, console: &Console) -> Resul
         .wrap_err_with(|| format!("cannot open mnemonic wallet {}", path.display()))
 }
 
-async fn connect_ledger() -> Result<CliKeys> {
-    Ok(CliKeys::Ledger(safe_rs::LedgerKeys::connect().await?))
+/// Connects to the Ledger, at the wallet's path if there is one, after
+/// checking its funding key is the wallet's.
+async fn connect_ledger(wallet: Option<&LedgerWallet>) -> Result<CliKeys> {
+    let Some(wallet) = wallet else {
+        return Ok(CliKeys::Ledger(LedgerKeys::connect().await?));
+    };
+    let keys = LedgerKeys::connect_at(wallet.path.clone()).await?;
+    wallet.check_device(keys.address(0).await?)?;
+    Ok(CliKeys::Ledger(keys))
 }
 
 /// The keys `--mnemonic` / `--ledger` chose. A phrase is decrypted (asking
@@ -326,7 +413,7 @@ pub async fn open_keys(
     console: &Console,
 ) -> Result<CliKeys> {
     match key_choice(owner_keys, home)? {
-        KeyChoice::Ledger => connect_ledger().await,
+        KeyChoice::Ledger(wallet) => connect_ledger(wallet.as_ref()).await,
         KeyChoice::Phrase(path) => Ok(CliKeys::Phrase(Box::new(load_phrase(
             &path,
             &owner_keys.password,
@@ -346,15 +433,23 @@ pub fn mnemonic_key_signer(
     console: &Console,
 ) -> Result<PrivateKeySigner> {
     let path = paths::wallet_file(home, wallet);
+    if LedgerWallet::read(&path)?.is_some() {
+        bail!(
+            "{} is a Ledger wallet: its keys never leave the device",
+            path.display()
+        );
+    }
     let wallet = load_phrase(&path, password, console)?;
     Ok(wallet.key_at(index)?)
 }
 
 /// The wallet's funding address, which identifies it: read from the keystore
-/// without its password, or asked of the Ledger.
+/// without its password or from the Ledger wallet file, or asked of the
+/// Ledger for a bare `--ledger`.
 pub async fn wallet_id(owner_keys: &OwnerKeysArgs, home: &Path) -> Result<Address> {
     match key_choice(owner_keys, home)? {
-        KeyChoice::Ledger => Ok(connect_ledger().await?.address(0).await?),
+        KeyChoice::Ledger(Some(wallet)) => Ok(wallet.address),
+        KeyChoice::Ledger(None) => Ok(connect_ledger(None).await?.address(0).await?),
         KeyChoice::Phrase(path) => keystore_address(&read_wallet_file(&path)?)?
             .ok_or_else(|| eyre!("{} has no address field", path.display())),
     }
@@ -398,7 +493,7 @@ mod tests {
             ledger: true,
             ..OwnerKeysArgs::default()
         };
-        assert_eq!(key_choice(&both, home).unwrap(), KeyChoice::Ledger);
+        assert_eq!(key_choice(&both, home).unwrap(), KeyChoice::Ledger(None));
         let phrase = OwnerKeysArgs {
             mnemonic: Some("treasury".to_string()),
             ledger: false,
@@ -409,6 +504,50 @@ mod tests {
             KeyChoice::Phrase(home.join("wallets/treasury.json"))
         );
         assert!(key_choice(&OwnerKeysArgs::default(), home).is_err());
+    }
+
+    #[test]
+    fn a_ledger_wallet_file_names_its_path() {
+        let home = tempfile::tempdir().unwrap();
+        let wallets = paths::wallets_dir(home.path());
+        std::fs::create_dir_all(&wallets).unwrap();
+        let path: KeyPath = "m/44h/60h/2h/0/0".parse().unwrap();
+        let wallet = LedgerWallet::new(path.clone(), Address::repeat_byte(0x33));
+        std::fs::write(wallets.join("cold.json"), wallet.to_json()).unwrap();
+
+        for ledger in [false, true] {
+            let args = OwnerKeysArgs {
+                mnemonic: Some("cold".to_string()),
+                ledger,
+                ..OwnerKeysArgs::default()
+            };
+            let choice = key_choice(&args, home.path()).unwrap();
+            let KeyChoice::Ledger(Some(read)) = &choice else {
+                panic!("{choice:?}");
+            };
+            assert_eq!(read.address, wallet.address);
+            assert_eq!(choice.key_path(), path);
+        }
+        assert_eq!(
+            KeyChoice::Ledger(None).key_path().to_string(),
+            "m/44'/60'/0'/0/0"
+        );
+        let refused = mnemonic_key_signer(
+            "cold",
+            1,
+            &PasswordArgs::default(),
+            home.path(),
+            &Console::default(),
+        )
+        .unwrap_err();
+        assert!(refused.to_string().contains("Ledger wallet"), "{refused}");
+    }
+
+    #[test]
+    fn hd_paths_take_h_for_hardened() {
+        assert_eq!(normalize_hd_path("m/44h/60H/1h/0/0"), "m/44'/60'/1'/0/0");
+        assert_eq!(normalize_hd_path("m/44'/60'/0'/0/3"), "m/44'/60'/0'/0/3");
+        assert_eq!(normalize_hd_path("garbage"), "garbage");
     }
 
     #[test]

@@ -2,6 +2,10 @@
 //! flags, aliases, value names, defaults and environment variables as
 //! `foundry_wallets::WalletOpts`, which `cast send` flattens. The gas payer
 //! takes the same set with a `--gas-payer-` prefix.
+//!
+//! Two additions: the `PRIVATE_KEY` environment variable on `--private-key`,
+//! and `--wallet` as another name for `--mnemonic`, which names a `safe`
+//! wallet (a phrase or a Ledger account).
 #![allow(clippy::unwrap_used, clippy::panic, reason = "test harness")]
 
 use clap::{Arg, Args, Command};
@@ -78,10 +82,15 @@ fn the_signer_flags_are_casts() {
             .find(|a| a.get_id().as_str() == id)
             .unwrap_or_else(|| panic!("cast's {id} is missing"));
         let mut expected = shape(theirs);
-        // The one addition: PRIVATE_KEY, which `safe` has always read.
+        // The additions: PRIVATE_KEY, which `safe` has always read, and
+        // --wallet for a `safe` wallet name.
         if id == "private_key" {
             assert_eq!(expected.env, None);
             expected.env = Some("PRIVATE_KEY".to_string());
+        }
+        if id == "mnemonic" {
+            expected.aliases.push("wallet".to_string());
+            expected.aliases.sort();
         }
         assert_eq!(shape(mine), expected, "{id}");
     }
@@ -110,7 +119,11 @@ fn the_gas_payer_flags_are_casts_prefixed() {
         let prefixed = |s: &str| format!("gas-payer-{s}");
         assert_eq!(got.long, expected.long.as_deref().map(prefixed), "{id}");
         assert_eq!(got.short, None, "{id}: short flags belong to the signer");
-        let aliases: Vec<String> = expected.aliases.iter().map(|a| prefixed(a)).collect();
+        let mut aliases: Vec<String> = expected.aliases.iter().map(|a| prefixed(a)).collect();
+        if theirs.get_id().as_str() == "mnemonic" {
+            aliases.push(prefixed("wallet"));
+            aliases.sort();
+        }
         assert_eq!(got.aliases, aliases, "{id}");
         assert_eq!(got.default, expected.default, "{id}");
         assert_eq!(got.takes_value, expected.takes_value, "{id}");
