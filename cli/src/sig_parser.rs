@@ -1,4 +1,4 @@
-use alloy::primitives::{keccak256, Address, Bytes, U256};
+use alloy::primitives::{keccak256, Address, Bytes, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use color_eyre::eyre::{eyre, Result};
 
@@ -25,14 +25,70 @@ pub fn encode_function_call(sig: &str, args: &[String]) -> Result<Bytes> {
     Ok(Bytes::from(calldata))
 }
 
-/// Computes the 4-byte function selector from signature
+/// Computes the 4-byte function selector from signature.
+///
+/// The selector is the hash of the canonical signature, so type aliases are
+/// expanded first: `transfer(address,uint)` hashes as
+/// `transfer(address,uint256)`.
 fn compute_selector(sig: &str) -> Result<[u8; 4]> {
-    // Normalize the signature (remove spaces)
-    let sig = sig.replace(' ', "");
-    let hash = keccak256(sig.as_bytes());
+    let canonical = canonical_signature(sig)?;
+    let hash = keccak256(canonical.as_bytes());
     let mut selector = [0u8; 4];
     selector.copy_from_slice(&hash[..4]);
     Ok(selector)
+}
+
+/// Rewrites a signature in the canonical form selectors are computed from:
+/// no spaces, `uint`/`int` written as `uint256`/`int256`, and `tuple(..)`
+/// written as `(..)`, at any depth of arrays and tuples.
+fn canonical_signature(sig: &str) -> Result<String> {
+    let sig = sig.trim();
+    let open_paren = sig
+        .find('(')
+        .ok_or_else(|| eyre!("Invalid signature: missing '('"))?;
+
+    let mut out = sig[..open_paren].replace(' ', "");
+    out.push('(');
+    for (i, ty) in parse_param_types(sig)?.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        write_canonical_type(&parse_type(ty)?, &mut out);
+    }
+    out.push(')');
+    Ok(out)
+}
+
+/// Appends the canonical name of `ty` to `out`.
+///
+/// Not `DynSolType::sol_type_name`, which writes a one-element tuple with a
+/// trailing comma (`(uint256,)`) and so would hash the wrong string.
+fn write_canonical_type(ty: &DynSolType, out: &mut String) {
+    match ty {
+        DynSolType::Tuple(types) => {
+            out.push('(');
+            for (i, inner) in types.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical_type(inner, out);
+            }
+            out.push(')');
+        }
+        DynSolType::Array(inner) => {
+            write_canonical_type(inner, out);
+            out.push_str("[]");
+        }
+        DynSolType::FixedArray(inner, len) => {
+            write_canonical_type(inner, out);
+            out.push('[');
+            out.push_str(&len.to_string());
+            out.push(']');
+        }
+        // Leaf types: the parsed type always names its size, so `uint` is
+        // already `uint256` here.
+        leaf => out.push_str(&leaf.sol_type_name()),
+    }
 }
 
 /// Extracts parameter types from a function signature
@@ -111,10 +167,13 @@ fn parse_args(types: &[String], args: &[String]) -> Result<Vec<DynSolValue>> {
 
 /// Parses a single argument
 fn parse_arg(ty: &str, arg: &str) -> Result<DynSolValue> {
-    let sol_type: DynSolType = ty
-        .parse()
-        .map_err(|e| eyre!("Invalid type '{}': {}", ty, e))?;
-    parse_value(&sol_type, arg)
+    parse_value(&parse_type(ty)?, arg)
+}
+
+/// Parses one parameter type, e.g. "uint256" or "(address,uint)[]"
+fn parse_type(ty: &str) -> Result<DynSolType> {
+    ty.parse()
+        .map_err(|e| eyre!("Invalid type '{}': {}", ty, e))
 }
 
 /// Parses a value according to its type
@@ -140,6 +199,9 @@ fn parse_value(sol_type: &DynSolType, arg: &str) -> Result<DynSolValue> {
         }
         DynSolType::Uint(bits) => {
             let value = parse_uint(arg)?;
+            if *bits < 256 && value >> *bits != U256::ZERO {
+                return Err(eyre!("Value {} out of range for uint{}", arg.trim(), bits));
+            }
             Ok(DynSolValue::Uint(value, *bits))
         }
         DynSolType::Bytes => {
@@ -203,26 +265,30 @@ fn parse_uint(s: &str) -> Result<U256> {
     }
 }
 
-/// Parses a signed int value
-fn parse_int(s: &str, bits: usize) -> Result<alloy::primitives::I256> {
+/// Parses a signed int value, checked against the range of `int{bits}`
+fn parse_int(s: &str, bits: usize) -> Result<I256> {
     let s = s.trim();
-    let negative = s.starts_with('-');
-    let abs_str = if negative { &s[1..] } else { s };
+    let (negative, abs_str) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
 
     let abs_value = parse_uint(abs_str)?;
 
-    if negative {
-        // Check that the absolute value fits in the signed range
-        let max_neg = U256::from(1u64) << (bits - 1);
-        if abs_value > max_neg {
-            return Err(eyre!("Value out of range for int{}", bits));
-        }
-        Ok(-alloy::primitives::I256::try_from(abs_value)
-            .map_err(|e| eyre!("Int conversion error: {}", e))?)
-    } else {
-        alloy::primitives::I256::try_from(abs_value)
-            .map_err(|e| eyre!("Int conversion error: {}", e))
+    // int{bits} holds -2^(bits-1) ..= 2^(bits-1) - 1.
+    let limit = U256::from(1u64) << (bits - 1);
+    if (negative && abs_value > limit) || (!negative && abs_value >= limit) {
+        return Err(eyre!("Value {} out of range for int{}", s, bits));
     }
+
+    // Two's complement. This also covers int256's minimum, whose magnitude
+    // (2^255) has no positive I256 to negate.
+    let raw = if negative {
+        abs_value.wrapping_neg()
+    } else {
+        abs_value
+    };
+    Ok(I256::from_raw(raw))
 }
 
 /// Parses bytes (hex string)
@@ -751,5 +817,172 @@ mod tests {
         let types = parse_param_types("foo((address,uint256)[])").unwrap();
         assert_eq!(types.len(), 1);
         assert_eq!(types[0], "(address,uint256)[]");
+    }
+
+    // =========================================================================
+    // Canonical Selector Tests
+    // =========================================================================
+
+    /// The first four bytes of keccak256 of a canonical signature string.
+    fn selector_of(canonical: &str) -> [u8; 4] {
+        let hash = keccak256(canonical.as_bytes());
+        [hash[0], hash[1], hash[2], hash[3]]
+    }
+
+    #[test]
+    fn test_selector_uint_alias() {
+        let selector = compute_selector("transfer(address,uint)").unwrap();
+        assert_eq!(selector, [0xa9, 0x05, 0x9c, 0xbb]);
+    }
+
+    #[test]
+    fn test_selector_int_alias() {
+        let selector = compute_selector("f(int)").unwrap();
+        assert_eq!(selector, [0x1c, 0x00, 0x8d, 0xf9]);
+        assert_eq!(selector, selector_of("f(int256)"));
+    }
+
+    #[test]
+    fn test_selector_aliases_in_arrays_and_tuples() {
+        let cases = [
+            ("f(uint[])", "f(uint256[])"),
+            ("f(int[3][])", "f(int256[3][])"),
+            ("f((uint,int)[2])", "f((uint256,int256)[2])"),
+            (
+                "f((address,(uint,bool[]))[])",
+                "f((address,(uint256,bool[]))[])",
+            ),
+            ("f(tuple(uint,address))", "f((uint256,address))"),
+        ];
+        for (sig, canonical) in cases {
+            assert_eq!(canonical_signature(sig).unwrap(), canonical, "{sig}");
+            assert_eq!(
+                compute_selector(sig).unwrap(),
+                selector_of(canonical),
+                "{sig}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_selector_single_element_tuple() {
+        // No trailing comma, unlike `DynSolType::sol_type_name`.
+        assert_eq!(canonical_signature("f((uint256))").unwrap(), "f((uint256))");
+        assert_eq!(
+            compute_selector("f((uint))").unwrap(),
+            selector_of("f((uint256))")
+        );
+    }
+
+    #[test]
+    fn test_selector_ignores_spaces() {
+        let canonical = [0xa9, 0x05, 0x9c, 0xbb];
+        assert_eq!(
+            compute_selector("transfer(address, uint256)").unwrap(),
+            canonical
+        );
+        assert_eq!(
+            compute_selector(" transfer( address , uint ) ").unwrap(),
+            canonical
+        );
+    }
+
+    #[test]
+    fn test_selector_canonical_input_unchanged() {
+        for sig in [
+            "totalSupply()",
+            "transfer(address,uint256)",
+            "f(uint8,int128,bytes32,bytes,string,bool)",
+            "f((address,uint256)[],uint256[2][])",
+        ] {
+            assert_eq!(canonical_signature(sig).unwrap(), sig);
+        }
+    }
+
+    #[test]
+    fn test_encode_alias_matches_canonical_calldata() {
+        let args = [
+            "0x1234567890123456789012345678901234567890".to_string(),
+            "1000".to_string(),
+        ];
+        assert_eq!(
+            encode_function_call("transfer(address,uint)", &args).unwrap(),
+            encode_function_call("transfer(address,uint256)", &args).unwrap()
+        );
+
+        let (_, alias) =
+            parse_call_spec("0x1234567890123456789012345678901234567890:f(int):-5").unwrap();
+        let (_, canonical) =
+            parse_call_spec("0x1234567890123456789012345678901234567890:f(int256):-5").unwrap();
+        assert_eq!(alias, canonical);
+    }
+
+    // =========================================================================
+    // Range Check Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_value_uint_range() {
+        let uint8: DynSolType = "uint8".parse().unwrap();
+        assert_eq!(
+            parse_value(&uint8, "255").unwrap(),
+            DynSolValue::Uint(U256::from(255), 8)
+        );
+        assert!(parse_value(&uint8, "256").is_err());
+        assert!(parse_value(&uint8, "0x100").is_err());
+
+        let uint160: DynSolType = "uint160".parse().unwrap();
+        let max = (U256::from(1u64) << 160usize) - U256::from(1u64);
+        assert!(parse_value(&uint160, &max.to_string()).is_ok());
+        assert!(parse_value(&uint160, &(max + U256::from(1u64)).to_string()).is_err());
+
+        let uint256: DynSolType = "uint256".parse().unwrap();
+        assert_eq!(
+            parse_value(&uint256, &U256::MAX.to_string()).unwrap(),
+            DynSolValue::Uint(U256::MAX, 256)
+        );
+    }
+
+    #[test]
+    fn test_parse_value_int_range() {
+        let int8: DynSolType = "int8".parse().unwrap();
+        for (arg, expected) in [("127", 127i64), ("-128", -128), ("-1", -1), ("-0", 0)] {
+            assert_eq!(
+                parse_value(&int8, arg).unwrap(),
+                DynSolValue::Int(I256::try_from(expected).unwrap(), 8),
+                "{arg}"
+            );
+        }
+        assert!(parse_value(&int8, "128").is_err());
+        assert!(parse_value(&int8, "-129").is_err());
+    }
+
+    #[test]
+    fn test_parse_value_int256_bounds() {
+        let int256: DynSolType = "int256".parse().unwrap();
+        assert_eq!(
+            parse_value(&int256, &I256::MIN.to_string()).unwrap(),
+            DynSolValue::Int(I256::MIN, 256)
+        );
+        assert_eq!(
+            parse_value(&int256, &I256::MAX.to_string()).unwrap(),
+            DynSolValue::Int(I256::MAX, 256)
+        );
+        // 2^255: one past int256's maximum.
+        let too_big = (U256::from(1u64) << 255usize).to_string();
+        assert!(parse_value(&int256, &too_big).is_err());
+    }
+
+    #[test]
+    fn test_parse_value_range_checked_in_arrays() {
+        let sol_type: DynSolType = "uint8[]".parse().unwrap();
+        assert!(parse_value(&sol_type, "[1,255]").is_ok());
+        assert!(parse_value(&sol_type, "[1,256]").is_err());
+    }
+
+    #[test]
+    fn test_encode_function_call_out_of_range() {
+        let result = encode_function_call("f(uint8)", &["256".to_string()]);
+        assert!(result.is_err());
     }
 }
