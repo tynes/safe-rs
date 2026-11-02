@@ -64,10 +64,7 @@ impl ParentHeader {
         let block = provider
             .get_block(block)
             .await
-            .map_err(|e| Error::Fetch {
-                what: "block header",
-                reason: e.to_string(),
-            })?
+            .map_err(Error::fetch("block header"))?
             .ok_or_else(|| Error::Fetch {
                 what: "block header",
                 reason: format!("block {block} not found"),

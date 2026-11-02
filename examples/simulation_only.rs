@@ -10,25 +10,49 @@
 //! This example demonstrates how to simulate Safe transactions without executing them.
 //! Useful for testing, gas estimation, and validating transaction parameters.
 //!
+//! `simulate()` runs the real `execTransaction` on a local fork, signed by the
+//! client's key, so that key must belong to one of the Safe's owners (with a
+//! threshold above 1, the other owners' approvals are simulated). Nothing is
+//! broadcast. A simulation that reverts still returns `Ok`: check
+//! `SimulationResult::success`.
+//!
 //! # Usage
 //!
 //! Set the following environment variables:
 //! - `RPC_URL`: Ethereum RPC endpoint
-//! - `SAFE_ADDRESS`: Address of the Safe contract (any Safe, doesn't need to be yours)
+//! - `PRIVATE_KEY`: Private key of one of the Safe's owners (hex)
+//! - `SAFE_ADDRESS`: Address of the Safe contract
 //! - `TOKEN_ADDRESS`: Address of an ERC20 token the Safe holds
 
 use alloy::network::AnyNetwork;
 use alloy::primitives::{address, Address, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
-use safe_rs::{Account, CallBuilder, ChainConfig, Safe, IERC20};
+use safe_rs::{Account, CallBuilder, ChainConfig, Safe, SimulationResult, IERC20};
 use url::Url;
+
+/// Prints whether `result` succeeded, with its gas and logs or revert reason.
+fn report(label: &str, result: &SimulationResult) {
+    if result.success {
+        println!("  ✓ {label} simulation succeeded");
+        println!("    Gas used: {}", result.gas_used);
+        println!("    Logs: {}", result.logs.len());
+    } else {
+        println!(
+            "  ✗ {label} simulation reverted: {}",
+            result.revert_reason.as_deref().unwrap_or("unknown reason")
+        );
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration from environment
     let rpc_url: Url = std::env::var("RPC_URL")
         .expect("RPC_URL required")
+        .parse()?;
+    let signer: PrivateKeySigner = std::env::var("PRIVATE_KEY")
+        .expect("PRIVATE_KEY required")
         .parse()?;
     let safe_address: Address = std::env::var("SAFE_ADDRESS")
         .expect("SAFE_ADDRESS required")
@@ -42,12 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .network::<AnyNetwork>()
         .connect_http(rpc_url);
 
-    // For simulation-only, we can use any signer (even a random one)
-    // The simulation doesn't require actual ownership
-    let signer = PrivateKeySigner::random();
-
     println!("Simulating transactions for Safe at {}", safe_address);
-    println!("Using dummy signer: {}", signer.address());
+    println!("Signing as owner: {}", signer.address());
 
     // Get chain ID and create config
     let chain_id = provider.get_chain_id().await?;
@@ -68,7 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Threshold: {}", threshold);
     println!("  Owners: {:?}", owners);
 
-    // Simulate a transfer (will work even if we're not an owner)
+    if !owners.contains(&safe.signer_address()) {
+        return Err(format!("{} is not an owner of the Safe", safe.signer_address()).into());
+    }
+
+    // Simulate a transfer
     let recipient = address!("0xdead000000000000000000000000000000000000");
     let amount = U256::from(1_000_000); // 1 token with 6 decimals
 
@@ -90,10 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
     {
         Ok(simulated) => {
-            println!("  ✓ Simulation successful!");
             let sim_result = simulated.simulation_result().unwrap();
-            println!("    Gas used: {}", sim_result.gas_used);
-            println!("    Logs: {}", sim_result.logs.len());
+            report("Transfer", sim_result);
 
             // We can inspect logs
             for (i, log) in sim_result.logs.iter().enumerate() {
@@ -130,12 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .simulate()
         .await
     {
-        Ok(simulated) => {
-            println!("  ✓ Batch simulation successful!");
-            let sim_result = simulated.simulation_result().unwrap();
-            println!("    Total gas used: {}", sim_result.gas_used);
-            println!("    Logs: {}", sim_result.logs.len());
-        }
+        Ok(simulated) => report("Batch", simulated.simulation_result().unwrap()),
         Err(e) => {
             println!("  ✗ Batch simulation failed: {}", e);
         }
@@ -161,13 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .simulate()
         .await
     {
-        Ok(simulated) => {
-            println!("  ✓ Raw calldata simulation successful!");
-            println!(
-                "    Gas used: {}",
-                simulated.simulation_result().unwrap().gas_used
-            );
-        }
+        Ok(simulated) => report("Raw calldata", simulated.simulation_result().unwrap()),
         Err(e) => {
             println!("  ✗ Raw calldata simulation failed: {}", e);
         }
@@ -186,15 +197,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
     {
         Ok(simulated) => {
-            println!("  ✓ ETH transfer simulation successful!");
-            println!(
-                "    Gas used: {}",
-                simulated.simulation_result().unwrap().gas_used
-            );
+            let sim_result = simulated.simulation_result().unwrap();
+            report("ETH transfer", sim_result);
+            if !sim_result.success {
+                println!("    (This is expected if the Safe doesn't have 1 ETH)");
+            }
         }
         Err(e) => {
             println!("  ✗ ETH transfer simulation failed: {}", e);
-            println!("    (This is expected if Safe doesn't have 1 ETH)");
         }
     }
 

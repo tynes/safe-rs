@@ -21,14 +21,16 @@
 //!   meaning `simulate()` on the builders, `ForkSession` and the
 //!   `simulate_exec*` functions. With `default-features = false` the builders
 //!   still execute, with gas estimated over RPC, and revm is not compiled.
+//! - `keystore`: decrypting password-encrypted (V3) keystores with
+//!   `keystore::decrypt_keystore`.
 //! - `hd-wallet`: encrypted mnemonic keystores, HD keys and
-//!   `rotation::RotatingSafe` (implies `simulation`).
+//!   `rotation::RotatingSafe` (implies `simulation` and `keystore`).
 //! - `ledger`: owner keys on a Ledger device (implies `hd-wallet`).
 //!
 //! ## Quick Start
 //!
 //! ```rust,ignore
-//! use safe_rs::{Safe, contracts::IERC20};
+//! use safe_rs::{Account, CallBuilder, Safe, contracts::IERC20};
 //! use alloy::primitives::{address, U256};
 //!
 //! // Connect to a Safe

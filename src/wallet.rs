@@ -15,7 +15,7 @@
 //!
 //! // Connect to an EOA wallet
 //! let eoa_wallet = WalletBuilder::new(provider, signer)
-//!     .connect_eoa()
+//!     .connect_eoa(rpc_url)
 //!     .await?;
 //!
 //! // Deploy a new Safe and connect to it

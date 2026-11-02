@@ -42,6 +42,55 @@ pub struct ExecSimulation {
     pub post: Option<ForkSession>,
 }
 
+#[cfg(feature = "simulation")]
+impl ExecSimulation {
+    /// The gas measurement at `gas_limit` failed, so there was no strict run.
+    fn failed_measure(result: SimulationResult, payer_nonce: u64, gas_limit: u64) -> Self {
+        Self {
+            result,
+            payer_nonce,
+            gas_limit,
+            post: None,
+        }
+    }
+}
+
+/// Measures the gas `outer` spends before refunds on `scratch` at `max`, the
+/// largest limit the session accepts, without requiring the sender to afford
+/// it. The limit is that plus 20%, capped at `max`; a failed measurement is
+/// returned as `Err` for the caller to report.
+#[cfg(feature = "simulation")]
+pub(crate) fn measure_gas_limit(
+    scratch: &mut ForkSession,
+    max: u64,
+    outer: impl Fn(u64) -> OuterTxParams,
+) -> Result<std::result::Result<u64, SimulationResult>> {
+    let measured = scratch.transact(SimTx::from_outer(&outer(max), TxChecks::MEASURE))?;
+    if !measured.success {
+        return Ok(Err(measured));
+    }
+    Ok(Ok((measured.gas_spent + measured.gas_spent / 5).min(max)))
+}
+
+/// Commits `owner`'s `ISafe::approveHash(safe_tx_hash)` on `safe` to `session`,
+/// with relaxed checks, so simulations can count `owner` as approving.
+#[cfg(feature = "simulation")]
+pub(crate) fn commit_approve_hash(
+    session: &mut ForkSession,
+    safe: Address,
+    safe_tx_hash: B256,
+    owner: Address,
+) -> Result<SimulationResult> {
+    let gas = session.max_tx_gas().min(READ_CALL_GAS);
+    session.transact_commit(SimTx::relaxed(
+        owner,
+        safe,
+        U256::ZERO,
+        SignedSafeTx::approve_hash_calldata(safe_tx_hash),
+        gas,
+    ))
+}
+
 /// Simulates the exact outer `execTransaction` for `signed`, sent by `payer`,
 /// in `session`'s block with all validity checks (nonce, fees, balance).
 ///
@@ -69,16 +118,10 @@ pub fn simulate_exec(
         gas
     } else {
         let max = session.max_tx_gas();
-        let measured = scratch.transact(SimTx::from_outer(&outer(max), TxChecks::MEASURE))?;
-        if !measured.success {
-            return Ok(ExecSimulation {
-                result: measured,
-                payer_nonce,
-                gas_limit: max,
-                post: None,
-            });
+        match measure_gas_limit(&mut scratch, max, outer)? {
+            Ok(gas) => gas,
+            Err(result) => return Ok(ExecSimulation::failed_measure(result, payer_nonce, max)),
         }
-        (measured.gas_spent + measured.gas_spent / 5).min(max)
     };
 
     let mut post = session.checkpoint();
@@ -114,32 +157,23 @@ pub fn simulate_exec_with_threshold(
     gas_limit: Option<u64>,
 ) -> Result<ExecSimulation> {
     if signed.signatures.len() >= threshold {
-        let mut trimmed = signed.clone();
-        trimmed.signatures = signed
-            .signatures
-            .iter()
-            .take(threshold)
-            .map(|(&k, v)| (k, v.clone()))
-            .collect();
+        let trimmed = signed.first_signatures(threshold);
         return simulate_exec(session, &trimmed, payer, fees, gas_limit);
     }
 
     let mut pre_approved = session.checkpoint();
-    let approve_calldata = SignedSafeTx::approve_hash_calldata(signed.prepared.safe_tx_hash);
-    let gas = pre_approved.max_tx_gas().min(READ_CALL_GAS);
     let mut needed = threshold.saturating_sub(signed.signatures.len());
     for &owner in owners {
         if needed == 0 {
             break;
         }
         if !signed.signatures.contains_key(&owner) {
-            pre_approved.transact_commit(SimTx::relaxed(
-                owner,
+            commit_approve_hash(
+                &mut pre_approved,
                 signed.prepared.safe,
-                U256::ZERO,
-                approve_calldata.clone(),
-                gas,
-            ))?;
+                signed.prepared.safe_tx_hash,
+                owner,
+            )?;
             needed -= 1;
         }
     }
@@ -176,16 +210,10 @@ pub fn simulate_approve_hash(
         gas
     } else {
         let max = session.max_tx_gas();
-        let measured = scratch.transact(SimTx::from_outer(&outer(max), TxChecks::MEASURE))?;
-        if !measured.success {
-            return Ok(ExecSimulation {
-                result: measured,
-                payer_nonce,
-                gas_limit: max,
-                post: None,
-            });
+        match measure_gas_limit(&mut scratch, max, outer)? {
+            Ok(gas) => gas,
+            Err(result) => return Ok(ExecSimulation::failed_measure(result, payer_nonce, max)),
         }
-        (measured.gas_spent + measured.gas_spent / 5).min(max)
     };
 
     let mut post = session.checkpoint();
